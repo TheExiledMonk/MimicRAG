@@ -210,6 +210,20 @@ bool Dataset::AppendBatch(const std::vector<FieldBatch>& batches) {
     return true;
 }
 
+bool Dataset::AddRecoveredSegment(Segment segment) {
+    if (segment.Fields().size() != fields_.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < fields_.size(); ++i) {
+        if (segment.Fields()[i].Type() != fields_[i].Type()) {
+            return false;
+        }
+    }
+    rows_ += segment.RowCount();
+    segments_.push_back(std::move(segment));
+    return true;
+}
+
 uint64_t Dataset::SchemaFingerprint() const {
     uint64_t hash = HashInit();
     const size_t field_count = fields_.size();

@@ -1,6 +1,9 @@
 import argparse
 import random
+import subprocess
 import time
+from pathlib import Path
+import sys
 
 from pcdb import Dataset
 
@@ -8,7 +11,7 @@ from pcdb import Dataset
 _LOCK_MODES = ("append-only", "update-only", "full-crud")
 
 
-def run_bench(
+def run_local_bench(
     rows: int,
     seed: int,
     batch_size: int,
@@ -16,7 +19,7 @@ def run_bench(
     append_mode: str,
     debug: bool,
     lock_mode: str,
-) -> None:
+) -> dict[str, float | None]:
     rng = random.Random(seed)
     users = Dataset(
         name="users",
@@ -101,6 +104,141 @@ def run_bench(
             print(f"stats={stats}")
     else:
         print(f"append_error={append_error}")
+    return {
+        "append_seconds": append_seconds,
+        "append_rows_per_sec": None if append_error is not None else rows / append_seconds,
+        "query_seconds": None if append_error is not None else query_seconds,
+    }
+
+
+def run_network_bench(
+    rows: int,
+    seed: int,
+    batch_size: int,
+    append_mode: str,
+    host: str,
+    port: int,
+    server_bin: str | None,
+) -> dict[str, float]:
+    repo_root = Path(__file__).resolve().parents[1]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    from client.pcdb_client import PCDBClient
+
+    rng = random.Random(seed)
+    server_proc = None
+    if server_bin is not None:
+        resolved = resolve_server_bin(server_bin, repo_root)
+        server_proc = subprocess.Popen([resolved, str(port)])
+        time.sleep(0.2)
+    try:
+        client = PCDBClient(host=host, port=port)
+        client.ping()
+    except Exception:
+        if server_proc is not None:
+            server_proc.terminate()
+            try:
+                server_proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                server_proc.kill()
+        raise
+    fields = [
+        ("age", "int32"),
+        ("country", "int32"),
+        ("income", "float64"),
+    ]
+    client.create_dataset("users", fields)
+
+    start = time.perf_counter()
+    if append_mode == "row":
+        for _ in range(rows):
+            age = rng.randint(18, 90)
+            country = rng.randint(1, 200)
+            income = float(rng.randint(10_000, 150_000))
+            if rng.random() < 0.05:
+                income = None
+            client.append_batch(
+                "users",
+                fields,
+                {
+                    "age": [age],
+                    "country": [country],
+                    "income": [income],
+                },
+            )
+    else:
+        remaining = rows
+        while remaining > 0:
+            current = batch_size if remaining > batch_size else remaining
+            ages = []
+            countries = []
+            incomes = []
+            for _ in range(current):
+                ages.append(rng.randint(18, 90))
+                countries.append(rng.randint(1, 200))
+                income = float(rng.randint(10_000, 150_000))
+                if rng.random() < 0.05:
+                    income = None
+                incomes.append(income)
+            client.append_batch(
+                "users",
+                fields,
+                {
+                    "age": ages,
+                    "country": countries,
+                    "income": incomes,
+                },
+            )
+            remaining -= current
+    append_end = time.perf_counter()
+
+    result = client.query_agg("users", field_index=2)
+    query_end = time.perf_counter()
+
+    client.close()
+    if server_proc is not None:
+        server_proc.terminate()
+        try:
+            server_proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            server_proc.kill()
+
+    append_seconds = append_end - start
+    query_seconds = query_end - append_end
+
+    print("transport=network")
+    print(f"host={host}")
+    print(f"port={port}")
+    print(f"append_mode={append_mode}")
+    print(f"rows={rows}")
+    print(f"append_seconds={append_seconds:.6f}")
+    print(f"append_rows_per_sec={rows / append_seconds:.2f}")
+    print("query=full_scan_agg(field=income)")
+    print(f"query_seconds={query_seconds:.6f}")
+    print(f"result={result}")
+    return {
+        "append_seconds": append_seconds,
+        "append_rows_per_sec": rows / append_seconds,
+        "query_seconds": query_seconds,
+    }
+
+
+def resolve_server_bin(server_bin: str, repo_root: Path) -> str:
+    candidate = Path(server_bin)
+    if candidate.exists():
+        return str(candidate)
+    fallback = [
+        repo_root / "build" / "pcdb_server",
+        repo_root / "build" / "server" / "pcdb_server",
+        repo_root / "pcdb_server",
+    ]
+    for path in fallback:
+        if path.exists():
+            return str(path)
+    raise FileNotFoundError(
+        f"server binary not found at '{server_bin}'. "
+        "Build the server or pass the correct path via --server-bin."
+    )
 
 
 def main() -> None:
@@ -110,23 +248,53 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=10_000)
     parser.add_argument("--backend", choices=["cpp", "py"], default="cpp")
     parser.add_argument("--append-mode", choices=["batch", "row"], default="batch")
+    parser.add_argument("--transport", choices=["local", "network", "both"], default="local")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=9000)
+    parser.add_argument("--server-bin", default=None)
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--lock-mode", choices=_LOCK_MODES, default="append-only")
     parser.add_argument("--all-lock-modes", action="store_true")
     args = parser.parse_args()
     modes = _LOCK_MODES if args.all_lock_modes else (args.lock_mode,)
-    for lock_mode in modes:
-        run_bench(
+    local_results: dict[str, float | None] | None = None
+    network_results: dict[str, float] | None = None
+    if args.transport in ("local", "both"):
+        for lock_mode in modes:
+            print("transport=local")
+            local_results = run_local_bench(
+                args.rows,
+                args.seed,
+                args.batch_size,
+                args.backend,
+                args.append_mode,
+                args.debug,
+                lock_mode,
+            )
+            if args.all_lock_modes:
+                print("---")
+        if args.transport == "both":
+            print("===")
+    if args.transport in ("network", "both"):
+        network_results = run_network_bench(
             args.rows,
             args.seed,
             args.batch_size,
-            args.backend,
             args.append_mode,
-            args.debug,
-            lock_mode,
+            args.host,
+            args.port,
+            args.server_bin,
         )
-        if args.all_lock_modes:
-            print("---")
+    if args.transport == "both" and local_results and network_results:
+        print("comparison=local_vs_network")
+        print(f"local_append_seconds={local_results['append_seconds']:.6f}")
+        if local_results["append_rows_per_sec"] is not None:
+            print(f"local_append_rows_per_sec={local_results['append_rows_per_sec']:.2f}")
+        if local_results["query_seconds"] is not None:
+            print(f"local_query_seconds={local_results['query_seconds']:.6f}")
+        print(f"network_append_seconds={network_results['append_seconds']:.6f}")
+        print(f"network_append_rows_per_sec={network_results['append_rows_per_sec']:.2f}")
+        print(f"network_query_seconds={network_results['query_seconds']:.6f}")
 
 
 if __name__ == "__main__":

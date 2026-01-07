@@ -157,37 +157,60 @@ Dependencies: M2
 - [x] Stored logic (targets: `docs/design.md`)
 
 ## Golden rule
-- [ ] Every optimization must reduce rows scanned or bytes touched per row (targets: `docs/standards.md`)
+- [x] Every optimization must reduce rows scanned or bytes touched per row (targets: `docs/standards.md`)
 
 ## Post‑v0 optimization phase (v0.1–v0.3)
 ### Pruning diagnostics
-- [ ] Add segment scan/prune counters (targets: `engine/include/pcdb/metrics.h`, `engine/src/metrics.cpp`)
-- [ ] Expose pruning stats via Python API debug flag (targets: `api/pcdb/query.py`, `api/pcdb/dataset.py`)
-- [ ] Add pruning diagnostics tests (targets: `tests/test_python_api.py`)
+- [x] Add segment scan/prune counters (targets: `engine/include/pcdb/metrics.h`, `engine/src/metrics.cpp`)
+- [x] Expose pruning stats via Python API debug flag (targets: `api/pcdb/query.py`, `api/pcdb/dataset.py`)
+- [x] Add pruning diagnostics tests (targets: `tests/test_python_api.py`)
 
 ### Aggregate kernel specialization
-- [ ] Add specialized aggregate kernels (count/sum/minmax/mixed) (targets: `engine/src/aggregate.cpp`, `engine/src/simd_aggregate.cpp`)
-- [ ] Add tests for aggregate specialization equivalence (targets: `tests/test_queries.cpp`)
+- [x] Add specialized aggregate kernels (count/sum/minmax/mixed) (targets: `engine/src/aggregate.cpp`, `engine/src/simd_aggregate.cpp`)
+- [x] Add tests for aggregate specialization equivalence (targets: `tests/test_queries.cpp`)
 
 ### Mask handling optimizations
-- [ ] Add mask elision path for single‑consumer aggregates (targets: `engine/src/aggregate.cpp`, `engine/src/scan.cpp`)
-- [ ] Add bit‑packed mask representation for sparse matches (targets: `engine/include/pcdb/mask.h`, `engine/src/mask.cpp`)
-- [ ] Add mask compression tests (targets: `tests/test_mask.cpp`)
+- [x] Add mask elision path for single‑consumer aggregates (targets: `engine/src/aggregate.cpp`, `engine/src/scan.cpp`)
+- [x] Add bit‑packed mask representation for sparse matches (targets: `engine/include/pcdb/mask.h`, `engine/src/mask.cpp`)
+- [x] Add mask compression tests (targets: `tests/test_mask.cpp`)
 
 ### Segment pruning enhancements
-- [ ] Evaluate predicates against segment metadata before scan (targets: `engine/src/scan.cpp`)
-- [ ] Add pruning behavior tests (targets: `tests/test_segment_io.cpp`)
+- [x] Evaluate predicates against segment metadata before scan (targets: `engine/src/scan.cpp`)
+- [x] Add pruning behavior tests (targets: `tests/test_segment_io.cpp`)
 
 ### Validation and measurement
-- [ ] Record segments_total/segments_scanned/segments_pruned (targets: `engine/include/pcdb/metrics.h`, `engine/src/metrics.cpp`)
-- [ ] Add bytes/sec estimate in benchmarks (targets: `benchmarks/bench_scan.cpp`)
+- [x] Record segments_total/segments_scanned/segments_pruned (targets: `engine/include/pcdb/metrics.h`, `engine/src/metrics.cpp`)
+- [x] Add bytes/sec estimate in benchmarks (targets: `benchmarks/bench_scan.cpp`)
+
+## Networking (future)
+- [x] Define binary protocol request/response framing (targets: `docs/design.md`)
+- [x] Implement server transport and request dispatcher (targets: `server/pcdb_server.cpp`)
+- [x] Add dataset selection and query routing (targets: `server/pcdb_server.cpp`)
+- [x] Stream query results back to client (targets: `server/pcdb_server.cpp`)
+- [x] Add minimal client for round‑trip tests (targets: `client/pcdb_client.py`, `tests/test_network.py`)
+- [x] Ensure server maps 1:1 to core operations (targets: `docs/design.md`)
+- [x] Add CMake target for server binary (targets: `server/CMakeLists.txt`, `CMakeLists.txt`)
+
+## Server lifecycle & recovery (future)
+- [x] Add service lifecycle docs (startup/shutdown/config) (targets: `docs/design.md`)
+- [x] Add graceful shutdown handling (signals, active client drain) (targets: `server/pcdb_server.cpp`)
+- [x] Add config file support for bind/storage/flush settings (targets: `server/pcdb_server.cpp`, `docs/design.md`)
+- [x] Add flush-on-shutdown option for active segments (targets: `server/pcdb_server.cpp`, `engine/src/dataset.cpp`)
+- [x] Add dataset recovery from disk segments (targets: `server/pcdb_server.cpp`, `engine/src/segment_io.cpp`)
+- [x] Add server state health/metrics endpoint or request (targets: `server/pcdb_server.cpp`)
+- [x] Add restart safety test harness (targets: `tests/test_network.py`)
+
+## Server housekeeping (future)
+- [x] Add idle‑only housekeeping loop (targets: `server/pcdb_server.cpp`)
+- [x] Add recovery/maintenance scheduling hooks (targets: `server/pcdb_server.cpp`)
+- [x] Add remote sync hook placeholders (post‑networking) (targets: `docs/design.md`)
 
 ## Post‑networking (future, low priority)
-- [ ] Add idle‑only housekeeping thread for recovery/maintenance and remote sync (targets: `docs/design.md`)
+- [x] Add idle‑only housekeeping thread for recovery/maintenance and remote sync (targets: `docs/design.md`)
 
 ## API‑layer extensions (post‑v0)
-- [ ] API‑only joins (targets: `api/pcdb/query.py`, `docs/design.md`)
-- [ ] API‑only SQL surface (targets: `api/pcdb/sql.py`, `docs/design.md`)
+- [x] API‑only joins (targets: `api/pcdb/query.py`, `docs/design.md`)
+- [x] API‑only SQL surface (targets: `api/pcdb/sql.py`, `docs/design.md`)
 
 ## Locking / mutation modes (future)
 - [x] Define dataset lock modes: append‑only, update‑only, full CRUD (targets: `docs/design.md`)

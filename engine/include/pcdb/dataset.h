@@ -48,6 +48,7 @@ public:
     const std::vector<Segment>& Segments() const;
     bool Append(const std::vector<FieldValue>& values);
     bool AppendBatch(const std::vector<FieldBatch>& batches);
+    bool AddRecoveredSegment(Segment segment);
     uint64_t SchemaFingerprint() const;
     Schema SchemaView() const;
 

@@ -25,6 +25,7 @@ class Query:
     def __init__(self, dataset):
         self._dataset = dataset
         self._predicates: list[Predicate] = []
+        self._join_spec = None
 
     def _with_predicates(self, kwargs) -> "Query":
         for key, value in kwargs.items():
@@ -38,6 +39,10 @@ class Query:
 
     def filter(self, **kwargs) -> "Query":
         return self._with_predicates(kwargs)
+
+    def join(self, other, on: str, how: str = "inner") -> "Query":
+        self._join_spec = (other, on, how)
+        raise NotImplementedError("API-only joins are not implemented yet")
 
     def aggregate(self, debug: bool = False, **kwargs):
         if getattr(self._dataset, "_cpp", None) is not None:
