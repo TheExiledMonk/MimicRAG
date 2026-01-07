@@ -1,5 +1,0 @@
-Metadata-Version: 2.1
-Name: pcdb
-Version: 0.0.0
-Summary: Primitive Columnar Database (PCDB) API
-Requires-Python: >=3.10
