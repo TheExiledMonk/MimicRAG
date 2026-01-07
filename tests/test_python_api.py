@@ -1,0 +1,80 @@
+import unittest
+
+from pcdb import Dataset
+
+
+class TestPythonAPI(unittest.TestCase):
+    def test_filter_and_aggregate(self):
+        users = Dataset(
+            name="users",
+            fields={
+                "age": "int32",
+                "country": "int32",
+                "income": "float64",
+            },
+        )
+
+        users.append(age=34, country=45, income=82000.0)
+        users.append(age=21, country=45, income=12000.0)
+        users.append(age=40, country=33, income=50000.0)
+        users.append(age=37, country=45, income=None)
+
+        result = users.filter(age_gt=30, country_eq=45).aggregate(sum="income", count=True)
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(result["sum"], 82000.0)
+
+    def test_min_max(self):
+        users = Dataset(
+            name="users",
+            fields={
+                "age": "int32",
+            },
+        )
+        users.append(age=10)
+        users.append(age=50)
+        users.append(age=None)
+        users.append(age=30)
+
+        result = users.aggregate(min="age", max="age", count=True)
+        self.assertEqual(result["count"], 3)
+        self.assertEqual(result["min"], 10)
+        self.assertEqual(result["max"], 50)
+
+    def test_append_batch(self):
+        users = Dataset(
+            name="users",
+            fields={
+                "age": "int32",
+                "country": "int32",
+                "income": "float64",
+            },
+        )
+        users.append_batch(
+            {
+                "age": [10, 20, 30],
+                "country": [1, 1, 2],
+                "income": [100.0, None, 300.0],
+            }
+        )
+        result = users.filter(country_eq=1).aggregate(count=True, sum="income")
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(result["sum"], 100.0)
+
+    def test_pruning_debug_stats(self):
+        users = Dataset(
+            name="users",
+            fields={
+                "age": "int32",
+            },
+        )
+        users.append(age=10)
+        users.append(age=20)
+        result, stats = users.query(age_gt=5, debug=True)
+        self.assertIsInstance(result, dict)
+        self.assertEqual(stats["segments_total"], 1)
+        self.assertEqual(stats["segments_scanned"], 1)
+        self.assertEqual(stats["segments_pruned"], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

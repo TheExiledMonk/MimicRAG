@@ -1,0 +1,11 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pcdb"
+version = "0.0.0"
+description = "Primitive Columnar Database (PCDB) API"
+requires-python = ">=3.10"
+[tool.setuptools]
+packages = ["pcdb"]
