@@ -18,6 +18,12 @@ class CppApiClient:
     def create_dataset(self, db: str, name: str, fields: dict[str, str]) -> None:
         self._core.create_dataset(db, name, fields)
 
+    def drop_database(self, name: str) -> None:
+        self._core.drop_database(name)
+
+    def drop_dataset(self, db: str, name: str) -> None:
+        self._core.drop_dataset(db, name)
+
     def append_batch(self, db: str, name: str, columns: dict[str, list]) -> None:
         self._core.append_batch(db, name, columns)
 

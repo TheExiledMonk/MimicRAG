@@ -60,6 +60,7 @@ public:
     bool Append(const std::vector<FieldValue>& values);
     bool AppendBatch(const std::vector<FieldBatch>& batches);
     bool AddRecoveredSegment(Segment segment);
+    void DropSegments(size_t count);
     uint64_t SchemaFingerprint() const;
     Schema SchemaView() const;
 

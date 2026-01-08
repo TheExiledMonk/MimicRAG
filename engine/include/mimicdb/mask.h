@@ -57,8 +57,15 @@ struct Int64PredicateBranchless {
     CompareOp op = CompareOp::kEq;
 };
 
+struct Float64PredicateBranchless {
+    const double* data = nullptr;
+    double value = 0.0;
+    CompareOp op = CompareOp::kEq;
+};
+
 Mask BuildMask(const Int64Predicate& predicate, size_t count);
 Mask BuildMaskBranchless(const Int64PredicateBranchless& predicate, size_t count);
+Mask BuildMaskBranchlessFloat64(const Float64PredicateBranchless& predicate, size_t count);
 PackedMask PackMask(const Mask& mask);
 
 }  // namespace mimicdb

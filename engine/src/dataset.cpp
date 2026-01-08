@@ -290,6 +290,17 @@ bool Dataset::AddRecoveredSegment(Segment segment) {
     return true;
 }
 
+void Dataset::DropSegments(size_t count) {
+    if (count == 0 || segments_.empty()) {
+        return;
+    }
+    if (count >= segments_.size()) {
+        segments_.clear();
+        return;
+    }
+    segments_.erase(segments_.begin(), segments_.begin() + static_cast<long>(count));
+}
+
 uint64_t Dataset::SchemaFingerprint() const {
     uint64_t hash = HashInit();
     const size_t field_count = fields_.size();

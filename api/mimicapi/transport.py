@@ -38,6 +38,17 @@ class LocalTransport:
     def list_databases(self) -> list[str]:
         return sorted({db for db, _ in self.datasets.keys()})
 
+    def drop_database(self, name: str) -> None:
+        keys = [key for key in self.datasets if key[0] == name]
+        for key in keys:
+            self.datasets.pop(key, None)
+            self.seen_batches.pop(key, None)
+
+    def drop_dataset(self, db: str, name: str) -> None:
+        key = (db, name)
+        self.datasets.pop(key, None)
+        self.seen_batches.pop(key, None)
+
     def create_dataset(self, db: str, name: str, fields: list[tuple[str, str]]) -> None:
         key = (db, name)
         if key in self.datasets:
@@ -128,6 +139,14 @@ class NetworkTransport:
     def list_databases(self) -> list[str]:
         client = self._client()
         return client.list_databases()
+
+    def drop_database(self, name: str) -> None:
+        client = self._client()
+        client.drop_database(name)
+
+    def drop_dataset(self, db: str, name: str) -> None:
+        client = self._client()
+        client.drop_dataset(name, database=db)
 
     def create_dataset(self, db: str, name: str, fields: list[tuple[str, str]]) -> None:
         client = self._client()

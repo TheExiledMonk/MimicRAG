@@ -15,6 +15,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <csignal>
@@ -48,6 +49,8 @@ enum class OpCode : uint16_t {
     kCreateDatabase = 6,
     kListDatabases = 7,
     kScan = 8,
+    kDropDatabase = 9,
+    kDropDataset = 10,
 };
 
 enum class Status : uint16_t {
@@ -72,6 +75,8 @@ struct DatasetState {
     std::unique_ptr<Dataset> dataset;
     std::string path;
     size_t persisted_segments = 0;
+    size_t segment_base_index = 0;
+    uint64_t cached_bytes = 0;
     std::unordered_set<uint64_t> seen_batches;
 };
 
@@ -338,13 +343,21 @@ void MergeAggregate(const AggregateResult& src, AggregateResult* dst) {
 class Server {
 public:
     Server(std::string bind_addr, uint16_t port, std::string storage_root,
-           bool flush_on_shutdown, bool flush_on_seal, int flush_interval_ms)
+           bool flush_on_shutdown, bool flush_on_seal, int flush_interval_ms,
+           uint32_t max_payload_bytes, uint32_t max_rows_per_batch, int append_sleep_ms,
+           size_t segment_cache_max, uint64_t segment_cache_bytes, size_t query_threads)
         : bind_addr_(std::move(bind_addr)),
           port_(port),
           storage_root_(std::move(storage_root)),
           flush_on_shutdown_(flush_on_shutdown),
           flush_on_seal_(flush_on_seal),
-          flush_interval_ms_(flush_interval_ms) {}
+          flush_interval_ms_(flush_interval_ms),
+          max_payload_bytes_(max_payload_bytes),
+          max_rows_per_batch_(max_rows_per_batch),
+          append_sleep_ms_(append_sleep_ms),
+          segment_cache_max_(segment_cache_max),
+          segment_cache_bytes_(segment_cache_bytes),
+          query_threads_(query_threads) {}
 
     int Run() {
         running_.store(true);
@@ -424,6 +437,10 @@ private:
                 SendStatus(client, header, Status::kBadRequest, {});
                 return;
             }
+            if (max_payload_bytes_ > 0 && header.payload_size > max_payload_bytes_) {
+                SendStatus(client, header, Status::kBadRequest, {});
+                return;
+            }
             std::vector<uint8_t> payload(header.payload_size);
             if (header.payload_size > 0) {
                 if (!ReadExact(client, payload.data(), payload.size())) {
@@ -447,8 +464,14 @@ private:
             case OpCode::kListDatabases:
                 HandleListDatabases(client, header);
                 return;
+            case OpCode::kDropDatabase:
+                HandleDropDatabase(client, header, payload);
+                return;
             case OpCode::kCreateDataset:
                 HandleCreateDataset(client, header, payload);
+                return;
+            case OpCode::kDropDataset:
+                HandleDropDataset(client, header, payload);
                 return;
             case OpCode::kAppendBatch:
                 HandleAppendBatch(client, header, payload);
@@ -528,6 +551,54 @@ private:
         SendStatus(client, header, Status::kOk, {});
     }
 
+    void HandleDropDatabase(int client, const MessageHeader& header,
+                            const std::vector<uint8_t>& payload) {
+        size_t cursor = 0;
+        std::string db_name;
+        if (!ReadName(payload, &cursor, &db_name)) {
+            SendStatus(client, header, Status::kBadRequest, {});
+            return;
+        }
+        auto it = databases_.find(db_name);
+        if (it == databases_.end()) {
+            SendStatus(client, header, Status::kNotFound, {});
+            return;
+        }
+        std::error_code ec;
+        std::filesystem::remove_all(DatabasePath(db_name), ec);
+        databases_.erase(it);
+        SendStatus(client, header, Status::kOk, {});
+    }
+
+    void HandleDropDataset(int client, const MessageHeader& header,
+                           const std::vector<uint8_t>& payload) {
+        size_t cursor = 0;
+        std::string db_name;
+        if (!ReadName(payload, &cursor, &db_name)) {
+            SendStatus(client, header, Status::kBadRequest, {});
+            return;
+        }
+        std::string name;
+        if (!ReadName(payload, &cursor, &name)) {
+            SendStatus(client, header, Status::kBadRequest, {});
+            return;
+        }
+        auto db_it = databases_.find(db_name);
+        if (db_it == databases_.end()) {
+            SendStatus(client, header, Status::kNotFound, {});
+            return;
+        }
+        auto it = db_it->second.datasets.find(name);
+        if (it == db_it->second.datasets.end()) {
+            SendStatus(client, header, Status::kNotFound, {});
+            return;
+        }
+        std::error_code ec;
+        std::filesystem::remove_all(DatasetPath(db_name, name), ec);
+        db_it->second.datasets.erase(it);
+        SendStatus(client, header, Status::kOk, {});
+    }
+
     void HandleAppendBatch(int client, const MessageHeader& header,
                            const std::vector<uint8_t>& payload) {
         size_t cursor = 0;
@@ -564,6 +635,10 @@ private:
         uint16_t field_count = 0;
         if (!ReadScalar(payload, &cursor, &row_count) ||
             !ReadScalar(payload, &cursor, &field_count)) {
+            SendStatus(client, header, Status::kBadRequest, {});
+            return;
+        }
+        if (max_rows_per_batch_ > 0 && row_count > max_rows_per_batch_) {
             SendStatus(client, header, Status::kBadRequest, {});
             return;
         }
@@ -663,6 +738,9 @@ private:
         if (batch_id != 0) {
             it->second.seen_batches.insert(batch_id);
         }
+        if (append_sleep_ms_ > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(append_sleep_ms_));
+        }
         SendStatus(client, header, Status::kOk, {});
     }
 
@@ -713,27 +791,9 @@ private:
             }
             predicates.push_back(PredicateSpec{pred_field, DecodeCompareOp(op), value});
         }
-        const Dataset& dataset = *it->second.dataset;
-        AggregateResult result{};
-        for (const auto& segment : dataset.Segments()) {
-            if (field_index >= segment.Fields().size()) {
-                SendStatus(client, header, Status::kBadRequest, {});
-                return;
-            }
-            AggregateResult partial{};
-            if (!predicates.empty()) {
-                Mask mask;
-                if (!BuildPredicateMask(segment.Fields(), predicates, &mask)) {
-                    SendStatus(client, header, Status::kBadRequest, {});
-                    return;
-                }
-                AggregateMixed(segment.Fields()[field_index], &mask, &partial);
-            } else {
-                AggregateMixed(segment.Fields()[field_index], nullptr, &partial);
-            }
-            MergeAggregate(partial, &result);
-        }
-        if (field_index >= dataset.ActiveFields().size()) {
+        DatasetState& state = it->second;
+        const Dataset& dataset = *state.dataset;
+        if (field_index >= dataset.Fields().size()) {
             SendStatus(client, header, Status::kBadRequest, {});
             return;
         }
@@ -742,18 +802,92 @@ private:
             SendStatus(client, header, Status::kBadRequest, {});
             return;
         }
-        AggregateResult partial{};
-        if (!predicates.empty()) {
-            Mask mask;
-            if (!BuildPredicateMask(dataset.ActiveFields(), predicates, &mask)) {
+        AggregateResult result{};
+        const size_t persisted = state.persisted_segments;
+        size_t thread_count = query_threads_ == 0 ? 1 : query_threads_;
+        if (thread_count > persisted) {
+            thread_count = persisted == 0 ? 1 : persisted;
+        }
+        if (thread_count > 1 && persisted > 0) {
+            std::atomic<bool> ok{true};
+            std::vector<AggregateResult> partials(thread_count);
+            std::vector<std::thread> threads;
+            threads.reserve(thread_count);
+            for (size_t t = 0; t < thread_count; ++t) {
+                const size_t start = (persisted * t) / thread_count;
+                const size_t end = (persisted * (t + 1)) / thread_count;
+                threads.emplace_back([&, start, end, t]() {
+                    AggregateResult local{};
+                    for (size_t idx = start; idx < end && ok.load(); ++idx) {
+                        const size_t base = state.segment_base_index;
+                        const size_t in_count = state.dataset->Segments().size();
+                        const size_t in_end = base + in_count;
+                        const Segment* segment_ptr = nullptr;
+                        Segment segment(0, {});
+                        if (idx >= base && idx < in_end) {
+                            segment_ptr = &state.dataset->Segments()[idx - base];
+                        } else {
+                            SegmentReader reader(SegmentPath(db_name, state.dataset->Name(), idx));
+                            if (!reader.Read(&segment)) {
+                                ok.store(false);
+                                return;
+                            }
+                            segment_ptr = &segment;
+                        }
+                        if (field_index >= segment_ptr->Fields().size()) {
+                            ok.store(false);
+                            return;
+                        }
+                        AggregateResult partial{};
+                        if (!predicates.empty()) {
+                            Mask mask;
+                            if (!BuildPredicateMask(segment_ptr->Fields(), predicates, &mask)) {
+                                ok.store(false);
+                                return;
+                            }
+                            AggregateMixed(segment_ptr->Fields()[field_index], &mask, &partial);
+                        } else {
+                            AggregateMixed(segment_ptr->Fields()[field_index], nullptr, &partial);
+                        }
+                        MergeAggregate(partial, &local);
+                    }
+                    partials[t] = local;
+                });
+            }
+            for (auto& thread : threads) {
+                thread.join();
+            }
+            if (!ok.load()) {
                 SendStatus(client, header, Status::kBadRequest, {});
                 return;
             }
-            AggregateMixed(dataset.ActiveFields()[field_index], &mask, &partial);
+            for (const auto& partial : partials) {
+                MergeAggregate(partial, &result);
+            }
         } else {
-            AggregateMixed(dataset.ActiveFields()[field_index], nullptr, &partial);
+            if (!ForEachSegment(
+                    db_name, state,
+                    [&](const Segment& segment) -> bool {
+                        if (field_index >= segment.Fields().size()) {
+                            return false;
+                        }
+                        AggregateResult partial{};
+                        if (!predicates.empty()) {
+                            Mask mask;
+                            if (!BuildPredicateMask(segment.Fields(), predicates, &mask)) {
+                                return false;
+                            }
+                            AggregateMixed(segment.Fields()[field_index], &mask, &partial);
+                        } else {
+                            AggregateMixed(segment.Fields()[field_index], nullptr, &partial);
+                        }
+                        MergeAggregate(partial, &result);
+                        return true;
+                    })) {
+                SendStatus(client, header, Status::kBadRequest, {});
+                return;
+            }
         }
-        MergeAggregate(partial, &result);
 
         const uint64_t rows_scanned = dataset.RowCount();
         std::vector<uint8_t> out(sizeof(uint64_t) + sizeof(double) * 3 + sizeof(uint8_t) +
@@ -997,20 +1131,16 @@ private:
             return true;
         };
 
-        for (const auto& segment : dataset.Segments()) {
-            if (!scan_fields(segment.Fields(), segment.RowCount())) {
-                SendStatus(client, header, Status::kBadRequest, {});
-                return;
-            }
-            if (stop) {
-                break;
-            }
-        }
-        if (!stop) {
-            if (!scan_fields(dataset.ActiveFields(), dataset.ActiveRowCount())) {
-                SendStatus(client, header, Status::kBadRequest, {});
-                return;
-            }
+        if (!ForEachSegment(
+                db_name, it->second,
+                [&](const Segment& segment) -> bool {
+                    if (!scan_fields(segment.Fields(), segment.RowCount())) {
+                        return false;
+                    }
+                    return !stop;
+                })) {
+            SendStatus(client, header, Status::kBadRequest, {});
+            return;
         }
 
         uint32_t row_count = outputs.empty() ? 0u
@@ -1161,6 +1291,12 @@ private:
     bool flush_on_shutdown_ = false;
     bool flush_on_seal_ = true;
     int flush_interval_ms_ = 0;
+    uint32_t max_payload_bytes_ = 0;
+    uint32_t max_rows_per_batch_ = 0;
+    int append_sleep_ms_ = 0;
+    size_t segment_cache_max_ = 0;
+    uint64_t segment_cache_bytes_ = 0;
+    size_t query_threads_ = 1;
     std::unordered_map<std::string, DatabaseState> databases_;
     std::atomic<bool> running_{false};
     std::atomic<uint64_t> active_clients_{0};
@@ -1187,6 +1323,107 @@ private:
         return (std::filesystem::path(DatasetPath(db_name, dataset_name)) /
                 ("segment_" + std::to_string(index) + ".mimicdb"))
             .string();
+    }
+
+    uint64_t SegmentBytes(const Segment& segment) const {
+        uint64_t bytes = 0;
+        for (const auto& field : segment.Fields()) {
+            switch (field.Type()) {
+                case FieldType::kInt32:
+                    bytes += static_cast<uint64_t>(field.Size() * sizeof(int32_t));
+                    break;
+                case FieldType::kInt64:
+                    bytes += static_cast<uint64_t>(field.Size() * sizeof(int64_t));
+                    break;
+                case FieldType::kFloat64:
+                    bytes += static_cast<uint64_t>(field.Size() * sizeof(double));
+                    break;
+                case FieldType::kBool:
+                    bytes += static_cast<uint64_t>(field.Size() * sizeof(uint8_t));
+                    break;
+                case FieldType::kDictInt32:
+                    bytes += static_cast<uint64_t>(field.Size() * sizeof(uint32_t));
+                    break;
+                case FieldType::kString:
+                case FieldType::kBytes:
+                case FieldType::kArray:
+                    bytes += static_cast<uint64_t>(field.Size() * sizeof(uint32_t));
+                    bytes += static_cast<uint64_t>(field.BytesSize());
+                    break;
+                case FieldType::kObject:
+                    break;
+            }
+            if (field.HasNulls()) {
+                bytes += static_cast<uint64_t>(field.Validity().WordCount() * sizeof(uint64_t));
+            }
+        }
+        return bytes;
+    }
+
+    void DropCachedSegments(DatasetState& state, size_t drop_count) {
+        if (drop_count == 0) {
+            return;
+        }
+        const auto& segments = state.dataset->Segments();
+        const size_t capped = drop_count > segments.size() ? segments.size() : drop_count;
+        uint64_t reclaimed = 0;
+        for (size_t i = 0; i < capped; ++i) {
+            reclaimed += SegmentBytes(segments[i]);
+        }
+        state.dataset->DropSegments(capped);
+        state.segment_base_index += capped;
+        if (reclaimed > state.cached_bytes) {
+            state.cached_bytes = 0;
+        } else {
+            state.cached_bytes -= reclaimed;
+        }
+    }
+
+    void EnforceSegmentCacheLimits(DatasetState& state) {
+        if (segment_cache_max_ > 0 &&
+            state.dataset->Segments().size() > segment_cache_max_) {
+            const size_t drop = state.dataset->Segments().size() - segment_cache_max_;
+            DropCachedSegments(state, drop);
+        }
+        if (segment_cache_bytes_ > 0 && state.cached_bytes > segment_cache_bytes_) {
+            while (!state.dataset->Segments().empty() &&
+                   state.cached_bytes > segment_cache_bytes_) {
+                DropCachedSegments(state, 1);
+            }
+        }
+    }
+
+    bool ForEachSegment(const std::string& db_name, DatasetState& state,
+                        const std::function<bool(const Segment&)>& visitor) {
+        const size_t in_memory_base = state.segment_base_index;
+        const size_t in_memory_count = state.dataset->Segments().size();
+        const size_t in_memory_end = in_memory_base + in_memory_count;
+        for (size_t idx = 0; idx < state.persisted_segments; ++idx) {
+            if (idx >= in_memory_base && idx < in_memory_end) {
+                const Segment& seg = state.dataset->Segments()[idx - in_memory_base];
+                if (!visitor(seg)) {
+                    return false;
+                }
+                continue;
+            }
+            Segment segment(0, {});
+            SegmentReader reader(SegmentPath(db_name, state.dataset->Name(), idx));
+            if (!reader.Read(&segment)) {
+                return false;
+            }
+            if (!visitor(segment)) {
+                return false;
+            }
+        }
+        const auto& active = state.dataset->ActiveFields();
+        if (!active.empty()) {
+            Segment active_segment(state.dataset->SegmentCapacity(),
+                                   state.dataset->ActiveRowCount(), active);
+            if (!visitor(active_segment)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     DatabaseState& EnsureDatabase(const std::string& name) {
@@ -1263,11 +1500,12 @@ private:
 
     bool PersistNewSegments(const std::string& db_name, DatasetState& state) {
         const auto& segments = state.dataset->Segments();
-        while (state.persisted_segments < segments.size()) {
+        while (state.persisted_segments < state.segment_base_index + segments.size()) {
             const size_t index = state.persisted_segments;
+            const size_t in_memory_index = index - state.segment_base_index;
             SegmentWriter writer(
                 SegmentPath(db_name, state.dataset->Name(), index));
-            if (!writer.Write(segments[index])) {
+            if (!writer.Write(segments[in_memory_index])) {
                 return false;
             }
             if (flush_on_seal_) {
@@ -1275,8 +1513,10 @@ private:
                     return false;
                 }
             }
+            state.cached_bytes += SegmentBytes(segments[in_memory_index]);
             state.persisted_segments += 1;
         }
+        EnforceSegmentCacheLimits(state);
         return true;
     }
 
@@ -1385,6 +1625,8 @@ private:
                         continue;
                     }
                     state.persisted_segments += 1;
+                    state.cached_bytes += SegmentBytes(state.dataset->Segments().back());
+                    EnforceSegmentCacheLimits(state);
                 }
                 db_state.datasets[dataset_name] = std::move(state);
             }
@@ -1403,6 +1645,12 @@ struct ServerConfig {
     bool flush_on_shutdown = false;
     bool flush_on_seal = true;
     int flush_interval_ms = 0;
+    uint32_t max_payload_bytes = 268435456;
+    uint32_t max_rows_per_batch = 5000000;
+    int append_sleep_ms = 0;
+    size_t segment_cache_max = 2;
+    uint64_t segment_cache_bytes = 20ULL * 1024ULL * 1024ULL * 1024ULL;
+    size_t query_threads = 16;
 };
 
 std::string Trim(std::string_view value) {
@@ -1463,6 +1711,36 @@ bool LoadConfig(const std::string& path, ServerConfig* config) {
         } else if (key == "flush_interval_ms") {
             try {
                 config->flush_interval_ms = std::stoi(value);
+            } catch (...) {
+            }
+        } else if (key == "max_payload_bytes") {
+            try {
+                config->max_payload_bytes = static_cast<uint32_t>(std::stoul(value));
+            } catch (...) {
+            }
+        } else if (key == "max_rows_per_batch") {
+            try {
+                config->max_rows_per_batch = static_cast<uint32_t>(std::stoul(value));
+            } catch (...) {
+            }
+        } else if (key == "append_sleep_ms") {
+            try {
+                config->append_sleep_ms = std::stoi(value);
+            } catch (...) {
+            }
+        } else if (key == "segment_cache_max") {
+            try {
+                config->segment_cache_max = static_cast<size_t>(std::stoull(value));
+            } catch (...) {
+            }
+        } else if (key == "segment_cache_bytes") {
+            try {
+                config->segment_cache_bytes = static_cast<uint64_t>(std::stoull(value));
+            } catch (...) {
+            }
+        } else if (key == "query_threads") {
+            try {
+                config->query_threads = static_cast<size_t>(std::stoull(value));
             } catch (...) {
             }
         }
@@ -1555,6 +1833,9 @@ int main(int argc, char** argv) {
         }
     }
     mimicdb::Server server(bind_host, port, config.storage_root, config.flush_on_shutdown,
-                        config.flush_on_seal, config.flush_interval_ms);
+                        config.flush_on_seal, config.flush_interval_ms,
+                        config.max_payload_bytes, config.max_rows_per_batch,
+                        config.append_sleep_ms, config.segment_cache_max,
+                        config.segment_cache_bytes, config.query_threads);
     return server.Run();
 }

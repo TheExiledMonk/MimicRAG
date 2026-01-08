@@ -373,6 +373,21 @@ class ApiClient:
                 self.mark_failure(server_name)
         return sorted(databases)
 
+    def drop_database_all(self, name: str) -> dict[str, int]:
+        stats = {"servers_contacted": 0, "servers_succeeded": 0, "servers_failed": 0}
+        for server_name, transport in self._transports.items():
+            if server_name not in self._servers or not self._is_healthy(self._servers[server_name]):
+                continue
+            stats["servers_contacted"] += 1
+            try:
+                transport.drop_database(name)
+                self.mark_success(server_name)
+                stats["servers_succeeded"] += 1
+            except Exception:
+                self.mark_failure(server_name)
+                stats["servers_failed"] += 1
+        return stats
+
     def create_dataset_all(
         self,
         db: str,
@@ -387,6 +402,21 @@ class ApiClient:
             stats["servers_contacted"] += 1
             try:
                 transport.create_dataset(db, name, fields)
+                self.mark_success(server_name)
+                stats["servers_succeeded"] += 1
+            except Exception:
+                self.mark_failure(server_name)
+                stats["servers_failed"] += 1
+        return stats
+
+    def drop_dataset_all(self, db: str, name: str) -> dict[str, int]:
+        stats = {"servers_contacted": 0, "servers_succeeded": 0, "servers_failed": 0}
+        for server_name, transport in self._transports.items():
+            if server_name not in self._servers or not self._is_healthy(self._servers[server_name]):
+                continue
+            stats["servers_contacted"] += 1
+            try:
+                transport.drop_dataset(db, name)
                 self.mark_success(server_name)
                 stats["servers_succeeded"] += 1
             except Exception:

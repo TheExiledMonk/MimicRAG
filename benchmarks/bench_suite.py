@@ -1,4 +1,5 @@
 import argparse
+import os
 import random
 import subprocess
 import time
@@ -42,6 +43,56 @@ def build_batch(rng: random.Random, count: int) -> dict[str, list]:
     return {"age": ages, "country": countries, "income": incomes}
 
 
+def _extract_count(result) -> int:
+    if isinstance(result, dict):
+        value = result.get("count")
+        return int(value) if value is not None else 0
+    if isinstance(result, list):
+        if not result:
+            return 0
+        first = result[0]
+        if isinstance(first, dict):
+            value = first.get("count")
+            return int(value) if value is not None else 0
+        if isinstance(first, (list, tuple)) and len(first) >= 2:
+            return int(first[1])
+    return 0
+
+
+def _extract_rows_scanned(result, fallback: int) -> int:
+    if isinstance(result, dict) and "rows_scanned" in result:
+        return int(result["rows_scanned"])
+    return fallback
+
+
+def _selectivity(count: int, rows: int) -> float:
+    if rows <= 0:
+        return 0.0
+    return count / rows
+
+
+def _run_mask_reuse_dataset(users: Dataset) -> dict[str, float]:
+    start = time.perf_counter()
+    single_result = users.filter(age_gt=30, country_eq=45).aggregate(sum="income")
+    single_end = time.perf_counter()
+    multi_result = users.filter(age_gt=30, country_eq=45).aggregate(
+        sum="income", count=True, min="income", max="income"
+    )
+    multi_end = time.perf_counter()
+    return {
+        "query_single_seconds": single_end - start,
+        "query_multi_seconds": multi_end - single_end,
+        "single_result": single_result,
+        "multi_result": multi_result,
+    }
+
+
+def _maybe_sleep(ms: int) -> None:
+    if ms <= 0:
+        return
+    time.sleep(ms / 1000.0)
+
+
 def run_dataset_bench(
     rows: int,
     seed: int,
@@ -51,6 +102,8 @@ def run_dataset_bench(
     host: str | None,
     port: int | None,
     database: str,
+    mask_reuse: bool,
+    append_sleep_ms: int,
 ) -> dict[str, float]:
     rng = random.Random(seed)
     users = Dataset(
@@ -74,12 +127,14 @@ def run_dataset_bench(
                 country=batch["country"][0],
                 income=batch["income"][0],
             )
+            _maybe_sleep(append_sleep_ms)
     else:
         remaining = rows
         while remaining > 0:
             current = batch_size if remaining > batch_size else remaining
             users.append_batch(build_batch(rng, current))
             remaining -= current
+            _maybe_sleep(append_sleep_ms)
     append_end = time.perf_counter()
 
     result = users.filter(age_gt=30, country_eq=45).aggregate(
@@ -89,11 +144,15 @@ def run_dataset_bench(
 
     append_seconds = append_end - start
     query_seconds = query_end - append_end
+    count = _extract_count(result)
     return {
         "append_seconds": append_seconds,
         "append_rows_per_sec": rows / append_seconds,
         "query_seconds": query_seconds,
         "result": result,
+        "rows_scanned": _extract_rows_scanned(result, rows),
+        "selectivity": _selectivity(count, rows),
+        **(_run_mask_reuse_dataset(users) if mask_reuse else {}),
     }
 
 
@@ -105,6 +164,9 @@ def run_mimicapi_bench(
     host: str | None,
     port: int | None,
     database: str,
+    mask_reuse: bool,
+    append_sleep_ms: int,
+    cleanup: bool,
 ) -> dict[str, float]:
     rng = random.Random(seed)
     client = ApiClient()
@@ -122,12 +184,14 @@ def run_mimicapi_bench(
         for _ in range(rows):
             batch = build_batch(rng, 1)
             client.append_batch_fanout(database, "users", fields, batch)
+            _maybe_sleep(append_sleep_ms)
     else:
         remaining = rows
         while remaining > 0:
             current = batch_size if remaining > batch_size else remaining
             client.append_batch_fanout(database, "users", fields, build_batch(rng, current))
             remaining -= current
+            _maybe_sleep(append_sleep_ms)
     append_end = time.perf_counter()
 
     result, _ = client.query_agg_routed(
@@ -140,12 +204,42 @@ def run_mimicapi_bench(
 
     append_seconds = append_end - start
     query_seconds = query_end - append_end
-    return {
+    count = _extract_count(result)
+    reuse_stats = {}
+    if mask_reuse:
+        single_start = time.perf_counter()
+        single_result, _ = client.query_agg_routed(
+            database,
+            "users",
+            field_index=2,
+            predicates=[(0, 4, 30.0), (1, 0, 45.0)],
+        )
+        single_end = time.perf_counter()
+        multi_result, _ = client.query_agg_routed(
+            database,
+            "users",
+            field_index=2,
+            predicates=[(0, 4, 30.0), (1, 0, 45.0)],
+        )
+        multi_end = time.perf_counter()
+        reuse_stats = {
+            "query_single_seconds": single_end - single_start,
+            "query_multi_seconds": multi_end - single_end,
+            "single_result": single_result,
+            "multi_result": multi_result,
+        }
+    stats = {
         "append_seconds": append_seconds,
         "append_rows_per_sec": rows / append_seconds,
         "query_seconds": query_seconds,
         "result": result,
+        "rows_scanned": _extract_rows_scanned(result, rows),
+        "selectivity": _selectivity(count, rows),
+        **reuse_stats,
     }
+    if cleanup:
+        client.drop_database_all(database)
+    return stats
 
 
 def run_mongo_bench(
@@ -156,6 +250,9 @@ def run_mongo_bench(
     host: str | None,
     port: int | None,
     database: str,
+    mask_reuse: bool,
+    append_sleep_ms: int,
+    cleanup: bool,
 ) -> dict[str, float]:
     rng = random.Random(seed)
     _ = host
@@ -177,6 +274,7 @@ def run_mongo_bench(
                     "income": batch["income"][0],
                 },
             )
+            _maybe_sleep(append_sleep_ms)
     else:
         remaining = rows
         while remaining > 0:
@@ -190,6 +288,7 @@ def run_mongo_bench(
             ]
             collection.insert_many(db, "users", docs)
             remaining -= current
+            _maybe_sleep(append_sleep_ms)
     append_end = time.perf_counter()
 
     result = collection.aggregate(
@@ -212,12 +311,53 @@ def run_mongo_bench(
 
     append_seconds = append_end - start
     query_seconds = query_end - append_end
-    return {
+    count = _extract_count(result)
+    reuse_stats = {}
+    if mask_reuse:
+        single_start = time.perf_counter()
+        single_result = collection.aggregate(
+            db,
+            "users",
+            [
+                {"$match": {"age": {"$gt": 30}, "country": 45}},
+                {"$group": {"_id": None, "sum": {"$sum": "$income"}}},
+            ],
+        )
+        single_end = time.perf_counter()
+        multi_result = collection.aggregate(
+            db,
+            "users",
+            [
+                {"$match": {"age": {"$gt": 30}, "country": 45}},
+                {
+                    "$group": {
+                        "_id": None,
+                        "sum": {"$sum": "$income"},
+                        "count": {"$sum": 1},
+                        "min": {"$min": "$income"},
+                        "max": {"$max": "$income"},
+                    }
+                },
+            ],
+        )
+        multi_end = time.perf_counter()
+        reuse_stats = {
+            "query_single_seconds": single_end - single_start,
+            "query_multi_seconds": multi_end - single_end,
+            "single_result": single_result,
+            "multi_result": multi_result,
+        }
+    stats = {
         "append_seconds": append_seconds,
         "append_rows_per_sec": rows / append_seconds,
         "query_seconds": query_seconds,
         "result": result,
+        "rows_scanned": _extract_rows_scanned(result, rows),
+        "selectivity": _selectivity(count, rows),
+        **reuse_stats,
     }
+    _ = cleanup
+    return stats
 
 
 def run_cpp_core_bench(
@@ -226,6 +366,9 @@ def run_cpp_core_bench(
     batch_size: int,
     append_mode: str,
     database: str,
+    mask_reuse: bool,
+    append_sleep_ms: int,
+    cleanup: bool,
 ) -> dict[str, float]:
     rng = random.Random(seed)
     client = CppApiClient()
@@ -252,12 +395,14 @@ def run_cpp_core_bench(
                     "income": batch["income"],
                 },
             )
+            _maybe_sleep(append_sleep_ms)
     else:
         remaining = rows
         while remaining > 0:
             current = batch_size if remaining > batch_size else remaining
             client.append_batch(database, "users", build_batch(rng, current))
             remaining -= current
+            _maybe_sleep(append_sleep_ms)
     append_end = time.perf_counter()
 
     result = client.aggregate(
@@ -270,12 +415,42 @@ def run_cpp_core_bench(
 
     append_seconds = append_end - start
     query_seconds = query_end - append_end
-    return {
+    count = _extract_count(result)
+    reuse_stats = {}
+    if mask_reuse:
+        single_start = time.perf_counter()
+        single_result = client.aggregate(
+            database,
+            "users",
+            field_index=2,
+            predicates=[(0, "gt", 30.0), (1, "eq", 45.0)],
+        )
+        single_end = time.perf_counter()
+        multi_result = client.aggregate(
+            database,
+            "users",
+            field_index=2,
+            predicates=[(0, "gt", 30.0), (1, "eq", 45.0)],
+        )
+        multi_end = time.perf_counter()
+        reuse_stats = {
+            "query_single_seconds": single_end - single_start,
+            "query_multi_seconds": multi_end - single_end,
+            "single_result": single_result,
+            "multi_result": multi_result,
+        }
+    stats = {
         "append_seconds": append_seconds,
         "append_rows_per_sec": rows / append_seconds,
         "query_seconds": query_seconds,
         "result": result,
+        "rows_scanned": _extract_rows_scanned(result, rows),
+        "selectivity": _selectivity(count, rows),
+        **reuse_stats,
     }
+    if cleanup:
+        client.drop_database(database)
+    return stats
 
 
 class SqlCppClient:
@@ -306,6 +481,9 @@ def run_sql_dialect_bench(
     append_mode: str,
     dialect: str,
     database: str,
+    mask_reuse: bool,
+    append_sleep_ms: int,
+    cleanup: bool,
 ) -> dict[str, float]:
     rng = random.Random(seed)
     core = CppApiClient()
@@ -332,12 +510,14 @@ def run_sql_dialect_bench(
                     "income": batch["income"],
                 },
             )
+            _maybe_sleep(append_sleep_ms)
     else:
         remaining = rows
         while remaining > 0:
             current = batch_size if remaining > batch_size else remaining
             core.append_batch(database, "users", build_batch(rng, current))
             remaining -= current
+            _maybe_sleep(append_sleep_ms)
     append_end = time.perf_counter()
 
     sql = (
@@ -353,12 +533,34 @@ def run_sql_dialect_bench(
 
     append_seconds = append_end - start
     query_seconds = query_end - append_end
-    return {
+    count = _extract_count(result)
+    reuse_stats = {}
+    if mask_reuse:
+        single_sql = "SELECT SUM(income) AS sum FROM users WHERE age > 30 AND country = 45"
+        single_query = parse_sql(single_sql, dialect=dialect)
+        single_start = time.perf_counter()
+        single_rows, _ = execute_query(SqlCppClient(core), database, single_query, fields)
+        single_end = time.perf_counter()
+        multi_rows, _ = execute_query(SqlCppClient(core), database, query, fields)
+        multi_end = time.perf_counter()
+        reuse_stats = {
+            "query_single_seconds": single_end - single_start,
+            "query_multi_seconds": multi_end - single_end,
+            "single_result": single_rows[0] if single_rows else {},
+            "multi_result": multi_rows[0] if multi_rows else {},
+        }
+    stats = {
         "append_seconds": append_seconds,
         "append_rows_per_sec": rows / append_seconds,
         "query_seconds": query_seconds,
         "result": result,
+        "rows_scanned": _extract_rows_scanned(result, rows),
+        "selectivity": _selectivity(count, rows),
+        **reuse_stats,
     }
+    if cleanup:
+        core.drop_database(database)
+    return stats
 
 
 def run_mysql_bench(
@@ -369,6 +571,9 @@ def run_mysql_bench(
     host: str | None,
     port: int | None,
     database: str,
+    mask_reuse: bool,
+    append_sleep_ms: int,
+    cleanup: bool,
 ) -> dict[str, float]:
     rng = random.Random(seed)
     conn = MySQLConnection(host=host, port=port, database=database)
@@ -385,6 +590,7 @@ def run_mysql_bench(
                 "INSERT INTO users (age, country, income) VALUES "
                 f"({batch['age'][0]}, {batch['country'][0]}, {_format_value(batch['income'][0])})"
             )
+            _maybe_sleep(append_sleep_ms)
     else:
         remaining = rows
         while remaining > 0:
@@ -399,6 +605,7 @@ def run_mysql_bench(
                 "INSERT INTO users (age, country, income) VALUES " + ", ".join(values)
             )
             remaining -= current
+            _maybe_sleep(append_sleep_ms)
     append_end = time.perf_counter()
 
     cur.execute(
@@ -410,12 +617,38 @@ def run_mysql_bench(
 
     append_seconds = append_end - start
     query_seconds = query_end - append_end
-    return {
+    count = _extract_count(result)
+    reuse_stats = {}
+    if mask_reuse:
+        single_start = time.perf_counter()
+        cur.execute(
+            "SELECT SUM(income) FROM users WHERE age > 30 AND country = 45"
+        )
+        single_result = cur.fetchall()
+        single_end = time.perf_counter()
+        cur.execute(
+            "SELECT SUM(income), COUNT(income), MIN(income), MAX(income) "
+            "FROM users WHERE age > 30 AND country = 45 GROUP BY country"
+        )
+        multi_result = cur.fetchall()
+        multi_end = time.perf_counter()
+        reuse_stats = {
+            "query_single_seconds": single_end - single_start,
+            "query_multi_seconds": multi_end - single_end,
+            "single_result": single_result,
+            "multi_result": multi_result,
+        }
+    stats = {
         "append_seconds": append_seconds,
         "append_rows_per_sec": rows / append_seconds,
         "query_seconds": query_seconds,
         "result": result,
+        "rows_scanned": _extract_rows_scanned(result, rows),
+        "selectivity": _selectivity(count, rows),
+        **reuse_stats,
     }
+    _ = cleanup
+    return stats
 
 
 def _format_value(value) -> str:
@@ -432,6 +665,14 @@ def print_results(label: str, rows: int, stats: dict[str, float]) -> None:
     print(f"append_seconds={stats['append_seconds']:.6f}")
     print(f"append_rows_per_sec={stats['append_rows_per_sec']:.2f}")
     print(f"query_seconds={stats['query_seconds']:.6f}")
+    if "rows_scanned" in stats:
+        print(f"rows_scanned={stats['rows_scanned']}")
+    if "selectivity" in stats:
+        print(f"selectivity={stats['selectivity']:.6f}")
+    if "query_single_seconds" in stats:
+        print(f"query_single_seconds={stats['query_single_seconds']:.6f}")
+    if "query_multi_seconds" in stats:
+        print(f"query_multi_seconds={stats['query_multi_seconds']:.6f}")
     print(f"result={stats['result']}")
 
 
@@ -449,10 +690,21 @@ def main() -> None:
     parser.add_argument("--database", default="bench")
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--include-cpp-core", action="store_true")
+    parser.add_argument("--sweep", action="store_true")
+    parser.add_argument("--mask-reuse", action="store_true")
+    parser.add_argument("--sweep-max-rows", type=int, default=5_000_000)
+    parser.add_argument("--append-sleep-ms", type=int, default=0)
+    parser.add_argument("--no-cleanup", action="store_false", dest="cleanup", default=True)
+    parser.add_argument("--backends", default="all")
+    parser.add_argument("--no-fork-per-backend", action="store_false",
+                        dest="fork_per_backend", default=True)
+    parser.add_argument("--only-backend", default=None)
+    parser.add_argument("--dialect", default=None)
+    parser.add_argument("--no-server", action="store_true")
     args = parser.parse_args()
 
     server_proc = None
-    if args.transport == "network":
+    if args.transport == "network" and not args.no_server:
         repo_root = Path(__file__).resolve().parents[1]
         if str(repo_root) not in sys.path:
             sys.path.insert(0, str(repo_root))
@@ -474,77 +726,187 @@ def main() -> None:
         mysql_db = f"{args.database}_mysql{suffix}"
         cpp_core_db = f"{args.database}_cppcore{suffix}"
 
-        dataset_stats = run_dataset_bench(
-            args.rows,
-            args.seed,
-            args.batch_size,
-            args.append_mode,
-            args.backend,
-            host,
-            port,
-            dataset_db,
-        )
-        print_results("dataset", args.rows, dataset_stats)
-        print("---")
+        row_sweep = [args.rows]
+        if args.sweep:
+            sweep_rows = [200_000, 1_000_000, 5_000_000, 50_000_000]
+            if args.sweep_max_rows > 0:
+                sweep_rows = [r for r in sweep_rows if r <= args.sweep_max_rows]
+            if not sweep_rows:
+                sweep_rows = [args.rows]
+            row_sweep = sweep_rows
 
-        api_stats = run_mimicapi_bench(
-            args.rows,
-            args.seed,
-            args.batch_size,
-            args.append_mode,
-            host,
-            port,
-            api_db,
-        )
-        print_results("mimicapi", args.rows, api_stats)
-        print("---")
+        backends = [b.strip() for b in args.backends.split(",")] if args.backends else ["all"]
+        if "all" in backends:
+            backends = ["dataset", "mimicapi", "mongodb_cpp", "mysql", "sql"]
+            if args.include_cpp_core:
+                backends.append("cpp_core")
 
-        mongo_stats = run_mongo_bench(
-            args.rows,
-            args.seed,
-            args.batch_size,
-            args.append_mode,
-            host,
-            port,
-            mongo_db,
-        )
-        print_results("mongodb_cpp", args.rows, mongo_stats)
-        print("---")
+        if args.only_backend:
+            backends = [args.only_backend]
 
-        mysql_stats = run_mysql_bench(
-            args.rows,
-            args.seed,
-            args.batch_size,
-            args.append_mode,
-            host,
-            port,
-            mysql_db,
-        )
-        print_results("mysql_mariadb_api", args.rows, mysql_stats)
-        print("---")
-        sql_dialects = ["ansi", "postgres", "mysql", "sqlite", "oracle", "duckdb", "sqlserver"]
-        for dialect in sql_dialects:
-            sql_db = f"{args.database}_{dialect}{suffix}"
-            sql_stats = run_sql_dialect_bench(
-                args.rows,
-                args.seed,
-                args.batch_size,
-                args.append_mode,
-                dialect,
-                sql_db,
-            )
-            print_results(f"sql_{dialect}", args.rows, sql_stats)
-            print("---")
-        if args.include_cpp_core:
-            print("---")
-            cpp_core_stats = run_cpp_core_bench(
-                args.rows,
-                args.seed,
-                args.batch_size,
-                args.append_mode,
-                cpp_core_db,
-            )
-            print_results("cpp_core", args.rows, cpp_core_stats)
+        if args.fork_per_backend and args.only_backend is None:
+            script = Path(__file__).resolve()
+            repo_root = script.parents[1]
+            child_env = os.environ.copy()
+            child_env.setdefault("PYTHONPATH", "api")
+            for rows in row_sweep:
+                for backend in backends:
+                    if backend == "sql":
+                        dialects = [args.dialect] if args.dialect else [
+                            "ansi", "postgres", "mysql", "sqlite", "oracle", "duckdb", "sqlserver"
+                        ]
+                        for dialect in dialects:
+                            child_args = [
+                                str(script),
+                                "--rows", str(rows),
+                                "--seed", str(args.seed),
+                                "--batch-size", str(args.batch_size),
+                                "--append-mode", args.append_mode,
+                                "--backend", args.backend,
+                                "--transport", args.transport,
+                                "--host", args.host,
+                                "--port", str(args.port),
+                                "--database", args.database,
+                                "--only-backend", "sql",
+                                "--dialect", dialect,
+                                "--append-sleep-ms", str(args.append_sleep_ms),
+                            ]
+                            if args.server_bin:
+                                child_args += ["--server-bin", args.server_bin]
+                            if args.mask_reuse:
+                                child_args.append("--mask-reuse")
+                            if not args.cleanup:
+                                child_args.append("--no-cleanup")
+                            if args.transport == "network":
+                                child_args.append("--no-server")
+                            subprocess.run([sys.executable] + child_args, check=True,
+                                           cwd=repo_root, env=child_env)
+                    else:
+                        child_args = [
+                            str(script),
+                            "--rows", str(rows),
+                            "--seed", str(args.seed),
+                            "--batch-size", str(args.batch_size),
+                            "--append-mode", args.append_mode,
+                            "--backend", args.backend,
+                            "--transport", args.transport,
+                            "--host", args.host,
+                            "--port", str(args.port),
+                            "--database", args.database,
+                            "--only-backend", backend,
+                            "--append-sleep-ms", str(args.append_sleep_ms),
+                        ]
+                        if args.server_bin:
+                            child_args += ["--server-bin", args.server_bin]
+                        if args.mask_reuse:
+                            child_args.append("--mask-reuse")
+                        if not args.cleanup:
+                            child_args.append("--no-cleanup")
+                        if args.transport == "network":
+                            child_args.append("--no-server")
+                        subprocess.run([sys.executable] + child_args, check=True,
+                                       cwd=repo_root, env=child_env)
+            return
+
+        for rows in row_sweep:
+            print(f"starting sweep rows={rows}", flush=True)
+            sweep_suffix = f"{suffix}_{rows}" if suffix else f"_{rows}"
+            if "dataset" in backends:
+                dataset_stats = run_dataset_bench(
+                    rows,
+                    args.seed,
+                    args.batch_size,
+                    args.append_mode,
+                    args.backend,
+                    host,
+                    port,
+                    f"{dataset_db}{sweep_suffix}",
+                    args.mask_reuse,
+                    args.append_sleep_ms,
+                )
+                print_results("dataset", rows, dataset_stats)
+                print("---")
+
+            if "mimicapi" in backends:
+                api_stats = run_mimicapi_bench(
+                    rows,
+                    args.seed,
+                    args.batch_size,
+                    args.append_mode,
+                    host,
+                    port,
+                    f"{api_db}{sweep_suffix}",
+                    args.mask_reuse,
+                    args.append_sleep_ms,
+                    args.cleanup,
+                )
+                print_results("mimicapi", rows, api_stats)
+                print("---")
+
+            if "mongodb_cpp" in backends:
+                mongo_stats = run_mongo_bench(
+                    rows,
+                    args.seed,
+                    args.batch_size,
+                    args.append_mode,
+                    host,
+                    port,
+                    f"{mongo_db}{sweep_suffix}",
+                    args.mask_reuse,
+                    args.append_sleep_ms,
+                    args.cleanup,
+                )
+                print_results("mongodb_cpp", rows, mongo_stats)
+                print("---")
+
+            if "mysql" in backends:
+                mysql_stats = run_mysql_bench(
+                    rows,
+                    args.seed,
+                    args.batch_size,
+                    args.append_mode,
+                    host,
+                    port,
+                    f"{mysql_db}{sweep_suffix}",
+                    args.mask_reuse,
+                    args.append_sleep_ms,
+                    args.cleanup,
+                )
+                print_results("mysql_mariadb_api", rows, mysql_stats)
+                print("---")
+
+            if "sql" in backends:
+                sql_dialects = [args.dialect] if args.dialect else [
+                    "ansi", "postgres", "mysql", "sqlite", "oracle", "duckdb", "sqlserver"
+                ]
+                for dialect in sql_dialects:
+                    sql_db = f"{args.database}_{dialect}{sweep_suffix}"
+                    sql_stats = run_sql_dialect_bench(
+                        rows,
+                        args.seed,
+                        args.batch_size,
+                        args.append_mode,
+                        dialect,
+                        sql_db,
+                        args.mask_reuse,
+                        args.append_sleep_ms,
+                        args.cleanup,
+                    )
+                    print_results(f"sql_{dialect}", rows, sql_stats)
+                    print("---")
+
+            if "cpp_core" in backends:
+                cpp_core_stats = run_cpp_core_bench(
+                    rows,
+                    args.seed,
+                    args.batch_size,
+                    args.append_mode,
+                    f"{cpp_core_db}{sweep_suffix}",
+                    args.mask_reuse,
+                    args.append_sleep_ms,
+                    args.cleanup,
+                )
+                print_results("cpp_core", rows, cpp_core_stats)
     finally:
         if server_proc is not None:
             server_proc.terminate()

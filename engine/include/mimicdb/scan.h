@@ -25,6 +25,11 @@ void ScanLoopWithMetrics(size_t count, PredicateFn predicate, void* predicate_ct
 void ScanLoopMaskedWithMetrics(size_t count, const Mask& mask, ConsumeFn consume, void* consume_ctx,
                                Metrics* metrics, size_t row_bytes);
 void BuildMaskLoop(size_t count, PredicateFn predicate, void* predicate_ctx, Mask* out);
+void ScanLoopMaskFirst(size_t count, PredicateFn predicate, void* predicate_ctx, ConsumeFn consume,
+                       void* consume_ctx);
+void ScanLoopMaskFirstWithMetrics(size_t count, PredicateFn predicate, void* predicate_ctx,
+                                  ConsumeFn consume, void* consume_ctx, Metrics* metrics,
+                                  size_t row_bytes);
 void ScanLoopMaskedWithValidity(size_t count, const Mask& mask, const uint8_t* validity,
                                 ConsumeFn consume, void* consume_ctx);
 bool SegmentMatchesPredicate(const SegmentColumnStats& stats, CompareOp op, double value);

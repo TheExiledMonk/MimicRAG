@@ -46,6 +46,8 @@ public:
     bool CreateDatabase(const std::string& name);
     bool CreateDataset(const std::string& db, const std::string& name,
                        const std::vector<FieldDef>& fields);
+    bool DropDatabase(const std::string& name);
+    bool DropDataset(const std::string& db, const std::string& name);
     const std::vector<FieldDef>* FieldsFor(const std::string& db, const std::string& name) const;
     bool AppendBatch(const std::string& db, const std::string& name,
                      const std::vector<mimicdb::FieldBatch>& batches,

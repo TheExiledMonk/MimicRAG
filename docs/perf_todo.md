@@ -9,9 +9,9 @@ Goal: incremental, measurable speed improvements without violating the hot-loop 
 - [x] Runtime CPU feature detection + dispatch (targets: `engine/src/simd_dispatch.cpp`)
 
 ## Branchless execution
-- [ ] Branchless predicate evaluation helpers (targets: `engine/src/predicate.cpp`, `engine/src/mask.cpp`)
-- [ ] Mask-first execution path (targets: `engine/src/mask.cpp`, `engine/src/scan.cpp`)
-- [ ] Mask reuse in aggregates (targets: `engine/src/aggregate.cpp`)
+- [x] Branchless predicate evaluation helpers (targets: `engine/src/predicate.cpp`, `engine/src/mask.cpp`)
+- [x] Mask-first execution path (targets: `engine/src/mask.cpp`, `engine/src/scan.cpp`)
+- [x] Mask reuse in aggregates (targets: `engine/src/aggregate.cpp`)
 
 ## Multi-threading
 - [ ] Segment-level parallel scans (targets: `engine/src/scan.cpp`)

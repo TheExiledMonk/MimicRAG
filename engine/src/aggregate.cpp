@@ -1,5 +1,7 @@
 #include "mimicdb/aggregate.h"
 
+#include "mimicdb/scan.h"
+
 #include <cstddef>
 #include <thread>
 #include <vector>
@@ -465,91 +467,9 @@ void AggregateSumPredicate(const FieldVector& field, PredicateFn predicate, void
     if (!out || !predicate) {
         return;
     }
-    AggregateResult result;
-    const size_t count = field.Size();
-    const bool has_nulls = field.HasNulls();
-    switch (field.Type()) {
-        case FieldType::kInt32: {
-            const auto* values = field.DataInt32();
-            for (size_t i = 0; i < count; ++i) {
-                if (!predicate(i, predicate_ctx)) {
-                    continue;
-                }
-                if (has_nulls && !field.IsValid(i)) {
-                    continue;
-                }
-                result.sum += static_cast<double>(values[i]);
-                ++result.count;
-            }
-            break;
-        }
-        case FieldType::kInt64: {
-            const auto* values = field.DataInt64();
-            for (size_t i = 0; i < count; ++i) {
-                if (!predicate(i, predicate_ctx)) {
-                    continue;
-                }
-                if (has_nulls && !field.IsValid(i)) {
-                    continue;
-                }
-                result.sum += static_cast<double>(values[i]);
-                ++result.count;
-            }
-            break;
-        }
-        case FieldType::kFloat64: {
-            const auto* values = field.DataFloat64();
-            for (size_t i = 0; i < count; ++i) {
-                if (!predicate(i, predicate_ctx)) {
-                    continue;
-                }
-                if (has_nulls && !field.IsValid(i)) {
-                    continue;
-                }
-                result.sum += values[i];
-                ++result.count;
-            }
-            break;
-        }
-        case FieldType::kBool: {
-            const auto* values = field.DataBool();
-            for (size_t i = 0; i < count; ++i) {
-                if (!predicate(i, predicate_ctx)) {
-                    continue;
-                }
-                if (has_nulls && !field.IsValid(i)) {
-                    continue;
-                }
-                result.sum += values[i] ? 1.0 : 0.0;
-                ++result.count;
-            }
-            break;
-        }
-        case FieldType::kDictInt32: {
-            const auto* ids = field.DataDictIds();
-            const auto* dict = field.Dictionary();
-            if (!ids || !dict) {
-                break;
-            }
-            for (size_t i = 0; i < count; ++i) {
-                if (!predicate(i, predicate_ctx)) {
-                    continue;
-                }
-                if (has_nulls && !field.IsValid(i)) {
-                    continue;
-                }
-                result.sum += static_cast<double>(dict->Value(ids[i]));
-                ++result.count;
-            }
-            break;
-        }
-        case FieldType::kString:
-        case FieldType::kBytes:
-        case FieldType::kArray:
-        case FieldType::kObject:
-            break;
-    }
-    *out = result;
+    Mask mask(field.Size());
+    BuildMaskLoop(field.Size(), predicate, predicate_ctx, &mask);
+    AggregateSum(field, &mask, out);
 }
 
 void AggregateCountPredicate(const FieldVector& field, PredicateFn predicate, void* predicate_ctx,
@@ -557,19 +477,9 @@ void AggregateCountPredicate(const FieldVector& field, PredicateFn predicate, vo
     if (!out || !predicate) {
         return;
     }
-    AggregateResult result;
-    const size_t count = field.Size();
-    const bool has_nulls = field.HasNulls();
-    for (size_t i = 0; i < count; ++i) {
-        if (!predicate(i, predicate_ctx)) {
-            continue;
-        }
-        if (has_nulls && !field.IsValid(i)) {
-            continue;
-        }
-        ++result.count;
-    }
-    *out = result;
+    Mask mask(field.Size());
+    BuildMaskLoop(field.Size(), predicate, predicate_ctx, &mask);
+    AggregateCount(field, &mask, out);
 }
 
 void AggregateMinMaxPredicate(const FieldVector& field, PredicateFn predicate, void* predicate_ctx,
@@ -577,151 +487,9 @@ void AggregateMinMaxPredicate(const FieldVector& field, PredicateFn predicate, v
     if (!out || !predicate) {
         return;
     }
-    AggregateResult result;
-    const size_t count = field.Size();
-    const bool has_nulls = field.HasNulls();
-    switch (field.Type()) {
-        case FieldType::kInt32: {
-            const auto* values = field.DataInt32();
-            for (size_t i = 0; i < count; ++i) {
-                if (!predicate(i, predicate_ctx)) {
-                    continue;
-                }
-                if (has_nulls && !field.IsValid(i)) {
-                    continue;
-                }
-                const double value = static_cast<double>(values[i]);
-                if (!result.has_value) {
-                    result.min = value;
-                    result.max = value;
-                    result.has_value = true;
-                } else {
-                    if (value < result.min) {
-                        result.min = value;
-                    }
-                    if (value > result.max) {
-                        result.max = value;
-                    }
-                }
-                ++result.count;
-            }
-            break;
-        }
-        case FieldType::kInt64: {
-            const auto* values = field.DataInt64();
-            for (size_t i = 0; i < count; ++i) {
-                if (!predicate(i, predicate_ctx)) {
-                    continue;
-                }
-                if (has_nulls && !field.IsValid(i)) {
-                    continue;
-                }
-                const double value = static_cast<double>(values[i]);
-                if (!result.has_value) {
-                    result.min = value;
-                    result.max = value;
-                    result.has_value = true;
-                } else {
-                    if (value < result.min) {
-                        result.min = value;
-                    }
-                    if (value > result.max) {
-                        result.max = value;
-                    }
-                }
-                ++result.count;
-            }
-            break;
-        }
-        case FieldType::kFloat64: {
-            const auto* values = field.DataFloat64();
-            for (size_t i = 0; i < count; ++i) {
-                if (!predicate(i, predicate_ctx)) {
-                    continue;
-                }
-                if (has_nulls && !field.IsValid(i)) {
-                    continue;
-                }
-                const double value = values[i];
-                if (!result.has_value) {
-                    result.min = value;
-                    result.max = value;
-                    result.has_value = true;
-                } else {
-                    if (value < result.min) {
-                        result.min = value;
-                    }
-                    if (value > result.max) {
-                        result.max = value;
-                    }
-                }
-                ++result.count;
-            }
-            break;
-        }
-        case FieldType::kBool: {
-            const auto* values = field.DataBool();
-            for (size_t i = 0; i < count; ++i) {
-                if (!predicate(i, predicate_ctx)) {
-                    continue;
-                }
-                if (has_nulls && !field.IsValid(i)) {
-                    continue;
-                }
-                const double value = values[i] ? 1.0 : 0.0;
-                if (!result.has_value) {
-                    result.min = value;
-                    result.max = value;
-                    result.has_value = true;
-                } else {
-                    if (value < result.min) {
-                        result.min = value;
-                    }
-                    if (value > result.max) {
-                        result.max = value;
-                    }
-                }
-                ++result.count;
-            }
-            break;
-        }
-        case FieldType::kDictInt32: {
-            const auto* ids = field.DataDictIds();
-            const auto* dict = field.Dictionary();
-            if (!ids || !dict) {
-                break;
-            }
-            for (size_t i = 0; i < count; ++i) {
-                if (!predicate(i, predicate_ctx)) {
-                    continue;
-                }
-                if (has_nulls && !field.IsValid(i)) {
-                    continue;
-                }
-                const double value = static_cast<double>(dict->Value(ids[i]));
-                if (!result.has_value) {
-                    result.min = value;
-                    result.max = value;
-                    result.has_value = true;
-                } else {
-                    if (value < result.min) {
-                        result.min = value;
-                    }
-                    if (value > result.max) {
-                        result.max = value;
-                    }
-                }
-                ++result.count;
-            }
-            break;
-        }
-        case FieldType::kString:
-        case FieldType::kBytes:
-        case FieldType::kArray:
-        case FieldType::kObject:
-            break;
-    }
-    *out = result;
+    Mask mask(field.Size());
+    BuildMaskLoop(field.Size(), predicate, predicate_ctx, &mask);
+    AggregateMinMax(field, &mask, out);
 }
 
 void AggregateMixedPredicate(const FieldVector& field, PredicateFn predicate, void* predicate_ctx,
@@ -729,155 +497,9 @@ void AggregateMixedPredicate(const FieldVector& field, PredicateFn predicate, vo
     if (!out || !predicate) {
         return;
     }
-    AggregateResult result;
-    const size_t count = field.Size();
-    const bool has_nulls = field.HasNulls();
-    switch (field.Type()) {
-        case FieldType::kInt32: {
-            const auto* values = field.DataInt32();
-            for (size_t i = 0; i < count; ++i) {
-                if (!predicate(i, predicate_ctx)) {
-                    continue;
-                }
-                if (has_nulls && !field.IsValid(i)) {
-                    continue;
-                }
-                const double value = static_cast<double>(values[i]);
-                result.sum += value;
-                if (!result.has_value) {
-                    result.min = value;
-                    result.max = value;
-                    result.has_value = true;
-                } else {
-                    if (value < result.min) {
-                        result.min = value;
-                    }
-                    if (value > result.max) {
-                        result.max = value;
-                    }
-                }
-                ++result.count;
-            }
-            break;
-        }
-        case FieldType::kInt64: {
-            const auto* values = field.DataInt64();
-            for (size_t i = 0; i < count; ++i) {
-                if (!predicate(i, predicate_ctx)) {
-                    continue;
-                }
-                if (has_nulls && !field.IsValid(i)) {
-                    continue;
-                }
-                const double value = static_cast<double>(values[i]);
-                result.sum += value;
-                if (!result.has_value) {
-                    result.min = value;
-                    result.max = value;
-                    result.has_value = true;
-                } else {
-                    if (value < result.min) {
-                        result.min = value;
-                    }
-                    if (value > result.max) {
-                        result.max = value;
-                    }
-                }
-                ++result.count;
-            }
-            break;
-        }
-        case FieldType::kFloat64: {
-            const auto* values = field.DataFloat64();
-            for (size_t i = 0; i < count; ++i) {
-                if (!predicate(i, predicate_ctx)) {
-                    continue;
-                }
-                if (has_nulls && !field.IsValid(i)) {
-                    continue;
-                }
-                const double value = values[i];
-                result.sum += value;
-                if (!result.has_value) {
-                    result.min = value;
-                    result.max = value;
-                    result.has_value = true;
-                } else {
-                    if (value < result.min) {
-                        result.min = value;
-                    }
-                    if (value > result.max) {
-                        result.max = value;
-                    }
-                }
-                ++result.count;
-            }
-            break;
-        }
-        case FieldType::kBool: {
-            const auto* values = field.DataBool();
-            for (size_t i = 0; i < count; ++i) {
-                if (!predicate(i, predicate_ctx)) {
-                    continue;
-                }
-                if (has_nulls && !field.IsValid(i)) {
-                    continue;
-                }
-                const double value = values[i] ? 1.0 : 0.0;
-                result.sum += value;
-                if (!result.has_value) {
-                    result.min = value;
-                    result.max = value;
-                    result.has_value = true;
-                } else {
-                    if (value < result.min) {
-                        result.min = value;
-                    }
-                    if (value > result.max) {
-                        result.max = value;
-                    }
-                }
-                ++result.count;
-            }
-            break;
-        }
-        case FieldType::kDictInt32: {
-            const auto* ids = field.DataDictIds();
-            const auto* dict = field.Dictionary();
-            if (!ids || !dict) {
-                break;
-            }
-            for (size_t i = 0; i < count; ++i) {
-                if (!predicate(i, predicate_ctx)) {
-                    continue;
-                }
-                if (has_nulls && !field.IsValid(i)) {
-                    continue;
-                }
-                const double value = static_cast<double>(dict->Value(ids[i]));
-                result.sum += value;
-                if (!result.has_value) {
-                    result.min = value;
-                    result.max = value;
-                    result.has_value = true;
-                } else {
-                    if (value < result.min) {
-                        result.min = value;
-                    }
-                    if (value > result.max) {
-                        result.max = value;
-                    }
-                }
-                ++result.count;
-            }
-            break;
-        }
-        case FieldType::kString:
-        case FieldType::kBytes:
-        case FieldType::kArray:
-            break;
-    }
-    *out = result;
+    Mask mask(field.Size());
+    BuildMaskLoop(field.Size(), predicate, predicate_ctx, &mask);
+    AggregateMixed(field, &mask, out);
 }
 
 void AggregateFieldParallel(const FieldVector& field, const Mask* mask, size_t thread_count,

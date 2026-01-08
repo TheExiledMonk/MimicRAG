@@ -250,6 +250,18 @@ bool ApiClientCore::CreateDataset(const std::string& db, const std::string& name
     return true;
 }
 
+bool ApiClientCore::DropDatabase(const std::string& name) {
+    return databases_.erase(name) > 0;
+}
+
+bool ApiClientCore::DropDataset(const std::string& db, const std::string& name) {
+    auto it = databases_.find(db);
+    if (it == databases_.end()) {
+        return false;
+    }
+    return it->second.erase(name) > 0;
+}
+
 const std::vector<FieldDef>* ApiClientCore::FieldsFor(const std::string& db,
                                                       const std::string& name) const {
     const auto* state = GetDataset(db, name);

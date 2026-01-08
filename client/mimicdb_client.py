@@ -15,6 +15,8 @@ OP_HEALTH = 5
 OP_CREATE_DATABASE = 6
 OP_LIST_DATABASES = 7
 OP_SCAN = 8
+OP_DROP_DATABASE = 9
+OP_DROP_DATASET = 10
 
 STATUS_OK = 0
 
@@ -109,6 +111,21 @@ class MimicDBClient:
             payload += field_name.encode("utf-8")
             payload += struct.pack("<B", type_id)
         self._request(OP_CREATE_DATASET, bytes(payload))
+
+    def drop_database(self, name: str) -> None:
+        payload = bytearray()
+        payload += struct.pack("<H", len(name))
+        payload += name.encode("utf-8")
+        self._request(OP_DROP_DATABASE, bytes(payload))
+
+    def drop_dataset(self, name: str, database: str | None = None) -> None:
+        db_name = self._default_db if database is None else database
+        payload = bytearray()
+        payload += struct.pack("<H", len(db_name))
+        payload += db_name.encode("utf-8")
+        payload += struct.pack("<H", len(name))
+        payload += name.encode("utf-8")
+        self._request(OP_DROP_DATASET, bytes(payload))
 
     def append_batch(
         self,

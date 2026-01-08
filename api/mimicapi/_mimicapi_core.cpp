@@ -144,6 +144,33 @@ PyObject* ApiClientCoreCreateDataset(ApiClientCoreObject* self, PyObject* args) 
     Py_RETURN_NONE;
 }
 
+PyObject* ApiClientCoreDropDatabase(ApiClientCoreObject* self, PyObject* args) {
+    const char* name = nullptr;
+    if (!PyArg_ParseTuple(args, "s", &name)) {
+        return nullptr;
+    }
+    const bool ok = self->core->DropDatabase(name);
+    if (!ok) {
+        PyErr_SetString(PyExc_RuntimeError, "drop_database failed");
+        return nullptr;
+    }
+    Py_RETURN_NONE;
+}
+
+PyObject* ApiClientCoreDropDataset(ApiClientCoreObject* self, PyObject* args) {
+    const char* db = nullptr;
+    const char* name = nullptr;
+    if (!PyArg_ParseTuple(args, "ss", &db, &name)) {
+        return nullptr;
+    }
+    const bool ok = self->core->DropDataset(db, name);
+    if (!ok) {
+        PyErr_SetString(PyExc_RuntimeError, "drop_dataset failed");
+        return nullptr;
+    }
+    Py_RETURN_NONE;
+}
+
 PyObject* ApiClientCoreAppendBatch(ApiClientCoreObject* self, PyObject* args) {
     const char* db = nullptr;
     const char* name = nullptr;
@@ -648,6 +675,8 @@ PyObject* ApiClientCoreAggregate(ApiClientCoreObject* self, PyObject* args, PyOb
 PyMethodDef ApiClientCoreMethods[] = {
     {"create_database", (PyCFunction)ApiClientCoreCreateDatabase, METH_VARARGS, nullptr},
     {"create_dataset", (PyCFunction)ApiClientCoreCreateDataset, METH_VARARGS, nullptr},
+    {"drop_database", (PyCFunction)ApiClientCoreDropDatabase, METH_VARARGS, nullptr},
+    {"drop_dataset", (PyCFunction)ApiClientCoreDropDataset, METH_VARARGS, nullptr},
     {"append_batch", (PyCFunction)ApiClientCoreAppendBatch, METH_VARARGS, nullptr},
     {"scan", (PyCFunction)ApiClientCoreScan, METH_VARARGS | METH_KEYWORDS, nullptr},
     {"aggregate", (PyCFunction)ApiClientCoreAggregate, METH_VARARGS | METH_KEYWORDS, nullptr},

@@ -58,6 +58,26 @@ void BuildMaskLoop(size_t count, PredicateFn predicate, void* predicate_ctx, Mas
     }
 }
 
+void ScanLoopMaskFirst(size_t count, PredicateFn predicate, void* predicate_ctx, ConsumeFn consume,
+                       void* consume_ctx) {
+    if (!predicate || !consume) {
+        return;
+    }
+    Mask mask(count);
+    BuildMaskLoop(count, predicate, predicate_ctx, &mask);
+    ScanLoopMasked(count, mask, consume, consume_ctx);
+}
+
+void ScanLoopMaskFirstWithMetrics(size_t count, PredicateFn predicate, void* predicate_ctx,
+                                  ConsumeFn consume, void* consume_ctx, Metrics* metrics,
+                                  size_t row_bytes) {
+    if (metrics) {
+        metrics->AddRows(static_cast<uint64_t>(count));
+        metrics->AddBytes(static_cast<uint64_t>(count * row_bytes));
+    }
+    ScanLoopMaskFirst(count, predicate, predicate_ctx, consume, consume_ctx);
+}
+
 void ScanLoopMaskedWithValidity(size_t count, const Mask& mask, const uint8_t* validity,
                                 ConsumeFn consume, void* consume_ctx) {
     if (!consume) {

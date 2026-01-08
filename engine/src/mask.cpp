@@ -135,6 +135,18 @@ Mask BuildMaskBranchless(const Int64PredicateBranchless& predicate, size_t count
     return mask;
 }
 
+Mask BuildMaskBranchlessFloat64(const Float64PredicateBranchless& predicate, size_t count) {
+    Mask mask(count);
+    if (!predicate.data) {
+        return mask;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        const uint8_t keep = CompareFloat64Branchless(predicate.data[i], predicate.value, predicate.op);
+        mask.Set(i, keep != 0);
+    }
+    return mask;
+}
+
 PackedMask PackMask(const Mask& mask) {
     PackedMask packed(mask.Size());
     for (size_t i = 0; i < mask.Size(); ++i) {
