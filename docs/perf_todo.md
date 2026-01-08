@@ -5,7 +5,7 @@ Goal: incremental, measurable speed improvements without violating the hot-loop 
 ## Hot loop + SIMD
 - [ ] Vectorized inner loops for scan predicates (targets: `engine/src/simd_predicate.cpp`, `engine/src/scan.cpp`)
 - [ ] Vectorized aggregate kernels (targets: `engine/src/simd_aggregate.cpp`)
-- [ ] SIMD output compaction (targets: `engine/src/simd_output.cpp`)
+- [x] SIMD output compaction (targets: `engine/src/simd_output.cpp`)
 - [x] Runtime CPU feature detection + dispatch (targets: `engine/src/simd_dispatch.cpp`)
 
 ## Branchless execution

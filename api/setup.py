@@ -19,6 +19,8 @@ sources = [
     str(engine_src / "schema.cpp"),
     str(engine_src / "dictionary.cpp"),
     str(engine_src / "array_codec.cpp"),
+    str(engine_src / "simd_output.cpp"),
+    str(engine_src / "simd_dispatch.cpp"),
 ]
 
 core_sources = [

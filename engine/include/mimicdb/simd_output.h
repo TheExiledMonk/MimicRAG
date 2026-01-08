@@ -9,6 +9,7 @@
 namespace mimicdb {
 
 void CompressStoreScalar(const Mask& mask, size_t count, std::vector<size_t>* out);
+void CompressStorePacked(const PackedMask& mask, size_t count, std::vector<size_t>* out);
 
 }  // namespace mimicdb
 
