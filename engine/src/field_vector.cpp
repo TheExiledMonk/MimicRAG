@@ -320,6 +320,26 @@ void FieldVector::Reserve(size_t size) {
     }
 }
 
+void FieldVector::ReleaseStorage() {
+    data_i32_.clear();
+    data_i64_.clear();
+    data_f64_.clear();
+    data_bool_.clear();
+    data_dict_ids_.clear();
+    data_bytes_.clear();
+    data_lengths_.clear();
+    data_offsets_.clear();
+    offsets_valid_ = false;
+    std::vector<int32_t>().swap(data_i32_);
+    std::vector<int64_t>().swap(data_i64_);
+    std::vector<double>().swap(data_f64_);
+    std::vector<uint8_t>().swap(data_bool_);
+    std::vector<uint32_t>().swap(data_dict_ids_);
+    std::vector<uint8_t>().swap(data_bytes_);
+    std::vector<uint32_t>().swap(data_lengths_);
+    std::vector<uint32_t>().swap(data_offsets_);
+}
+
 void FieldVector::AppendValidity(const uint8_t* validity, size_t count) {
     if (validity_.Size() == 0) {
         validity_.Resize(size_);

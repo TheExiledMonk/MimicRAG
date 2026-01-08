@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "mimicapi/core.h"
@@ -176,6 +177,11 @@ struct PipelineStage {
     FacetSpec facet;
 };
 
+struct MongoStats {
+    size_t last_scan_rows = 0;
+    size_t last_returned_rows = 0;
+    bool last_full_rebuild = false;
+};
 
 class MongoClientCore {
 public:
@@ -198,6 +204,7 @@ public:
                   bool multi, bool upsert, bool replace, std::string* error);
     size_t Delete(const std::string& db, const std::string& collection,
                   const std::vector<Filter>& filters, bool multi, std::string* error);
+    MongoStats StatsFor(const std::string& db, const std::string& collection) const;
 
 private:
     struct CollectionState {
@@ -205,6 +212,20 @@ private:
         std::unordered_map<std::string, size_t> field_index;
         int64_t next_id = 1;
         bool initialized = false;
+        mutable int64_t last_seen_version = 0;
+        mutable bool cache_valid = false;
+        mutable std::unordered_map<int64_t, MongoDocument> latest_cache;
+        mutable std::unordered_set<std::string> cached_fields;
+        bool append_only = true;
+        mutable MongoStats stats;
+        std::vector<mimicdb::FieldBatch> batch_scratch;
+        std::vector<std::vector<int64_t>> i64_scratch;
+        std::vector<std::vector<int32_t>> i32_scratch;
+        std::vector<std::vector<double>> f64_scratch;
+        std::vector<std::vector<uint8_t>> bool_scratch;
+        std::vector<std::vector<uint32_t>> length_scratch;
+        std::vector<std::vector<uint8_t>> bytes_scratch;
+        std::vector<std::vector<uint8_t>> validity_scratch;
     };
 
     ApiClientCore* core_;
@@ -216,8 +237,16 @@ private:
     bool EnsureSchema(const std::string& db, const std::string& collection,
                       const std::vector<MongoDocument>& docs, std::string* error);
     uint64_t NextVersion();
+    bool UpdateCache(const std::string& db,
+                     const std::string& collection,
+                     const std::vector<std::string>& required_fields,
+                     std::string* error) const;
     std::vector<MongoDocument> LatestDocuments(const std::string& db,
                                                const std::string& collection,
+                                               std::string* error) const;
+    std::vector<MongoDocument> LatestDocuments(const std::string& db,
+                                               const std::string& collection,
+                                               const std::vector<std::string>& required_fields,
                                                std::string* error) const;
 };
 

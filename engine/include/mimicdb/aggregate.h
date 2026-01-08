@@ -3,6 +3,7 @@
 
 #include <cstdint>
 
+#include "mimicdb/compression.h"
 #include "mimicdb/field_vector.h"
 #include "mimicdb/mask.h"
 #include "mimicdb/scan.h"
@@ -34,6 +35,8 @@ void AggregateMinMaxPredicate(const FieldVector& field, PredicateFn predicate, v
                               AggregateResult* out);
 void AggregateMixedPredicate(const FieldVector& field, PredicateFn predicate, void* predicate_ctx,
                              AggregateResult* out);
+void AggregateCompressed(const CompressedColumnView& column, const Mask* mask,
+                         AggregateResult* out);
 
 }  // namespace mimicdb
 

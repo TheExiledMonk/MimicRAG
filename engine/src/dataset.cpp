@@ -323,4 +323,70 @@ Schema Dataset::SchemaView() const {
     return Schema(std::move(fields));
 }
 
+DatasetCompressionStats Dataset::CompressionStats() const {
+    DatasetCompressionStats stats;
+    stats.active_rows = ActiveRowCount();
+    auto raw_bytes_for_field = [](const FieldVector& field) -> uint64_t {
+        uint64_t bytes = 0;
+        switch (field.Type()) {
+            case FieldType::kInt32:
+                bytes += static_cast<uint64_t>(field.Size() * sizeof(int32_t));
+                break;
+            case FieldType::kInt64:
+                bytes += static_cast<uint64_t>(field.Size() * sizeof(int64_t));
+                break;
+            case FieldType::kFloat64:
+                bytes += static_cast<uint64_t>(field.Size() * sizeof(double));
+                break;
+            case FieldType::kBool:
+                bytes += static_cast<uint64_t>(field.Size() * sizeof(uint8_t));
+                break;
+            case FieldType::kDictInt32:
+                bytes += static_cast<uint64_t>(field.Size() * sizeof(uint32_t));
+                break;
+            case FieldType::kString:
+            case FieldType::kBytes:
+            case FieldType::kArray:
+                bytes += static_cast<uint64_t>(field.Size() * sizeof(uint32_t));
+                bytes += static_cast<uint64_t>(field.BytesSize());
+                break;
+            case FieldType::kObject:
+                break;
+        }
+        if (field.HasNulls()) {
+            bytes += static_cast<uint64_t>(field.Validity().WordCount()) * sizeof(uint64_t);
+        }
+        return bytes;
+    };
+    for (const auto& segment : segments_) {
+        stats.segments += 1;
+        if (segment.IsSealed() && !segment.CompressedColumns().empty()) {
+            stats.compressed_segments += 1;
+            for (const auto& col : segment.CompressedColumns()) {
+                stats.raw_bytes += static_cast<uint64_t>(
+                    col.raw_data_size + col.raw_aux_size +
+                    col.validity_word_count * sizeof(uint64_t));
+                stats.compressed_bytes += static_cast<uint64_t>(
+                    col.data_size + col.aux_size +
+                    col.validity_word_count * sizeof(uint64_t));
+                if (col.kind != ColumnCompressionKind::kNone) {
+                    stats.compressed_columns += 1;
+                }
+            }
+        } else {
+            for (const auto& field : segment.Fields()) {
+                const uint64_t bytes = raw_bytes_for_field(field);
+                stats.raw_bytes += bytes;
+                stats.compressed_bytes += bytes;
+            }
+        }
+    }
+    for (const auto& field : active_fields_) {
+        const uint64_t bytes = raw_bytes_for_field(field);
+        stats.raw_bytes += bytes;
+        stats.compressed_bytes += bytes;
+    }
+    return stats;
+}
+
 }  // namespace mimicdb

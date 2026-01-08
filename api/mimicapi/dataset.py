@@ -224,6 +224,11 @@ class Dataset:
         first = next(iter(self._columns.values()))
         return len(first)
 
+    def compression_stats(self) -> dict | None:
+        if self._cpp is not None:
+            return self._cpp.compression_stats()
+        return None
+
     def _column(self, name: str) -> list:
         if self._cpp is not None:
             raise RuntimeError("column access unavailable for C++ backend")

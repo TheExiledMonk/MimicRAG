@@ -2,9 +2,74 @@
 
 #include <algorithm>
 
+#include "mimicdb/aggregate.h"
 #include "mimicdb/array_codec.h"
+#include "mimicdb/compression.h"
 namespace mimicapi {
 namespace {
+
+struct DecodedColumns {
+    std::vector<mimicdb::CompressedColumnView> views;
+    std::vector<std::vector<uint8_t>> data;
+    std::vector<std::vector<uint8_t>> aux;
+};
+
+bool NeedsLz4Decode(const std::vector<mimicdb::CompressedColumnView>& columns) {
+    for (const auto& col : columns) {
+        if (col.kind == mimicdb::ColumnCompressionKind::kLz4) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool BuildReadableColumns(const std::vector<mimicdb::CompressedColumnView>& columns,
+                          DecodedColumns* out) {
+    if (!out) {
+        return false;
+    }
+    out->views.clear();
+    out->views.reserve(columns.size());
+    if (out->data.size() < columns.size()) {
+        out->data.resize(columns.size());
+    }
+    if (out->aux.size() < columns.size()) {
+        out->aux.resize(columns.size());
+    }
+    for (size_t i = 0; i < columns.size(); ++i) {
+        out->data[i].clear();
+        out->aux[i].clear();
+        const auto& col = columns[i];
+        if (col.kind == mimicdb::ColumnCompressionKind::kLz4) {
+            if (col.raw_data_size > 0) {
+                out->data[i].resize(col.raw_data_size);
+                if (!mimicdb::DecodeLz4Literal(col.data, col.data_size,
+                                               out->data[i].data(),
+                                               out->data[i].size())) {
+                    return false;
+                }
+            }
+            if (col.raw_aux_size > 0) {
+                out->aux[i].resize(col.raw_aux_size);
+                if (!mimicdb::DecodeLz4Literal(col.aux, col.aux_size,
+                                               out->aux[i].data(),
+                                               out->aux[i].size())) {
+                    return false;
+                }
+            }
+            mimicdb::CompressedColumnView view = col;
+            view.kind = mimicdb::ColumnCompressionKind::kNone;
+            view.data = out->data[i].empty() ? nullptr : out->data[i].data();
+            view.data_size = col.raw_data_size;
+            view.aux = out->aux[i].empty() ? nullptr : out->aux[i].data();
+            view.aux_size = col.raw_aux_size;
+            out->views.push_back(view);
+        } else {
+            out->views.push_back(col);
+        }
+    }
+    return true;
+}
 
 bool IsNumeric(mimicdb::FieldType type) {
     return type == mimicdb::FieldType::kInt32 ||
@@ -44,7 +109,41 @@ bool ReadNumeric(const mimicdb::FieldVector& field, size_t index, double* out) {
     }
 }
 
+bool ReadNumericCompressed(const mimicdb::CompressedColumnView& column, size_t index, double* out) {
+    if (!mimicdb::IsValid(column, index)) {
+        return false;
+    }
+    switch (column.type) {
+        case mimicdb::FieldType::kInt32:
+            *out = static_cast<double>(
+                reinterpret_cast<const int32_t*>(column.data)[index]);
+            return true;
+        case mimicdb::FieldType::kInt64:
+            *out = static_cast<double>(
+                reinterpret_cast<const int64_t*>(column.data)[index]);
+            return true;
+        case mimicdb::FieldType::kFloat64:
+            *out = reinterpret_cast<const double*>(column.data)[index];
+            return true;
+        case mimicdb::FieldType::kBool:
+            *out = reinterpret_cast<const uint8_t*>(column.data)[index] != 0;
+            return true;
+        case mimicdb::FieldType::kDictInt32:
+            if (column.dict) {
+                *out = static_cast<double>(
+                    column.dict->Value(reinterpret_cast<const uint32_t*>(column.data)[index]));
+                return true;
+            }
+            *out = static_cast<double>(
+                reinterpret_cast<const uint32_t*>(column.data)[index]);
+            return true;
+        default:
+            return false;
+    }
+}
+
 std::string ReadVarlen(const mimicdb::FieldVector& field, size_t index);
+std::string ReadVarlenCompressed(const mimicdb::CompressedColumnView& column, size_t index);
 
 mimicdb::FieldValue ReadValue(const mimicdb::FieldVector& field, size_t index) {
     if (!field.IsValid(index)) {
@@ -106,6 +205,64 @@ std::string ReadVarlen(const mimicdb::FieldVector& field, size_t index) {
     return std::string(reinterpret_cast<const char*>(bytes + offset), lengths[index]);
 }
 
+std::string ReadVarlenCompressed(const mimicdb::CompressedColumnView& column, size_t index) {
+    const auto* lengths = reinterpret_cast<const uint32_t*>(column.aux);
+    const auto* bytes = column.data;
+    if (!lengths || !bytes) {
+        return {};
+    }
+    uint32_t offset = 0;
+    for (size_t i = 0; i < index; ++i) {
+        offset += lengths[i];
+    }
+    return std::string(reinterpret_cast<const char*>(bytes + offset), lengths[index]);
+}
+
+mimicdb::FieldValue ReadValueCompressed(const mimicdb::CompressedColumnView& column, size_t index) {
+    if (!mimicdb::IsValid(column, index)) {
+        return mimicdb::FieldValue::Null(column.type);
+    }
+    switch (column.type) {
+        case mimicdb::FieldType::kInt32:
+            return mimicdb::FieldValue::Int32(
+                reinterpret_cast<const int32_t*>(column.data)[index]);
+        case mimicdb::FieldType::kInt64:
+            return mimicdb::FieldValue::Int64(
+                reinterpret_cast<const int64_t*>(column.data)[index]);
+        case mimicdb::FieldType::kFloat64:
+            return mimicdb::FieldValue::Float64(
+                reinterpret_cast<const double*>(column.data)[index]);
+        case mimicdb::FieldType::kBool:
+            return mimicdb::FieldValue::Bool(
+                reinterpret_cast<const uint8_t*>(column.data)[index] != 0);
+        case mimicdb::FieldType::kDictInt32:
+            if (column.dict) {
+                return mimicdb::FieldValue::Int32(
+                    column.dict->Value(
+                        reinterpret_cast<const uint32_t*>(column.data)[index]));
+            }
+            return mimicdb::FieldValue::Int32(
+                static_cast<int32_t>(
+                    reinterpret_cast<const uint32_t*>(column.data)[index]));
+        case mimicdb::FieldType::kString: {
+            return mimicdb::FieldValue::String(ReadVarlenCompressed(column, index));
+        }
+        case mimicdb::FieldType::kBytes: {
+            return mimicdb::FieldValue::Bytes(ReadVarlenCompressed(column, index));
+        }
+        case mimicdb::FieldType::kArray: {
+            const std::string encoded = ReadVarlenCompressed(column, index);
+            std::vector<mimicdb::FieldValue> values;
+            if (!mimicdb::DecodeArray(encoded, &values)) {
+                return mimicdb::FieldValue::Null(mimicdb::FieldType::kArray);
+            }
+            return mimicdb::FieldValue::Array(values);
+        }
+        case mimicdb::FieldType::kObject:
+            return mimicdb::FieldValue::Null(mimicdb::FieldType::kObject);
+    }
+    return mimicdb::FieldValue::Null(column.type);
+}
 bool ValidatePredicates(const std::vector<mimicdb::FieldVector>& fields,
                         const std::vector<Predicate>& predicates) {
     for (const auto& pred : predicates) {
@@ -200,6 +357,86 @@ bool MatchPredicates(const std::vector<mimicdb::FieldVector>& fields, size_t ind
     return true;
 }
 
+bool BuildPredicateMaskCompressed(const std::vector<mimicdb::CompressedColumnView>& columns,
+                                  const std::vector<Predicate>& predicates,
+                                  mimicdb::Mask* out_mask) {
+    if (!out_mask || predicates.empty()) {
+        return false;
+    }
+    bool has_mask = false;
+    mimicdb::Mask mask;
+    for (const auto& pred : predicates) {
+        if (pred.field_index >= columns.size()) {
+            return false;
+        }
+        const auto& col = columns[pred.field_index];
+        mimicdb::Mask current;
+        if (pred.is_null_check) {
+            current.Resize(col.row_count);
+            for (size_t i = 0; i < col.row_count; ++i) {
+                const bool is_null = !mimicdb::IsValid(col, i);
+                current.Set(i, pred.null_is ? is_null : !is_null);
+            }
+        } else if (col.type == mimicdb::FieldType::kString ||
+                   col.type == mimicdb::FieldType::kBytes) {
+            current.Resize(col.row_count);
+            for (size_t i = 0; i < col.row_count; ++i) {
+                if (!mimicdb::IsValid(col, i)) {
+                    current.Set(i, false);
+                    continue;
+                }
+                const std::string value = ReadVarlenCompressed(col, i);
+                bool keep = false;
+                if (pred.op == mimicdb::CompareOp::kEq) {
+                    keep = value == pred.bytes;
+                } else if (pred.op == mimicdb::CompareOp::kNe) {
+                    keep = value != pred.bytes;
+                }
+                current.Set(i, keep);
+            }
+        } else {
+            current.Resize(col.row_count);
+            for (size_t i = 0; i < col.row_count; ++i) {
+                double value = 0.0;
+                if (!ReadNumericCompressed(col, i, &value)) {
+                    current.Set(i, false);
+                    continue;
+                }
+                bool keep = false;
+                switch (pred.op) {
+                    case mimicdb::CompareOp::kEq:
+                        keep = value == pred.value;
+                        break;
+                    case mimicdb::CompareOp::kNe:
+                        keep = value != pred.value;
+                        break;
+                    case mimicdb::CompareOp::kLt:
+                        keep = value < pred.value;
+                        break;
+                    case mimicdb::CompareOp::kLe:
+                        keep = value <= pred.value;
+                        break;
+                    case mimicdb::CompareOp::kGt:
+                        keep = value > pred.value;
+                        break;
+                    case mimicdb::CompareOp::kGe:
+                        keep = value >= pred.value;
+                        break;
+                }
+                current.Set(i, keep);
+            }
+        }
+        if (!has_mask) {
+            mask = std::move(current);
+            has_mask = true;
+        } else {
+            mask = mimicdb::Mask::And(mask, current);
+        }
+    }
+    *out_mask = std::move(mask);
+    return has_mask;
+}
+
 void AppendScanRows(const std::vector<mimicdb::FieldVector>& fields,
                     const std::vector<size_t>& column_indices, size_t row_count,
                     const std::vector<Predicate>& predicates, size_t* seen,
@@ -219,6 +456,36 @@ void AppendScanRows(const std::vector<mimicdb::FieldVector>& fields,
         row.reserve(column_indices.size());
         for (const auto index : column_indices) {
             row.push_back(ReadValue(fields[index], i));
+        }
+        out->rows.push_back(std::move(row));
+        (*seen)++;
+    }
+}
+
+void AppendScanRowsCompressed(const std::vector<mimicdb::CompressedColumnView>& columns,
+                              const std::vector<size_t>& column_indices, size_t row_count,
+                              const std::vector<Predicate>& predicates, size_t* seen,
+                              size_t offset, size_t limit, ScanResult* out) {
+    mimicdb::Mask mask;
+    const bool has_mask = BuildPredicateMaskCompressed(columns, predicates, &mask);
+    for (size_t i = 0; i < row_count; ++i) {
+        if (has_mask && !mask.Get(i)) {
+            continue;
+        }
+        if (!has_mask && !predicates.empty()) {
+            continue;
+        }
+        if (*seen < offset) {
+            (*seen)++;
+            continue;
+        }
+        if (limit != 0 && out->rows.size() >= limit) {
+            return;
+        }
+        std::vector<mimicdb::FieldValue> row;
+        row.reserve(column_indices.size());
+        for (const auto index : column_indices) {
+            row.push_back(ReadValueCompressed(columns[index], i));
         }
         out->rows.push_back(std::move(row));
         (*seen)++;
@@ -329,8 +596,28 @@ ScanResult ApiClientCore::Scan(const std::string& db, const std::string& name,
     }
     size_t seen = 0;
     for (const auto& segment : state->dataset.Segments()) {
-        AppendScanRows(segment.Fields(), column_indices, segment.RowCount(),
-                       predicates, &seen, offset, limit, &result);
+        if (segment.IsSealed() && !segment.CompressedColumns().empty()) {
+            const auto& columns = segment.CompressedColumns();
+            if (NeedsLz4Decode(columns)) {
+                static thread_local DecodedColumns decoded;
+                if (!BuildReadableColumns(columns, &decoded)) {
+                    if (error) {
+                        *error = "lz4 decode failed";
+                    }
+                    return ScanResult{};
+                }
+                AppendScanRowsCompressed(decoded.views, column_indices,
+                                         segment.RowCount(), predicates, &seen,
+                                         offset, limit, &result);
+            } else {
+                AppendScanRowsCompressed(columns, column_indices,
+                                         segment.RowCount(), predicates, &seen,
+                                         offset, limit, &result);
+            }
+        } else {
+            AppendScanRows(segment.Fields(), column_indices, segment.RowCount(),
+                           predicates, &seen, offset, limit, &result);
+        }
         if (limit != 0 && result.rows.size() >= limit) {
             return result;
         }
@@ -399,10 +686,73 @@ AggregateResult ApiClientCore::Aggregate(const std::string& db, const std::strin
         }
     };
     for (const auto& segment : state->dataset.Segments()) {
-        process_fields(segment.Fields(), segment.RowCount());
+        if (segment.IsSealed() && !segment.CompressedColumns().empty()) {
+            result.rows_scanned += segment.RowCount();
+            const auto& columns = segment.CompressedColumns();
+            static thread_local DecodedColumns decoded;
+            const auto* working_columns = &columns;
+            if (NeedsLz4Decode(columns)) {
+                if (!BuildReadableColumns(columns, &decoded)) {
+                    if (error) {
+                        *error = "lz4 decode failed";
+                    }
+                    return result;
+                }
+                working_columns = &decoded.views;
+            }
+            if (field_index >= working_columns->size()) {
+                continue;
+            }
+            mimicdb::Mask mask;
+            const mimicdb::Mask* mask_ptr = nullptr;
+            if (!predicates.empty()) {
+                if (!BuildPredicateMaskCompressed(*working_columns, predicates, &mask)) {
+                    continue;
+                }
+                mask_ptr = &mask;
+            }
+            mimicdb::AggregateResult local;
+            mimicdb::AggregateCompressed((*working_columns)[field_index], mask_ptr, &local);
+            if (local.count == 0) {
+                continue;
+            }
+            result.count += local.count;
+            result.sum += local.sum;
+            if (!result.has_value && local.has_value) {
+                result.min = local.min;
+                result.max = local.max;
+                result.has_value = true;
+            } else if (local.has_value) {
+                result.min = std::min(result.min, local.min);
+                result.max = std::max(result.max, local.max);
+            }
+        } else {
+            process_fields(segment.Fields(), segment.RowCount());
+        }
     }
     process_fields(state->dataset.ActiveFields(), state->dataset.ActiveRowCount());
     return result;
+}
+
+CompressionStats ApiClientCore::CompressionStatsFor(const std::string& db,
+                                                    const std::string& name,
+                                                    std::string* error) const {
+    CompressionStats stats;
+    const auto* state = GetDataset(db, name);
+    if (!state) {
+        if (error) {
+            *error = "unknown dataset";
+        }
+        return stats;
+    }
+    const auto ds_stats = state->dataset.CompressionStats();
+    stats.raw_bytes = ds_stats.raw_bytes;
+    stats.compressed_bytes = ds_stats.compressed_bytes;
+    stats.segments = ds_stats.segments;
+    stats.compressed_segments = ds_stats.compressed_segments;
+    stats.compressed_columns = ds_stats.compressed_columns;
+    stats.active_rows = ds_stats.active_rows;
+    return stats;
 }
 
 const ApiClientCore::DatasetState* ApiClientCore::GetDataset(const std::string& db,

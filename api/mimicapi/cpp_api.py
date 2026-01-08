@@ -2,8 +2,11 @@ from __future__ import annotations
 
 try:
     from . import _mimicapi_core
-except ImportError:  # pragma: no cover - optional extension
+except ImportError as exc:  # pragma: no cover - optional extension
     _mimicapi_core = None
+    _mimicapi_core_error = str(exc)
+else:
+    _mimicapi_core_error = None
 
 
 class CppApiClient:
@@ -53,3 +56,9 @@ class CppApiClient:
         predicates: list[tuple[int, str, float]] | None = None,
     ) -> dict:
         return self._core.aggregate(db, name, field_index, predicates or None)
+
+    def compression_stats(self, db: str, name: str) -> dict:
+        return self._core.compression_stats(db, name)
+
+    def set_compression_enabled(self, enabled: bool) -> None:
+        _mimicapi_core.set_compression_enabled(bool(enabled))

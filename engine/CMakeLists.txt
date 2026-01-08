@@ -3,6 +3,7 @@ add_library(mimicdb_engine
     src/batch.cpp
     src/bitmap.cpp
     src/array_codec.cpp
+    src/compression.cpp
     src/field_vector.cpp
     src/dataset.cpp
     src/schema.cpp

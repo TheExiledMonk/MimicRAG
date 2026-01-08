@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "mimicdb/compression.h"
 #include "mimicdb/field_vector.h"
 
 namespace mimicdb {
@@ -17,7 +18,10 @@ struct SegmentFormat {
 struct SegmentColumnStats {
     double min = 0.0;
     double max = 0.0;
+    uint64_t value_count = 0;
     uint64_t null_count = 0;
+    uint32_t estimated_cardinality = 0;
+    uint8_t monotonic_hint = 0;  // 0 unknown, 1 non-decreasing, 2 non-increasing, 3 not monotonic
     bool has_value = false;
 };
 
@@ -34,6 +38,9 @@ public:
     const std::vector<FieldVector>& Fields() const;
     bool IsSealed() const;
     const std::vector<SegmentColumnStats>& ColumnStats() const;
+    const std::vector<ColumnCompressionKind>& CompressionKinds() const;
+    void SetCompressionKinds(std::vector<ColumnCompressionKind> kinds);
+    const std::vector<CompressedColumnView>& CompressedColumns() const;
 
 private:
     size_t row_capacity_ = 0;
@@ -42,8 +49,16 @@ private:
     SegmentFormat format_;
     bool sealed_ = false;
     std::vector<SegmentColumnStats> stats_;
+    std::vector<ColumnCompressionKind> compression_kinds_;
+    std::vector<CompressedColumnView> compressed_columns_;
+    std::vector<std::vector<uint8_t>> compressed_data_;
+    std::vector<std::vector<uint8_t>> compressed_aux_;
+    std::vector<std::vector<uint64_t>> compressed_validity_;
+    bool compression_ready_ = false;
 
     void ComputeStats();
+    void BuildCompressionViews();
+    void ResetCompression();
 };
 
 }  // namespace mimicdb

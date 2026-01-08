@@ -23,8 +23,11 @@ class Session:
 
 try:
     from . import _mimicapi_mongo
-except ImportError:  # pragma: no cover
+except ImportError as exc:  # pragma: no cover
     _mimicapi_mongo = None
+    _mimicapi_mongo_error = str(exc)
+else:
+    _mimicapi_mongo_error = None
 
 
 class MongoClientCpp:
@@ -289,6 +292,9 @@ class MongoClientCpp:
 
     def aggregate(self, db: str, collection: str, pipeline: list[dict]) -> list[dict]:
         return self._core.aggregate(db, collection, pipeline)
+
+    def stats(self, db: str, collection: str) -> dict:
+        return self._core.stats(db, collection)
 
 
 class Cursor:

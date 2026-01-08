@@ -7,6 +7,7 @@
 #include <ctime>
 #include <functional>
 #include <regex>
+#include <unordered_set>
 
 #include "mimicdb/array_codec.h"
 namespace mimicapi {
@@ -928,6 +929,440 @@ std::string KeyFromValue(const mimicdb::FieldValue& value) {
     return {};
 }
 
+void AppendUnique(std::vector<std::string>* fields,
+                  std::unordered_set<std::string>* seen,
+                  const std::string& name) {
+    if (!fields || !seen) {
+        return;
+    }
+    if (seen->insert(name).second) {
+        fields->push_back(name);
+    }
+}
+
+void CollectFilterFields(const std::vector<Filter>& filters,
+                         std::vector<std::string>* fields,
+                         std::unordered_set<std::string>* seen) {
+    for (const auto& filter : filters) {
+        if (!filter.field.empty()) {
+            AppendUnique(fields, seen, filter.field);
+        }
+    }
+}
+
+void CollectMatchFields(const MatchExpression& expr,
+                        std::vector<std::string>* fields,
+                        std::unordered_set<std::string>* seen) {
+    CollectFilterFields(expr.filters, fields, seen);
+    for (const auto& child : expr.children) {
+        CollectMatchFields(child, fields, seen);
+    }
+}
+
+bool ProjectionNeedsAll(const ProjectionSpec& projection) {
+    if (!projection.exclude.empty()) {
+        return true;
+    }
+    if (projection.include.empty() && projection.computed.empty() && projection.slices.empty()) {
+        return true;
+    }
+    return false;
+}
+
+bool IsNumericType(mimicdb::FieldType type) {
+    return type == mimicdb::FieldType::kInt32 ||
+           type == mimicdb::FieldType::kInt64 ||
+           type == mimicdb::FieldType::kFloat64 ||
+           type == mimicdb::FieldType::kBool ||
+           type == mimicdb::FieldType::kDictInt32;
+}
+
+bool TryBuildPredicate(const Filter& filter,
+                       const std::unordered_map<std::string, size_t>& field_index,
+                       Predicate* out) {
+    if (!out) {
+        return false;
+    }
+    if (filter.negated) {
+        return false;
+    }
+    auto it = field_index.find(filter.field);
+    if (it == field_index.end()) {
+        return false;
+    }
+    if (filter.op == FilterOp::kExists) {
+        out->field_index = it->second;
+        out->is_null_check = true;
+        out->null_is = !filter.exists;
+        return true;
+    }
+    if (filter.op == FilterOp::kIn || filter.op == FilterOp::kNin ||
+        filter.op == FilterOp::kAll || filter.op == FilterOp::kSize ||
+        filter.op == FilterOp::kRegex) {
+        return false;
+    }
+    if (filter.values.empty()) {
+        return false;
+    }
+    const auto& value = filter.values[0];
+    if (value.is_null) {
+        out->field_index = it->second;
+        out->is_null_check = true;
+        out->null_is = true;
+        return true;
+    }
+    if (value.type == mimicdb::FieldType::kArray ||
+        value.type == mimicdb::FieldType::kObject) {
+        return false;
+    }
+    out->field_index = it->second;
+    out->value_type = value.type;
+    switch (filter.op) {
+        case FilterOp::kEq:
+            out->op = mimicdb::CompareOp::kEq;
+            break;
+        case FilterOp::kNe:
+            out->op = mimicdb::CompareOp::kNe;
+            break;
+        case FilterOp::kGt:
+            out->op = mimicdb::CompareOp::kGt;
+            break;
+        case FilterOp::kLt:
+            out->op = mimicdb::CompareOp::kLt;
+            break;
+        default:
+            return false;
+    }
+    if (value.type == mimicdb::FieldType::kString ||
+        value.type == mimicdb::FieldType::kBytes) {
+        out->bytes = value.bytes;
+        return (out->op == mimicdb::CompareOp::kEq ||
+                out->op == mimicdb::CompareOp::kNe);
+    }
+    out->value = 0.0;
+    if (value.type == mimicdb::FieldType::kInt32) {
+        out->value = value.i32;
+    } else if (value.type == mimicdb::FieldType::kInt64) {
+        out->value = static_cast<double>(value.i64);
+    } else if (value.type == mimicdb::FieldType::kFloat64) {
+        out->value = value.f64;
+    } else if (value.type == mimicdb::FieldType::kBool) {
+        out->value = value.b ? 1.0 : 0.0;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+bool BuildAggregatePushdown(ApiClientCore* core,
+                            const std::vector<FieldDef>& fields,
+                            const std::unordered_map<std::string, size_t>& field_index,
+                            const std::string& db,
+                            const std::string& collection,
+                            const PipelineStage& stage,
+                            const std::vector<Predicate>& predicates,
+                            std::vector<MongoDocument>* out,
+                            size_t* rows_scanned_out,
+                            std::string* error) {
+    if (!out) {
+        return false;
+    }
+    if (rows_scanned_out) {
+        *rows_scanned_out = 0;
+    }
+    out->clear();
+    if (stage.type == StageType::kCount) {
+        auto id_it = field_index.find("_id");
+        if (id_it == field_index.end()) {
+            return false;
+        }
+        const auto& id_field = fields[id_it->second];
+        if (!IsNumericType(id_field.type)) {
+            return false;
+        }
+        auto result = core->Aggregate(db, collection, id_it->second, predicates, error);
+        if (error && !error->empty()) {
+            return false;
+        }
+        if (rows_scanned_out) {
+            *rows_scanned_out += result.rows_scanned;
+        }
+        MongoDocument doc;
+        doc.fields[stage.count_field] = mimicdb::FieldValue::Int64(
+            static_cast<int64_t>(result.count));
+        out->push_back(std::move(doc));
+        return true;
+    }
+    if (stage.type != StageType::kGroup) {
+        return false;
+    }
+    if (stage.group.has_id || !stage.group.fields.empty() || !stage.group.field.empty()) {
+        return false;
+    }
+    for (const auto& op : stage.ops) {
+        if (op.op == "$first" || op.op == "$last") {
+            return false;
+        }
+        if (!op.count_only && op.field.empty()) {
+            return false;
+        }
+    }
+    std::unordered_map<size_t, AggregateResult> agg_cache;
+    AggregateResult count_result;
+    bool count_ready = false;
+    auto id_it = field_index.find("_id");
+    if (id_it == field_index.end()) {
+        return false;
+    }
+    const auto& id_field = fields[id_it->second];
+    if (!IsNumericType(id_field.type)) {
+        return false;
+    }
+    MongoDocument doc;
+    doc.fields["_id"] = mimicdb::FieldValue::Null(mimicdb::FieldType::kInt64);
+    for (const auto& op : stage.ops) {
+        if (op.count_only) {
+            if (!count_ready) {
+                count_result = core->Aggregate(db, collection, id_it->second, predicates, error);
+                if (error && !error->empty()) {
+                    return false;
+                }
+                if (rows_scanned_out) {
+                    *rows_scanned_out += count_result.rows_scanned;
+                }
+                count_ready = true;
+            }
+            doc.fields[op.name] = mimicdb::FieldValue::Int64(
+                static_cast<int64_t>(count_result.count));
+            continue;
+        }
+        auto field_it = field_index.find(op.field);
+        if (field_it == field_index.end()) {
+            return false;
+        }
+        const auto& field = fields[field_it->second];
+        if (!IsNumericType(field.type)) {
+            return false;
+        }
+        auto agg_it = agg_cache.find(field_it->second);
+        if (agg_it == agg_cache.end()) {
+            AggregateResult result =
+                core->Aggregate(db, collection, field_it->second, predicates, error);
+            if (error && !error->empty()) {
+                return false;
+            }
+            if (rows_scanned_out) {
+                *rows_scanned_out += result.rows_scanned;
+            }
+            agg_it = agg_cache.emplace(field_it->second, result).first;
+        }
+        const auto& result = agg_it->second;
+        if (op.op == "$sum") {
+            doc.fields[op.name] = mimicdb::FieldValue::Float64(result.sum);
+        } else if (op.op == "$min") {
+            if (result.has_value) {
+                doc.fields[op.name] = mimicdb::FieldValue::Float64(result.min);
+            } else {
+                doc.fields[op.name] =
+                    mimicdb::FieldValue::Null(mimicdb::FieldType::kFloat64);
+            }
+        } else if (op.op == "$max") {
+            if (result.has_value) {
+                doc.fields[op.name] = mimicdb::FieldValue::Float64(result.max);
+            } else {
+                doc.fields[op.name] =
+                    mimicdb::FieldValue::Null(mimicdb::FieldType::kFloat64);
+            }
+        } else {
+            return false;
+        }
+    }
+    out->push_back(std::move(doc));
+    return true;
+}
+
+bool SplitPushdownFilters(const std::vector<Filter>& filters,
+                          const std::unordered_map<std::string, size_t>& field_index,
+                          std::vector<Predicate>* out_predicates,
+                          std::vector<Filter>* remaining) {
+    if (!out_predicates || !remaining) {
+        return false;
+    }
+    out_predicates->clear();
+    remaining->clear();
+    bool all_supported = true;
+    for (const auto& filter : filters) {
+        Predicate pred;
+        if (TryBuildPredicate(filter, field_index, &pred)) {
+            out_predicates->push_back(std::move(pred));
+        } else {
+            remaining->push_back(filter);
+            all_supported = false;
+        }
+    }
+    return all_supported;
+}
+
+struct IdFilterInfo {
+    bool is_eq = false;
+    bool is_in = false;
+    int64_t eq_value = 0;
+    std::vector<int64_t> in_values;
+};
+
+bool ExtractIdFilter(const std::vector<Filter>& filters, IdFilterInfo* out) {
+    if (!out || filters.size() != 1) {
+        return false;
+    }
+    const auto& filter = filters[0];
+    if (filter.field != "_id" || filter.negated) {
+        return false;
+    }
+    if (filter.op == FilterOp::kEq) {
+        if (filter.values.empty() || filter.values[0].is_null) {
+            return false;
+        }
+        if (!FieldValueToInt64(filter.values[0], &out->eq_value)) {
+            return false;
+        }
+        out->is_eq = true;
+        return true;
+    }
+    if (filter.op == FilterOp::kIn) {
+        if (filter.values.empty()) {
+            return false;
+        }
+        out->is_in = true;
+        out->in_values.clear();
+        for (const auto& value : filter.values) {
+            int64_t id_value = 0;
+            if (!FieldValueToInt64(value, &id_value)) {
+                return false;
+            }
+            out->in_values.push_back(id_value);
+        }
+        return true;
+    }
+    return false;
+}
+
+std::vector<MongoDocument> LatestDocumentsForIds(ApiClientCore* core,
+                                                 const std::unordered_map<std::string, size_t>& field_index,
+                                                 const std::string& db,
+                                                 const std::string& collection,
+                                                 const std::vector<std::string>& columns,
+                                                 const IdFilterInfo& id_filter,
+                                                 std::string* error) {
+    std::vector<MongoDocument> docs;
+    std::vector<Predicate> predicates;
+    std::unordered_set<int64_t> target_ids;
+    if (id_filter.is_eq) {
+        auto it = field_index.find("_id");
+        if (it != field_index.end()) {
+            Predicate pred;
+            pred.field_index = it->second;
+            pred.op = mimicdb::CompareOp::kEq;
+            pred.value = static_cast<double>(id_filter.eq_value);
+            pred.value_type = mimicdb::FieldType::kInt64;
+            predicates.push_back(pred);
+        }
+        target_ids.insert(id_filter.eq_value);
+    } else if (id_filter.is_in) {
+        target_ids.insert(id_filter.in_values.begin(), id_filter.in_values.end());
+    }
+    ScanResult result = core->Scan(db, collection, columns, predicates, 0, 0, error);
+    if (error && !error->empty()) {
+        return docs;
+    }
+    std::unordered_map<int64_t, MongoDocument> latest;
+    for (const auto& row : result.rows) {
+        MongoDocument doc;
+        int64_t doc_id = -1;
+        int64_t version = 0;
+        bool deleted = false;
+        for (size_t i = 0; i < result.columns.size(); ++i) {
+            const auto& name = result.columns[i];
+            doc.fields[name] = row[i];
+            if (name == "_id" && !row[i].is_null) {
+                doc_id = row[i].i64;
+            } else if (name == "_version" && !row[i].is_null) {
+                version = row[i].i64;
+            } else if (name == "_deleted" && !row[i].is_null) {
+                deleted = row[i].b;
+            }
+        }
+        if (doc_id < 0 || deleted) {
+            continue;
+        }
+        if (!target_ids.empty() && target_ids.find(doc_id) == target_ids.end()) {
+            continue;
+        }
+        auto it = latest.find(doc_id);
+        if (it == latest.end()) {
+            latest[doc_id] = std::move(doc);
+            continue;
+        }
+        auto existing = it->second.fields.find("_version");
+        if (existing == it->second.fields.end() || existing->second.i64 < version) {
+            it->second = std::move(doc);
+        }
+    }
+    docs.reserve(latest.size());
+    for (auto& item : latest) {
+        docs.push_back(std::move(item.second));
+    }
+    return docs;
+}
+
+std::vector<MongoDocument> LatestDocumentsFromScan(ApiClientCore* core,
+                                                   const std::unordered_map<std::string, size_t>& field_index,
+                                                   const std::string& db,
+                                                   const std::string& collection,
+                                                   const std::vector<std::string>& columns,
+                                                   const std::vector<Predicate>& predicates,
+                                                   std::string* error) {
+    std::vector<MongoDocument> docs;
+    ScanResult result = core->Scan(db, collection, columns, predicates, 0, 0, error);
+    if (error && !error->empty()) {
+        return docs;
+    }
+    std::unordered_map<int64_t, MongoDocument> latest;
+    for (const auto& row : result.rows) {
+        MongoDocument doc;
+        int64_t doc_id = -1;
+        int64_t version = 0;
+        bool deleted = false;
+        for (size_t i = 0; i < result.columns.size(); ++i) {
+            const auto& name = result.columns[i];
+            doc.fields[name] = row[i];
+            if (name == "_id" && !row[i].is_null) {
+                doc_id = row[i].i64;
+            } else if (name == "_version" && !row[i].is_null) {
+                version = row[i].i64;
+            } else if (name == "_deleted" && !row[i].is_null) {
+                deleted = row[i].b;
+            }
+        }
+        if (doc_id < 0 || deleted) {
+            continue;
+        }
+        auto it = latest.find(doc_id);
+        if (it == latest.end()) {
+            latest[doc_id] = std::move(doc);
+            continue;
+        }
+        auto existing = it->second.fields.find("_version");
+        if (existing == it->second.fields.end() || existing->second.i64 < version) {
+            it->second = std::move(doc);
+        }
+    }
+    docs.reserve(latest.size());
+    for (auto& item : latest) {
+        docs.push_back(std::move(item.second));
+    }
+    return docs;
+}
+
 int CompareFieldValues(const mimicdb::FieldValue& left, const mimicdb::FieldValue& right) {
     if (left.is_null && right.is_null) {
         return 0;
@@ -1005,7 +1440,10 @@ bool MongoClientCore::EnsureSchema(const std::string& db, const std::string& col
     auto& db_state = collections_[db];
     auto& state = db_state[collection];
     if (state.initialized) {
-        return true;
+        if (core_->FieldsFor(db, collection) != nullptr) {
+            return true;
+        }
+        state = CollectionState();
     }
     state.fields = {
         {"_id", mimicdb::FieldType::kInt64},
@@ -1041,6 +1479,10 @@ bool MongoClientCore::EnsureSchema(const std::string& db, const std::string& col
         }
         return false;
     }
+    state.latest_cache.clear();
+    state.last_seen_version = 0;
+    state.cache_valid = false;
+    state.append_only = true;
     state.initialized = true;
     return true;
 }
@@ -1063,14 +1505,14 @@ bool MongoClientCore::InsertMany(const std::string& db, const std::string& colle
         }
         return false;
     }
-    std::vector<mimicdb::FieldBatch> batches;
-    std::vector<std::vector<int64_t>> i64_values;
-    std::vector<std::vector<int32_t>> i32_values;
-    std::vector<std::vector<double>> f64_values;
-    std::vector<std::vector<uint8_t>> bool_values;
-    std::vector<std::vector<uint32_t>> length_values;
-    std::vector<std::vector<uint8_t>> bytes_values;
-    std::vector<std::vector<uint8_t>> validity_buffers;
+    state->batch_scratch.clear();
+    state->i64_scratch.clear();
+    state->i32_scratch.clear();
+    state->f64_scratch.clear();
+    state->bool_scratch.clear();
+    state->length_scratch.clear();
+    state->bytes_scratch.clear();
+    state->validity_scratch.clear();
 
     const size_t count = docs.size();
     for (const auto& field : state->fields) {
@@ -1093,8 +1535,8 @@ bool MongoClientCore::InsertMany(const std::string& db, const std::string& colle
                 values.push_back(id);
                 validity.push_back(1);
             }
-            i64_values.push_back(std::move(values));
-            batch.data = i64_values.back().data();
+            state->i64_scratch.push_back(std::move(values));
+            batch.data = state->i64_scratch.back().data();
         } else if (field.name == "_version") {
             std::vector<int64_t> values;
             values.reserve(count);
@@ -1102,8 +1544,8 @@ bool MongoClientCore::InsertMany(const std::string& db, const std::string& colle
                 values.push_back(static_cast<int64_t>(NextVersion()));
                 validity.push_back(1);
             }
-            i64_values.push_back(std::move(values));
-            batch.data = i64_values.back().data();
+            state->i64_scratch.push_back(std::move(values));
+            batch.data = state->i64_scratch.back().data();
         } else if (field.name == "_deleted") {
             std::vector<uint8_t> values;
             values.reserve(count);
@@ -1116,8 +1558,8 @@ bool MongoClientCore::InsertMany(const std::string& db, const std::string& colle
                 }
                 validity.push_back(1);
             }
-            bool_values.push_back(std::move(values));
-            batch.data = bool_values.back().data();
+            state->bool_scratch.push_back(std::move(values));
+            batch.data = state->bool_scratch.back().data();
         } else if (field.type == mimicdb::FieldType::kInt64) {
             std::vector<int64_t> values;
             values.reserve(count);
@@ -1131,8 +1573,8 @@ bool MongoClientCore::InsertMany(const std::string& db, const std::string& colle
                     validity.push_back(1);
                 }
             }
-            i64_values.push_back(std::move(values));
-            batch.data = i64_values.back().data();
+            state->i64_scratch.push_back(std::move(values));
+            batch.data = state->i64_scratch.back().data();
         } else if (field.type == mimicdb::FieldType::kInt32) {
             std::vector<int32_t> values;
             values.reserve(count);
@@ -1146,8 +1588,8 @@ bool MongoClientCore::InsertMany(const std::string& db, const std::string& colle
                     validity.push_back(1);
                 }
             }
-            i32_values.push_back(std::move(values));
-            batch.data = i32_values.back().data();
+            state->i32_scratch.push_back(std::move(values));
+            batch.data = state->i32_scratch.back().data();
         } else if (field.type == mimicdb::FieldType::kFloat64) {
             std::vector<double> values;
             values.reserve(count);
@@ -1161,8 +1603,8 @@ bool MongoClientCore::InsertMany(const std::string& db, const std::string& colle
                     validity.push_back(1);
                 }
             }
-            f64_values.push_back(std::move(values));
-            batch.data = f64_values.back().data();
+            state->f64_scratch.push_back(std::move(values));
+            batch.data = state->f64_scratch.back().data();
         } else if (field.type == mimicdb::FieldType::kBool) {
             std::vector<uint8_t> values;
             values.reserve(count);
@@ -1176,8 +1618,8 @@ bool MongoClientCore::InsertMany(const std::string& db, const std::string& colle
                     validity.push_back(1);
                 }
             }
-            bool_values.push_back(std::move(values));
-            batch.data = bool_values.back().data();
+            state->bool_scratch.push_back(std::move(values));
+            batch.data = state->bool_scratch.back().data();
         } else if (field.type == mimicdb::FieldType::kString ||
                    field.type == mimicdb::FieldType::kBytes ||
                    field.type == mimicdb::FieldType::kArray) {
@@ -1198,17 +1640,17 @@ bool MongoClientCore::InsertMany(const std::string& db, const std::string& colle
                     validity.push_back(1);
                 }
             }
-            length_values.push_back(std::move(lengths));
-            bytes_values.push_back(std::move(bytes));
-            batch.lengths = length_values.back().data();
-            batch.bytes = bytes_values.back().data();
-            batch.bytes_size = bytes_values.back().size();
+            state->length_scratch.push_back(std::move(lengths));
+            state->bytes_scratch.push_back(std::move(bytes));
+            batch.lengths = state->length_scratch.back().data();
+            batch.bytes = state->bytes_scratch.back().data();
+            batch.bytes_size = state->bytes_scratch.back().size();
         }
-        validity_buffers.push_back(std::move(validity));
-        batch.validity = validity_buffers.back().data();
-        batches.push_back(batch);
+        state->validity_scratch.push_back(std::move(validity));
+        batch.validity = state->validity_scratch.back().data();
+        state->batch_scratch.push_back(batch);
     }
-    return core_->AppendBatch(db, collection, batches, error);
+    return core_->AppendBatch(db, collection, state->batch_scratch, error);
 }
 
 std::vector<MongoDocument> MongoClientCore::Find(const std::string& db,
@@ -1218,12 +1660,67 @@ std::vector<MongoDocument> MongoClientCore::Find(const std::string& db,
                                                  const FindOptions& options,
                                                  std::string* error) const {
     std::vector<MongoDocument> out;
-    auto docs = LatestDocuments(db, collection, error);
+    const auto* state = GetCollection(db, collection);
+    if (!state) {
+        if (error) {
+            *error = "unknown collection";
+        }
+        return out;
+    }
+    std::vector<std::string> required_fields;
+    std::unordered_set<std::string> seen_fields;
+    CollectFilterFields(filters, &required_fields, &seen_fields);
+    for (const auto& spec : options.sort) {
+        AppendUnique(&required_fields, &seen_fields, spec.field);
+    }
+    if (!ProjectionNeedsAll(projection)) {
+        for (const auto& name : projection.include) {
+            AppendUnique(&required_fields, &seen_fields, name);
+        }
+        for (const auto& computed : projection.computed) {
+            if (computed.from_field) {
+                AppendUnique(&required_fields, &seen_fields, computed.field);
+            }
+        }
+        for (const auto& slice : projection.slices) {
+            AppendUnique(&required_fields, &seen_fields, slice.field);
+        }
+    } else {
+        required_fields.clear();
+    }
+
+    std::vector<Predicate> pushdown;
+    std::vector<Filter> remaining;
+    SplitPushdownFilters(filters, state->field_index, &pushdown, &remaining);
+    const bool use_pushdown = !pushdown.empty() && remaining.empty();
+    IdFilterInfo id_filter;
+    const bool use_id_fast_path = ExtractIdFilter(filters, &id_filter);
+    std::vector<std::string> scan_columns;
+    if (required_fields.empty()) {
+        for (const auto& field : state->fields) {
+            scan_columns.push_back(field.name);
+        }
+    } else {
+        scan_columns = required_fields;
+        AppendUnique(&scan_columns, &seen_fields, "_id");
+        AppendUnique(&scan_columns, &seen_fields, "_version");
+        AppendUnique(&scan_columns, &seen_fields, "_deleted");
+    }
+
+    auto docs = use_id_fast_path
+        ? LatestDocumentsForIds(core_, state->field_index, db, collection,
+                                scan_columns, id_filter, error)
+        : use_pushdown
+            ? LatestDocumentsFromScan(core_, state->field_index, db, collection,
+                                      scan_columns, pushdown, error)
+            : LatestDocuments(db, collection,
+                              required_fields.empty() ? std::vector<std::string>() : required_fields,
+                              error);
     if (error && !error->empty()) {
         return out;
     }
     for (const auto& doc : docs) {
-        if (!MatchFilters(doc, filters)) {
+        if (!use_pushdown && !use_id_fast_path && !MatchFilters(doc, filters)) {
             continue;
         }
         out.push_back(doc);
@@ -1270,7 +1767,139 @@ std::vector<MongoDocument> MongoClientCore::AggregatePipeline(
     const std::vector<PipelineStage>& pipeline,
     std::string* error) const {
     std::vector<MongoDocument> out;
-    auto docs = LatestDocuments(db, collection, error);
+    const auto* state = GetCollection(db, collection);
+    if (!state) {
+        if (error) {
+            *error = "unknown collection";
+        }
+        return out;
+    }
+    if (!pipeline.empty()) {
+        const PipelineStage* match_stage = nullptr;
+        const PipelineStage* agg_stage = nullptr;
+        std::vector<Predicate> match_predicates;
+        if (pipeline.size() == 1) {
+            agg_stage = &pipeline[0];
+        } else if (pipeline.size() == 2 && pipeline[0].type == StageType::kMatch) {
+            match_stage = &pipeline[0];
+            agg_stage = &pipeline[1];
+        }
+        bool pushdown_ok = agg_stage &&
+            (agg_stage->type == StageType::kGroup || agg_stage->type == StageType::kCount);
+        if (pushdown_ok && match_stage) {
+            if (match_stage->match.op == MatchOp::kAnd && match_stage->match.children.empty()) {
+                std::vector<Filter> remaining;
+                if (SplitPushdownFilters(match_stage->match.filters, state->field_index,
+                                         &match_predicates, &remaining) &&
+                    remaining.empty()) {
+                    pushdown_ok = true;
+                } else {
+                    pushdown_ok = false;
+                }
+            } else {
+                pushdown_ok = false;
+            }
+        }
+        if (pushdown_ok && agg_stage && state->append_only &&
+            (!match_stage || !match_predicates.empty() ||
+             match_stage->match.filters.empty())) {
+            std::vector<MongoDocument> agg_out;
+            size_t rows_scanned = 0;
+            if (BuildAggregatePushdown(core_, state->fields, state->field_index,
+                                       db, collection, *agg_stage,
+                                       match_predicates, &agg_out,
+                                       &rows_scanned, error)) {
+                state->stats.last_scan_rows = rows_scanned;
+                state->stats.last_returned_rows = agg_out.size();
+                state->stats.last_full_rebuild = false;
+                return agg_out;
+            }
+        }
+    }
+    std::vector<std::string> required_fields;
+    std::unordered_set<std::string> seen_fields;
+    bool needs_all = false;
+    for (const auto& stage : pipeline) {
+        if (stage.type == StageType::kLookup || stage.type == StageType::kFacet) {
+            needs_all = true;
+            break;
+        }
+        if (stage.type == StageType::kMatch) {
+            CollectMatchFields(stage.match, &required_fields, &seen_fields);
+        } else if (stage.type == StageType::kGroup) {
+            if (stage.group.has_id) {
+                if (!stage.group.fields.empty()) {
+                    for (const auto& field : stage.group.fields) {
+                        AppendUnique(&required_fields, &seen_fields, field.field);
+                    }
+                } else {
+                    AppendUnique(&required_fields, &seen_fields, stage.group.field);
+                }
+            }
+            for (const auto& op : stage.ops) {
+                if (!op.field.empty()) {
+                    AppendUnique(&required_fields, &seen_fields, op.field);
+                }
+            }
+        } else if (stage.type == StageType::kSortByCount) {
+            if (stage.sort_by_count.is_field) {
+                AppendUnique(&required_fields, &seen_fields, stage.sort_by_count.field);
+            }
+        } else if (stage.type == StageType::kAddFields) {
+            for (const auto& field : stage.add_fields) {
+                if (field.from_field) {
+                    AppendUnique(&required_fields, &seen_fields, field.field);
+                }
+            }
+        } else if (stage.type == StageType::kProject) {
+            if (ProjectionNeedsAll(stage.project)) {
+                needs_all = true;
+                break;
+            }
+            for (const auto& name : stage.project.include) {
+                AppendUnique(&required_fields, &seen_fields, name);
+            }
+            for (const auto& field : stage.project.computed) {
+                if (field.from_field) {
+                    AppendUnique(&required_fields, &seen_fields, field.field);
+                }
+            }
+        } else if (stage.type == StageType::kUnwind) {
+            AppendUnique(&required_fields, &seen_fields, stage.unwind.field);
+        }
+    }
+
+    bool match_pushdown = false;
+    std::vector<Predicate> match_predicates;
+    if (!pipeline.empty() && pipeline[0].type == StageType::kMatch &&
+        pipeline[0].match.op == MatchOp::kAnd &&
+        pipeline[0].match.children.empty()) {
+        std::vector<Filter> remaining;
+        if (SplitPushdownFilters(pipeline[0].match.filters, state->field_index,
+                                 &match_predicates, &remaining) &&
+            remaining.empty() && !match_predicates.empty()) {
+            match_pushdown = true;
+        }
+    }
+
+    std::vector<std::string> scan_columns;
+    if (needs_all) {
+        for (const auto& field : state->fields) {
+            scan_columns.push_back(field.name);
+        }
+    } else {
+        scan_columns = required_fields;
+        AppendUnique(&scan_columns, &seen_fields, "_id");
+        AppendUnique(&scan_columns, &seen_fields, "_version");
+        AppendUnique(&scan_columns, &seen_fields, "_deleted");
+    }
+
+    auto docs = match_pushdown
+        ? LatestDocumentsFromScan(core_, state->field_index, db, collection, scan_columns,
+                                  match_predicates, error)
+        : LatestDocuments(db, collection,
+                          needs_all ? std::vector<std::string>() : required_fields,
+                          error);
     if (error && !error->empty()) {
         return out;
     }
@@ -1688,7 +2317,14 @@ std::vector<MongoDocument> MongoClientCore::AggregatePipeline(
         return current;
     };
 
-    out = execute_pipeline(std::move(docs), pipeline);
+    if (match_pushdown && pipeline.size() > 1) {
+        std::vector<PipelineStage> remaining_stages(pipeline.begin() + 1, pipeline.end());
+        out = execute_pipeline(std::move(docs), remaining_stages);
+    } else if (match_pushdown) {
+        out = std::move(docs);
+    } else {
+        out = execute_pipeline(std::move(docs), pipeline);
+    }
     return out;
 }
 
@@ -1697,27 +2333,47 @@ size_t MongoClientCore::Update(const std::string& db, const std::string& collect
                                const UpdateSpec& update,
                                bool multi, bool upsert, bool replace,
                                std::string* error) {
-    auto docs = LatestDocuments(db, collection, error);
-    if (error && !error->empty()) {
+    auto* state = GetCollection(db, collection);
+    if (!state) {
+        if (error) {
+            *error = "unknown collection";
+        }
         return 0;
     }
-    auto* state = GetCollection(db, collection);
+    if (!UpdateCache(db, collection, {}, error)) {
+        return 0;
+    }
+    IdFilterInfo id_filter;
+    std::vector<std::string> scan_columns;
+    bool use_id_fast_path = ExtractIdFilter(filters, &id_filter);
+    if (use_id_fast_path) {
+        for (const auto& field : state->fields) {
+            scan_columns.push_back(field.name);
+        }
+    }
+    state->append_only = false;
     std::vector<MongoDocument> updates_out;
     size_t matched = 0;
-    for (auto& doc : docs) {
-        if (!MatchFilters(doc, filters)) {
+    for (const auto& item : state->latest_cache) {
+        if (use_id_fast_path) {
+            if (id_filter.is_eq && item.first != id_filter.eq_value) {
+                continue;
+            }
+            if (id_filter.is_in &&
+                std::find(id_filter.in_values.begin(), id_filter.in_values.end(),
+                          item.first) == id_filter.in_values.end()) {
+                continue;
+            }
+        } else if (!MatchFilters(item.second, filters)) {
             continue;
         }
         matched += 1;
         MongoDocument updated;
         if (replace || update.is_replacement) {
             updated.fields = update.replacement;
-            auto id_it = doc.fields.find("_id");
-            if (id_it != doc.fields.end()) {
-                updated.fields["_id"] = id_it->second;
-            }
+            updated.fields["_id"] = mimicdb::FieldValue::Int64(item.first);
         } else {
-            updated = doc;
+            updated = item.second;
             if (!ApplyUpdateOps(&updated, update, false, error)) {
                 return matched;
             }
@@ -1778,20 +2434,41 @@ size_t MongoClientCore::Update(const std::string& db, const std::string& collect
 size_t MongoClientCore::Delete(const std::string& db, const std::string& collection,
                                const std::vector<Filter>& filters,
                                bool multi, std::string* error) {
-    auto docs = LatestDocuments(db, collection, error);
-    if (error && !error->empty()) {
+    auto* state = GetCollection(db, collection);
+    if (!state) {
+        if (error) {
+            *error = "unknown collection";
+        }
         return 0;
     }
+    if (!UpdateCache(db, collection, {}, error)) {
+        return 0;
+    }
+    IdFilterInfo id_filter;
+    bool use_id_fast_path = ExtractIdFilter(filters, &id_filter);
+    state->append_only = false;
     std::vector<MongoDocument> deletes;
     size_t matched = 0;
-    for (auto& doc : docs) {
-        if (!MatchFilters(doc, filters)) {
+    for (const auto& item : state->latest_cache) {
+        if (use_id_fast_path) {
+            if (id_filter.is_eq && item.first != id_filter.eq_value) {
+                continue;
+            }
+            if (id_filter.is_in &&
+                std::find(id_filter.in_values.begin(), id_filter.in_values.end(),
+                          item.first) == id_filter.in_values.end()) {
+                continue;
+            }
+        } else if (!MatchFilters(item.second, filters)) {
             continue;
         }
         matched += 1;
-        doc.fields["_deleted"] = mimicdb::FieldValue::Bool(true);
-        doc.fields["_version"] = mimicdb::FieldValue::Int64(static_cast<int64_t>(NextVersion()));
-        deletes.push_back(doc);
+        MongoDocument tombstone;
+        tombstone.fields["_id"] = mimicdb::FieldValue::Int64(item.first);
+        tombstone.fields["_deleted"] = mimicdb::FieldValue::Bool(true);
+        tombstone.fields["_version"] =
+            mimicdb::FieldValue::Int64(static_cast<int64_t>(NextVersion()));
+        deletes.push_back(std::move(tombstone));
         if (!multi) {
             break;
         }
@@ -1810,23 +2487,96 @@ size_t MongoClientCore::Delete(const std::string& db, const std::string& collect
 std::vector<MongoDocument> MongoClientCore::LatestDocuments(const std::string& db,
                                                             const std::string& collection,
                                                             std::string* error) const {
+    return LatestDocuments(db, collection, {}, error);
+}
+
+std::vector<MongoDocument> MongoClientCore::LatestDocuments(const std::string& db,
+                                                            const std::string& collection,
+                                                            const std::vector<std::string>& required_fields,
+                                                            std::string* error) const {
     std::vector<MongoDocument> docs;
+    if (!UpdateCache(db, collection, required_fields, error)) {
+        return docs;
+    }
+    const auto* state = GetCollection(db, collection);
+    if (!state) {
+        return docs;
+    }
+    docs.reserve(state->latest_cache.size());
+    for (const auto& item : state->latest_cache) {
+        docs.push_back(item.second);
+    }
+    return docs;
+}
+
+bool MongoClientCore::UpdateCache(const std::string& db,
+                                  const std::string& collection,
+                                  const std::vector<std::string>& required_fields,
+                                  std::string* error) const {
     const auto* state = GetCollection(db, collection);
     if (!state) {
         if (error) {
             *error = "unknown collection";
         }
-        return docs;
+        return false;
     }
+
+    std::unordered_set<std::string> required;
     std::vector<std::string> columns;
-    for (const auto& field : state->fields) {
-        columns.push_back(field.name);
+    if (required_fields.empty()) {
+        for (const auto& field : state->fields) {
+            AppendUnique(&columns, &required, field.name);
+        }
+    } else {
+        AppendUnique(&columns, &required, "_id");
+        AppendUnique(&columns, &required, "_version");
+        AppendUnique(&columns, &required, "_deleted");
+        for (const auto& name : required_fields) {
+            AppendUnique(&columns, &required, name);
+        }
     }
-    ScanResult result = core_->Scan(db, collection, columns, {}, 0, 0, error);
+
+    bool full_rebuild = !state->cache_valid;
+    if (!full_rebuild) {
+        for (const auto& name : required) {
+            if (state->cached_fields.find(name) == state->cached_fields.end()) {
+                full_rebuild = true;
+                break;
+            }
+        }
+    }
+
+    if (full_rebuild) {
+        state->latest_cache.clear();
+        state->cached_fields = required;
+        state->last_seen_version = 0;
+    }
+    state->stats.last_full_rebuild = full_rebuild;
+
+    std::vector<Predicate> predicates;
+    if (!full_rebuild && state->last_seen_version > 0) {
+        auto it = state->field_index.find("_version");
+        if (it != state->field_index.end()) {
+            Predicate pred;
+            pred.field_index = it->second;
+            pred.op = mimicdb::CompareOp::kGt;
+            pred.value = static_cast<double>(state->last_seen_version);
+            pred.value_type = mimicdb::FieldType::kInt64;
+            predicates.push_back(std::move(pred));
+        }
+    }
+
+    const std::vector<std::string> scan_columns = full_rebuild
+        ? columns
+        : std::vector<std::string>(state->cached_fields.begin(), state->cached_fields.end());
+
+    ScanResult result = core_->Scan(db, collection, scan_columns, predicates, 0, 0, error);
     if (error && !error->empty()) {
-        return docs;
+        return false;
     }
-    std::unordered_map<int64_t, MongoDocument> latest;
+    state->stats.last_scan_rows = result.rows.size();
+
+    int64_t max_version = state->last_seen_version;
     for (const auto& row : result.rows) {
         MongoDocument doc;
         int64_t doc_id = -1;
@@ -1843,18 +2593,43 @@ std::vector<MongoDocument> MongoClientCore::LatestDocuments(const std::string& d
                 deleted = row[i].b;
             }
         }
+        if (version > max_version) {
+            max_version = version;
+        }
         if (doc_id < 0 || deleted) {
+            if (doc_id >= 0 && deleted) {
+                state->latest_cache.erase(doc_id);
+            }
             continue;
         }
-        auto it = latest.find(doc_id);
-        if (it == latest.end() || it->second.fields["_version"].i64 < version) {
-            latest[doc_id] = std::move(doc);
+        auto it = state->latest_cache.find(doc_id);
+        if (it == state->latest_cache.end()) {
+            state->latest_cache[doc_id] = std::move(doc);
+            continue;
+        }
+        auto existing = it->second.fields.find("_version");
+        if (existing == it->second.fields.end() || existing->second.i64 < version) {
+            it->second = std::move(doc);
+        } else if (!full_rebuild) {
+            for (const auto& item : doc.fields) {
+                it->second.fields[item.first] = item.second;
+            }
         }
     }
-    for (auto& item : latest) {
-        docs.push_back(std::move(item.second));
+    state->cache_valid = true;
+    state->last_seen_version = max_version;
+    state->stats.last_returned_rows = state->latest_cache.size();
+    return true;
+}
+
+MongoStats MongoClientCore::StatsFor(const std::string& db,
+                                     const std::string& collection) const {
+    MongoStats stats;
+    const auto* state = GetCollection(db, collection);
+    if (!state) {
+        return stats;
     }
-    return docs;
+    return state->stats;
 }
 
 }  // namespace mimicapi

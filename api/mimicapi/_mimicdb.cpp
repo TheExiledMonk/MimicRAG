@@ -13,6 +13,7 @@
 #include "mimicdb/scan.h"
 #include "mimicdb/segment.h"
 #include "mimicdb/types.h"
+#include "mimicdb/compression.h"
 
 namespace {
 
@@ -1065,12 +1066,42 @@ PyObject* DatasetScan(DatasetObject* self, PyObject* args) {
     return rows;
 }
 
+PyObject* DatasetCompressionStats(DatasetObject* self, PyObject*) {
+    const auto stats = self->dataset->CompressionStats();
+    PyObject* dict = PyDict_New();
+    PyDict_SetItemString(dict, "raw_bytes",
+                         PyLong_FromUnsignedLongLong(stats.raw_bytes));
+    PyDict_SetItemString(dict, "compressed_bytes",
+                         PyLong_FromUnsignedLongLong(stats.compressed_bytes));
+    PyDict_SetItemString(dict, "segments",
+                         PyLong_FromSize_t(stats.segments));
+    PyDict_SetItemString(dict, "compressed_segments",
+                         PyLong_FromSize_t(stats.compressed_segments));
+    PyDict_SetItemString(dict, "compressed_columns",
+                         PyLong_FromSize_t(stats.compressed_columns));
+    PyDict_SetItemString(dict, "active_rows",
+                         PyLong_FromSize_t(stats.active_rows));
+    return dict;
+}
+
+PyObject* SetCompressionEnabled(PyObject*, PyObject* args) {
+    int enabled = 0;
+    if (!PyArg_ParseTuple(args, "p", &enabled)) {
+        return nullptr;
+    }
+    mimicdb::CompressionConfig cfg = mimicdb::GetCompressionConfig();
+    cfg.enabled = enabled != 0;
+    mimicdb::SetCompressionConfig(cfg);
+    Py_RETURN_NONE;
+}
+
 PyMethodDef DatasetMethods[] = {
     {"append", (PyCFunction)DatasetAppend, METH_VARARGS | METH_KEYWORDS, nullptr},
     {"append_batch", (PyCFunction)DatasetAppendBatch, METH_VARARGS, nullptr},
     {"aggregate", (PyCFunction)DatasetAggregate, METH_VARARGS, nullptr},
     {"aggregate_debug", (PyCFunction)DatasetAggregateDebug, METH_VARARGS, nullptr},
     {"scan", (PyCFunction)DatasetScan, METH_VARARGS, nullptr},
+    {"compression_stats", (PyCFunction)DatasetCompressionStats, METH_NOARGS, nullptr},
     {nullptr, nullptr, 0, nullptr},
 };
 
@@ -1078,12 +1109,17 @@ PyTypeObject DatasetType = {
     PyVarObject_HEAD_INIT(nullptr, 0)
 };
 
+PyMethodDef ModuleMethods[] = {
+    {"set_compression_enabled", (PyCFunction)SetCompressionEnabled, METH_VARARGS, nullptr},
+    {nullptr, nullptr, 0, nullptr},
+};
+
 PyModuleDef ModuleDef = {
     PyModuleDef_HEAD_INIT,
     "_mimicdb",
     nullptr,
     -1,
-    nullptr,
+    ModuleMethods,
 };
 
 }  // namespace

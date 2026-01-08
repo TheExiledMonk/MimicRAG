@@ -93,3 +93,15 @@ target_compile_features(mimicdb_test_simd PRIVATE cxx_std_20)
 target_compile_options(mimicdb_test_simd PRIVATE -Wall -Wextra -Wpedantic)
 
 add_test(NAME mimicdb_test_simd COMMAND mimicdb_test_simd)
+
+add_executable(mimicdb_test_compression
+    test_compression.cpp
+)
+
+target_link_libraries(mimicdb_test_compression PRIVATE mimicdb_engine)
+
+target_compile_features(mimicdb_test_compression PRIVATE cxx_std_20)
+
+target_compile_options(mimicdb_test_compression PRIVATE -Wall -Wextra -Wpedantic)
+
+add_test(NAME mimicdb_test_compression COMMAND mimicdb_test_compression)

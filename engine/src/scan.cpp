@@ -94,6 +94,19 @@ void ScanLoopMaskedWithValidity(size_t count, const Mask& mask, const uint8_t* v
     }
 }
 
+bool BuildMaskCompressed(const CompressedColumnView& column, const CompressionPredicate& predicate,
+                         Mask* out) {
+    if (!out) {
+        return false;
+    }
+    if (!column.ops || !column.ops->scan_predicate) {
+        out->Resize(0);
+        return false;
+    }
+    column.ops->scan_predicate(column, predicate, out);
+    return true;
+}
+
 bool SegmentMatchesPredicate(const SegmentColumnStats& stats, CompareOp op, double value) {
     if (!stats.has_value) {
         return true;

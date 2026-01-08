@@ -24,7 +24,7 @@ struct SegmentHeader {
 
 struct SegmentColumnHeader {
     uint32_t type = 0;
-    uint32_t reserved = 0;
+    uint32_t estimated_cardinality = 0;
     uint64_t value_count = 0;
     uint64_t data_bytes = 0;
     uint64_t aux_bytes = 0;
@@ -33,7 +33,9 @@ struct SegmentColumnHeader {
     double max = 0.0;
     uint64_t null_count = 0;
     uint8_t has_value = 0;
-    uint8_t padding[7] = {};
+    uint8_t monotonic_hint = 0;
+    uint8_t compression_kind = 0;
+    uint8_t padding[5] = {};
 };
 
 class SegmentWriter {

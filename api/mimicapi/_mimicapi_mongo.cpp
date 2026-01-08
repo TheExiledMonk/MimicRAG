@@ -1636,12 +1636,28 @@ PyObject* MongoClientAggregate(MongoClientCoreObject* self, PyObject* args, PyOb
     return list;
 }
 
+PyObject* MongoClientStats(MongoClientCoreObject* self, PyObject* args) {
+    const char* db = nullptr;
+    const char* collection = nullptr;
+    if (!PyArg_ParseTuple(args, "ss", &db, &collection)) {
+        return nullptr;
+    }
+    const mimicapi::MongoStats stats = self->mongo_core->StatsFor(db, collection);
+    PyObject* out = PyDict_New();
+    PyDict_SetItemString(out, "last_scan_rows", PyLong_FromSize_t(stats.last_scan_rows));
+    PyDict_SetItemString(out, "last_returned_rows", PyLong_FromSize_t(stats.last_returned_rows));
+    PyDict_SetItemString(out, "last_full_rebuild",
+                         PyBool_FromLong(stats.last_full_rebuild ? 1 : 0));
+    return out;
+}
+
 PyMethodDef MongoClientMethods[] = {
     {"insert_many", (PyCFunction)MongoClientInsertMany, METH_VARARGS, nullptr},
     {"find", (PyCFunction)MongoClientFind, METH_VARARGS | METH_KEYWORDS, nullptr},
     {"update", (PyCFunction)MongoClientUpdate, METH_VARARGS | METH_KEYWORDS, nullptr},
     {"delete", (PyCFunction)MongoClientDelete, METH_VARARGS | METH_KEYWORDS, nullptr},
     {"aggregate", (PyCFunction)MongoClientAggregate, METH_VARARGS | METH_KEYWORDS, nullptr},
+    {"stats", (PyCFunction)MongoClientStats, METH_VARARGS, nullptr},
     {nullptr, nullptr, 0, nullptr},
 };
 

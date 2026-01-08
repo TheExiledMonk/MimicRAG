@@ -36,6 +36,15 @@ struct AggregateResult {
     size_t rows_scanned = 0;
 };
 
+struct CompressionStats {
+    uint64_t raw_bytes = 0;
+    uint64_t compressed_bytes = 0;
+    size_t segments = 0;
+    size_t compressed_segments = 0;
+    size_t compressed_columns = 0;
+    size_t active_rows = 0;
+};
+
 struct ScanResult {
     std::vector<std::string> columns;
     std::vector<std::vector<mimicdb::FieldValue>> rows;
@@ -60,6 +69,8 @@ public:
                               size_t field_index,
                               const std::vector<Predicate>& predicates,
                               std::string* error) const;
+    CompressionStats CompressionStatsFor(const std::string& db, const std::string& name,
+                                         std::string* error) const;
 
 private:
     struct DatasetState {

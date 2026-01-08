@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "mimicdb/aggregate.h"
+#include "mimicdb/compression.h"
 #include "mimicdb/dataset.h"
 #include "mimicdb/field_vector.h"
 #include "mimicdb/segment_io.h"
@@ -1651,6 +1652,13 @@ struct ServerConfig {
     size_t segment_cache_max = 2;
     uint64_t segment_cache_bytes = 20ULL * 1024ULL * 1024ULL * 1024ULL;
     size_t query_threads = 16;
+    bool compression_enabled = true;
+    bool compression_enable_dict = true;
+    bool compression_enable_bitpack = true;
+    bool compression_enable_fordelta = true;
+    bool compression_enable_lz4 = true;
+    size_t compression_min_segment_rows = 4096;
+    double compression_min_ratio = 1.1;
 };
 
 std::string Trim(std::string_view value) {
@@ -1743,6 +1751,41 @@ bool LoadConfig(const std::string& path, ServerConfig* config) {
                 config->query_threads = static_cast<size_t>(std::stoull(value));
             } catch (...) {
             }
+        } else if (key == "compression_enabled") {
+            bool parsed = false;
+            if (ParseBool(value, &parsed)) {
+                config->compression_enabled = parsed;
+            }
+        } else if (key == "compression_enable_dict") {
+            bool parsed = false;
+            if (ParseBool(value, &parsed)) {
+                config->compression_enable_dict = parsed;
+            }
+        } else if (key == "compression_enable_bitpack") {
+            bool parsed = false;
+            if (ParseBool(value, &parsed)) {
+                config->compression_enable_bitpack = parsed;
+            }
+        } else if (key == "compression_enable_fordelta") {
+            bool parsed = false;
+            if (ParseBool(value, &parsed)) {
+                config->compression_enable_fordelta = parsed;
+            }
+        } else if (key == "compression_enable_lz4") {
+            bool parsed = false;
+            if (ParseBool(value, &parsed)) {
+                config->compression_enable_lz4 = parsed;
+            }
+        } else if (key == "compression_min_segment_rows") {
+            try {
+                config->compression_min_segment_rows = static_cast<size_t>(std::stoull(value));
+            } catch (...) {
+            }
+        } else if (key == "compression_min_ratio") {
+            try {
+                config->compression_min_ratio = std::stod(value);
+            } catch (...) {
+            }
         }
     }
     return true;
@@ -1816,6 +1859,15 @@ int main(int argc, char** argv) {
 
     ServerConfig config;
     LoadConfig(config_path, &config);
+    mimicdb::CompressionConfig compression;
+    compression.enabled = config.compression_enabled;
+    compression.enable_dictionary = config.compression_enable_dict;
+    compression.enable_bitpack = config.compression_enable_bitpack;
+    compression.enable_fordelta = config.compression_enable_fordelta;
+    compression.enable_lz4 = config.compression_enable_lz4;
+    compression.min_segment_rows = config.compression_min_segment_rows;
+    compression.min_ratio = config.compression_min_ratio;
+    mimicdb::SetCompressionConfig(compression);
     std::string bind_host = "127.0.0.1";
     uint16_t port = 9000;
     if (!ParseBind(config.bind, &bind_host, &port)) {

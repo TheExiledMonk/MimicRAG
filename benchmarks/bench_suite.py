@@ -1,6 +1,7 @@
 import argparse
 import os
 import random
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -27,6 +28,78 @@ def resolve_server_bin(server_bin: str, repo_root: Path) -> str:
         f"server binary not found at '{server_bin}'. "
         "Build the server or pass the correct path via --server-bin."
     )
+
+
+def _perf_available() -> bool:
+    return shutil.which("perf") is not None
+
+
+def _perf_events_arg(events: str | None) -> str:
+    return events or "branches,branch-misses,cache-misses,cache-references"
+
+
+def _print_perf_stats(stderr: str) -> None:
+    for line in stderr.splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 3:
+            continue
+        value, unit, event = parts[0], parts[1], parts[2]
+        if not value or value == "<not supported>":
+            continue
+        event_key = event.replace("/", "_").replace(" ", "_")
+        if unit:
+            print(f"perf_{event_key}={value} {unit}")
+        else:
+            print(f"perf_{event_key}={value}")
+
+
+def _run_with_perf(cmd: list[str], cwd: Path, env: dict[str, str], events: str | None) -> None:
+    if not _perf_available():
+        print("perf_warning=perf_not_found")
+        subprocess.run(cmd, check=True, cwd=cwd, env=env)
+        return
+    perf_cmd = ["perf", "stat", "-x", ",", "-e", _perf_events_arg(events), "--"] + cmd
+    result = subprocess.run(perf_cmd, check=True, cwd=cwd, env=env, stderr=subprocess.PIPE)
+    _print_perf_stats(result.stderr.decode("utf-8", errors="replace"))
+
+
+def _mongo_cpp_available() -> bool:
+    try:
+        from mimicapi import mongodb_cpp as _mongodb_cpp_mod
+    except Exception as exc:
+        print(f"mongodb_cpp_skip_reason=import_error:{exc}")
+        return False
+    if getattr(_mongodb_cpp_mod, "_mimicapi_mongo", None) is None:
+        err = getattr(_mongodb_cpp_mod, "_mimicapi_mongo_error", None)
+        if err:
+            print(f"mongodb_cpp_skip_reason=core_module_missing:{err}")
+        else:
+            print("mongodb_cpp_skip_reason=core_module_missing")
+        return False
+    return True
+
+
+def _cpp_core_available() -> bool:
+    try:
+        from mimicapi import _mimicapi_core as _core_mod
+    except Exception as exc:
+        try:
+            from mimicapi import cpp_api as _cpp_api_mod
+        except Exception as inner_exc:
+            print(f"sql_cpp_skip_reason=core_import_failed:{inner_exc}")
+            return False
+        if getattr(_cpp_api_mod, "_mimicapi_core", None) is None:
+            err = getattr(_cpp_api_mod, "_mimicapi_core_error", None)
+            if err:
+                print(f"sql_cpp_skip_reason=core_module_missing:{err}")
+            else:
+                print("sql_cpp_skip_reason=core_module_missing")
+            return False
+        return True
+    if _core_mod is None:
+        print("sql_cpp_skip_reason=core_module_none")
+        return False
+    return _core_mod is not None
 
 
 def build_batch(rng: random.Random, count: int) -> dict[str, list]:
@@ -85,6 +158,100 @@ def _run_mask_reuse_dataset(users: Dataset) -> dict[str, float]:
         "single_result": single_result,
         "multi_result": multi_result,
     }
+
+
+def _maybe_compression_stats(stats_source) -> dict[str, float]:
+    if not hasattr(stats_source, "compression_stats"):
+        return {}
+    try:
+        result = stats_source.compression_stats()
+    except Exception:
+        return {}
+    if not isinstance(result, dict):
+        return {}
+    raw_bytes = int(result.get("raw_bytes", 0))
+    compressed_bytes = int(result.get("compressed_bytes", 0))
+    ratio = 0.0 if compressed_bytes == 0 else raw_bytes / compressed_bytes
+    return {
+        "compression_raw_bytes": raw_bytes,
+        "compression_bytes": compressed_bytes,
+        "compression_ratio": ratio,
+        "compression_segments": result.get("segments", 0),
+        "compression_compressed_segments": result.get("compressed_segments", 0),
+        "compression_compressed_columns": result.get("compressed_columns", 0),
+    }
+
+
+def _set_compression_enabled(enabled: bool) -> None:
+    try:
+        from mimicapi import _mimicdb
+        _mimicdb.set_compression_enabled(enabled)
+    except Exception:
+        pass
+    try:
+        from mimicapi import _mimicapi_core
+        _mimicapi_core.set_compression_enabled(enabled)
+    except Exception:
+        pass
+
+
+def _compare_agg_results(left, right) -> bool:
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    for key in ("count", "sum", "min", "max"):
+        if key in left or key in right:
+            if left.get(key) != right.get(key):
+                return False
+    return True
+
+
+def _validate_multi_aggregate(stats: dict[str, float]) -> None:
+    single = stats.get("single_result")
+    multi = stats.get("multi_result")
+    if isinstance(single, dict) and isinstance(multi, dict):
+        if "sum" in single and "sum" in multi and single["sum"] != multi["sum"]:
+            raise RuntimeError("multi-aggregate sum mismatch")
+
+
+def _run_compression_validation(
+    rows_list: list[int],
+    args,
+    host: str | None,
+    port: int | None,
+) -> None:
+    for rows in rows_list:
+        _set_compression_enabled(True)
+        on_stats = run_dataset_bench(
+            rows,
+            args.seed,
+            args.batch_size,
+            args.append_mode,
+            args.backend,
+            host,
+            port,
+            f"{args.database}_validate_on_{rows}",
+            True,
+            args.append_sleep_ms,
+        )
+        _validate_multi_aggregate(on_stats)
+        _set_compression_enabled(False)
+        off_stats = run_dataset_bench(
+            rows,
+            args.seed,
+            args.batch_size,
+            args.append_mode,
+            args.backend,
+            host,
+            port,
+            f"{args.database}_validate_off_{rows}",
+            True,
+            args.append_sleep_ms,
+        )
+        _validate_multi_aggregate(off_stats)
+        if not _compare_agg_results(on_stats.get("result"), off_stats.get("result")):
+            raise RuntimeError("compression validation failed")
+        _set_compression_enabled(True)
+        print(f"compression_validation_rows={rows} status=ok")
 
 
 def _maybe_sleep(ms: int) -> None:
@@ -153,6 +320,7 @@ def run_dataset_bench(
         "rows_scanned": _extract_rows_scanned(result, rows),
         "selectivity": _selectivity(count, rows),
         **(_run_mask_reuse_dataset(users) if mask_reuse else {}),
+        **_maybe_compression_stats(users),
     }
 
 
@@ -236,6 +404,7 @@ def run_mimicapi_bench(
         "rows_scanned": _extract_rows_scanned(result, rows),
         "selectivity": _selectivity(count, rows),
         **reuse_stats,
+        **_maybe_compression_stats(client),
     }
     if cleanup:
         client.drop_database_all(database)
@@ -253,7 +422,18 @@ def run_mongo_bench(
     mask_reuse: bool,
     append_sleep_ms: int,
     cleanup: bool,
+    cache_compare: bool,
 ) -> dict[str, float]:
+    if not _mongo_cpp_available():
+        print("mongodb_cpp_skip=extension_unavailable")
+        return {
+            "append_seconds": 0.0,
+            "append_rows_per_sec": 0.0,
+            "query_seconds": 0.0,
+            "result": "skipped",
+            "rows_scanned": 0.0,
+            "selectivity": 0.0,
+        }
     rng = random.Random(seed)
     _ = host
     _ = port
@@ -308,6 +488,28 @@ def run_mongo_bench(
         ],
     )
     query_end = time.perf_counter()
+    cache_query_seconds = None
+    cache_query_stats = None
+    if cache_compare:
+        cache_start = time.perf_counter()
+        _ = collection.aggregate(
+            db,
+            "users",
+            [
+                {"$match": {"age": {"$gt": 30}, "country": 45}},
+                {
+                    "$group": {
+                        "_id": None,
+                        "sum": {"$sum": "$income"},
+                        "count": {"$sum": 1},
+                        "min": {"$min": "$income"},
+                        "max": {"$max": "$income"},
+                    }
+                },
+            ],
+        )
+        cache_query_seconds = time.perf_counter() - cache_start
+        cache_query_stats = collection.stats(db, "users")
 
     append_seconds = append_end - start
     query_seconds = query_end - append_end
@@ -347,6 +549,7 @@ def run_mongo_bench(
             "single_result": single_result,
             "multi_result": multi_result,
         }
+    base_stats = collection.stats(db, "users")
     stats = {
         "append_seconds": append_seconds,
         "append_rows_per_sec": rows / append_seconds,
@@ -354,8 +557,16 @@ def run_mongo_bench(
         "result": result,
         "rows_scanned": _extract_rows_scanned(result, rows),
         "selectivity": _selectivity(count, rows),
+        "mongo_last_scan_rows": base_stats.get("last_scan_rows", 0),
+        "mongo_last_returned_rows": base_stats.get("last_returned_rows", 0),
+        "mongo_last_full_rebuild": base_stats.get("last_full_rebuild", False),
         **reuse_stats,
     }
+    if cache_query_seconds is not None and cache_query_stats is not None:
+        stats["cache_query_seconds"] = cache_query_seconds
+        stats["cache_last_scan_rows"] = cache_query_stats.get("last_scan_rows", 0)
+        stats["cache_last_returned_rows"] = cache_query_stats.get("last_returned_rows", 0)
+        stats["cache_last_full_rebuild"] = cache_query_stats.get("last_full_rebuild", False)
     _ = cleanup
     return stats
 
@@ -485,6 +696,16 @@ def run_sql_dialect_bench(
     append_sleep_ms: int,
     cleanup: bool,
 ) -> dict[str, float]:
+    if not _cpp_core_available():
+        print("sql_cpp_skip=extension_unavailable")
+        return {
+            "append_seconds": 0.0,
+            "append_rows_per_sec": 0.0,
+            "query_seconds": 0.0,
+            "result": "skipped",
+            "rows_scanned": 0.0,
+            "selectivity": 0.0,
+        }
     rng = random.Random(seed)
     core = CppApiClient()
     core.create_database(database)
@@ -673,6 +894,32 @@ def print_results(label: str, rows: int, stats: dict[str, float]) -> None:
         print(f"query_single_seconds={stats['query_single_seconds']:.6f}")
     if "query_multi_seconds" in stats:
         print(f"query_multi_seconds={stats['query_multi_seconds']:.6f}")
+    if "compression_raw_bytes" in stats:
+        print(f"compression_raw_bytes={stats['compression_raw_bytes']}")
+    if "compression_bytes" in stats:
+        print(f"compression_bytes={stats['compression_bytes']}")
+    if "compression_ratio" in stats:
+        print(f"compression_ratio={stats['compression_ratio']:.3f}")
+    if "compression_segments" in stats:
+        print(f"compression_segments={stats['compression_segments']}")
+    if "compression_compressed_segments" in stats:
+        print(f"compression_compressed_segments={stats['compression_compressed_segments']}")
+    if "compression_compressed_columns" in stats:
+        print(f"compression_compressed_columns={stats['compression_compressed_columns']}")
+    if "mongo_last_scan_rows" in stats:
+        print(f"mongo_last_scan_rows={stats['mongo_last_scan_rows']}")
+    if "mongo_last_returned_rows" in stats:
+        print(f"mongo_last_returned_rows={stats['mongo_last_returned_rows']}")
+    if "mongo_last_full_rebuild" in stats:
+        print(f"mongo_last_full_rebuild={stats['mongo_last_full_rebuild']}")
+    if "cache_query_seconds" in stats:
+        print(f"cache_query_seconds={stats['cache_query_seconds']:.6f}")
+    if "cache_last_scan_rows" in stats:
+        print(f"cache_last_scan_rows={stats['cache_last_scan_rows']}")
+    if "cache_last_returned_rows" in stats:
+        print(f"cache_last_returned_rows={stats['cache_last_returned_rows']}")
+    if "cache_last_full_rebuild" in stats:
+        print(f"cache_last_full_rebuild={stats['cache_last_full_rebuild']}")
     print(f"result={stats['result']}")
 
 
@@ -701,7 +948,24 @@ def main() -> None:
     parser.add_argument("--only-backend", default=None)
     parser.add_argument("--dialect", default=None)
     parser.add_argument("--no-server", action="store_true")
+    parser.add_argument("--compression-compare", action="store_true")
+    parser.add_argument("--compression-validate", action="store_true")
+    parser.add_argument("--compression-validate-rows", default=None)
+    parser.add_argument("--perf-counters", action="store_true")
+    parser.add_argument("--perf-events", default=None)
+    parser.add_argument("--_perf-child", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--mongo-cache-compare", action="store_true")
     args = parser.parse_args()
+
+    if args.perf_counters and not args._perf_child and not args.fork_per_backend:
+        script = Path(__file__).resolve()
+        perf_args = [str(script)] + [
+            arg for arg in sys.argv[1:] if arg != "--perf-counters"
+        ]
+        perf_args.append("--_perf-child")
+        _run_with_perf([sys.executable] + perf_args, script.parents[1],
+                       os.environ.copy(), args.perf_events)
+        return
 
     server_proc = None
     if args.transport == "network" and not args.no_server:
@@ -735,6 +999,17 @@ def main() -> None:
                 sweep_rows = [args.rows]
             row_sweep = sweep_rows
 
+        if args.compression_validate:
+            if args.compression_validate_rows:
+                rows_list = [
+                    int(value.strip())
+                    for value in args.compression_validate_rows.split(",")
+                    if value.strip()
+                ]
+            else:
+                rows_list = [200_000, 1_000_000]
+            _run_compression_validation(rows_list, args, host, port)
+
         backends = [b.strip() for b in args.backends.split(",")] if args.backends else ["all"]
         if "all" in backends:
             backends = ["dataset", "mimicapi", "mongodb_cpp", "mysql", "sql"]
@@ -743,6 +1018,18 @@ def main() -> None:
 
         if args.only_backend:
             backends = [args.only_backend]
+
+        if "mongodb_cpp" in backends and not _mongo_cpp_available():
+            print("mongodb_cpp_skip=extension_unavailable")
+            backends = [b for b in backends if b != "mongodb_cpp"]
+
+        if "sql" in backends and not _cpp_core_available():
+            print("sql_cpp_skip=extension_unavailable")
+            backends = [b for b in backends if b != "sql"]
+
+        if "cpp_core" in backends and not _cpp_core_available():
+            print("cpp_core_skip=extension_unavailable")
+            backends = [b for b in backends if b != "cpp_core"]
 
         if args.fork_per_backend and args.only_backend is None:
             script = Path(__file__).resolve()
@@ -777,10 +1064,27 @@ def main() -> None:
                                 child_args.append("--mask-reuse")
                             if not args.cleanup:
                                 child_args.append("--no-cleanup")
+                            if args.compression_compare:
+                                child_args.append("--compression-compare")
+                            if args.compression_validate:
+                                child_args.append("--compression-validate")
+                            if args.compression_validate_rows:
+                                child_args.extend(
+                                    ["--compression-validate-rows", args.compression_validate_rows]
+                                )
+                            if args.mongo_cache_compare:
+                                child_args.append("--mongo-cache-compare")
+                            if args.perf_counters:
+                                child_args.append("--_perf-child")
+                                child_args.extend(["--perf-events", args.perf_events or ""])
                             if args.transport == "network":
                                 child_args.append("--no-server")
-                            subprocess.run([sys.executable] + child_args, check=True,
-                                           cwd=repo_root, env=child_env)
+                            if args.perf_counters:
+                                _run_with_perf([sys.executable] + child_args, repo_root,
+                                               child_env, args.perf_events)
+                            else:
+                                subprocess.run([sys.executable] + child_args, check=True,
+                                               cwd=repo_root, env=child_env)
                     else:
                         child_args = [
                             str(script),
@@ -802,29 +1106,78 @@ def main() -> None:
                             child_args.append("--mask-reuse")
                         if not args.cleanup:
                             child_args.append("--no-cleanup")
+                        if args.compression_compare:
+                            child_args.append("--compression-compare")
+                        if args.compression_validate:
+                            child_args.append("--compression-validate")
+                        if args.compression_validate_rows:
+                            child_args.extend(
+                                ["--compression-validate-rows", args.compression_validate_rows]
+                            )
+                        if args.mongo_cache_compare:
+                            child_args.append("--mongo-cache-compare")
+                        if args.perf_counters:
+                            child_args.append("--_perf-child")
+                            child_args.extend(["--perf-events", args.perf_events or ""])
                         if args.transport == "network":
                             child_args.append("--no-server")
-                        subprocess.run([sys.executable] + child_args, check=True,
-                                       cwd=repo_root, env=child_env)
+                        if args.perf_counters:
+                            _run_with_perf([sys.executable] + child_args, repo_root,
+                                           child_env, args.perf_events)
+                        else:
+                            subprocess.run([sys.executable] + child_args, check=True,
+                                           cwd=repo_root, env=child_env)
             return
 
         for rows in row_sweep:
             print(f"starting sweep rows={rows}", flush=True)
             sweep_suffix = f"{suffix}_{rows}" if suffix else f"_{rows}"
             if "dataset" in backends:
-                dataset_stats = run_dataset_bench(
-                    rows,
-                    args.seed,
-                    args.batch_size,
-                    args.append_mode,
-                    args.backend,
-                    host,
-                    port,
-                    f"{dataset_db}{sweep_suffix}",
-                    args.mask_reuse,
-                    args.append_sleep_ms,
-                )
-                print_results("dataset", rows, dataset_stats)
+                if args.compression_compare and args.transport == "local":
+                    _set_compression_enabled(True)
+                    dataset_stats = run_dataset_bench(
+                        rows,
+                        args.seed,
+                        args.batch_size,
+                        args.append_mode,
+                        args.backend,
+                        host,
+                        port,
+                        f"{dataset_db}{sweep_suffix}",
+                        args.mask_reuse,
+                        args.append_sleep_ms,
+                    )
+                    print_results("dataset_compression_on", rows, dataset_stats)
+                    print("---")
+                    _set_compression_enabled(False)
+                    dataset_stats = run_dataset_bench(
+                        rows,
+                        args.seed,
+                        args.batch_size,
+                        args.append_mode,
+                        args.backend,
+                        host,
+                        port,
+                        f"{dataset_db}{sweep_suffix}",
+                        args.mask_reuse,
+                        args.append_sleep_ms,
+                    )
+                    print_results("dataset_compression_off", rows, dataset_stats)
+                    _set_compression_enabled(True)
+                else:
+                    dataset_stats = run_dataset_bench(
+                        rows,
+                        args.seed,
+                        args.batch_size,
+                        args.append_mode,
+                        args.backend,
+                        host,
+                        port,
+                        f"{dataset_db}{sweep_suffix}",
+                        args.mask_reuse,
+                        args.append_sleep_ms,
+                    )
+                    print_results("dataset", rows, dataset_stats)
                 print("---")
 
             if "mimicapi" in backends:
@@ -855,6 +1208,7 @@ def main() -> None:
                     args.mask_reuse,
                     args.append_sleep_ms,
                     args.cleanup,
+                    args.mongo_cache_compare,
                 )
                 print_results("mongodb_cpp", rows, mongo_stats)
                 print("---")
@@ -896,17 +1250,46 @@ def main() -> None:
                     print("---")
 
             if "cpp_core" in backends:
-                cpp_core_stats = run_cpp_core_bench(
-                    rows,
-                    args.seed,
-                    args.batch_size,
-                    args.append_mode,
-                    f"{cpp_core_db}{sweep_suffix}",
-                    args.mask_reuse,
-                    args.append_sleep_ms,
-                    args.cleanup,
-                )
-                print_results("cpp_core", rows, cpp_core_stats)
+                if args.compression_compare:
+                    _set_compression_enabled(True)
+                    cpp_core_stats = run_cpp_core_bench(
+                        rows,
+                        args.seed,
+                        args.batch_size,
+                        args.append_mode,
+                        f"{cpp_core_db}{sweep_suffix}",
+                        args.mask_reuse,
+                        args.append_sleep_ms,
+                        args.cleanup,
+                    )
+                    print_results("cpp_core_compression_on", rows, cpp_core_stats)
+                    print("---")
+                    _set_compression_enabled(False)
+                    cpp_core_stats = run_cpp_core_bench(
+                        rows,
+                        args.seed,
+                        args.batch_size,
+                        args.append_mode,
+                        f"{cpp_core_db}{sweep_suffix}",
+                        args.mask_reuse,
+                        args.append_sleep_ms,
+                        args.cleanup,
+                    )
+                    print_results("cpp_core_compression_off", rows, cpp_core_stats)
+                    _set_compression_enabled(True)
+                else:
+                    cpp_core_stats = run_cpp_core_bench(
+                        rows,
+                        args.seed,
+                        args.batch_size,
+                        args.append_mode,
+                        f"{cpp_core_db}{sweep_suffix}",
+                        args.mask_reuse,
+                        args.append_sleep_ms,
+                        args.cleanup,
+                    )
+                    print_results("cpp_core", rows, cpp_core_stats)
+                    print("---")
     finally:
         if server_proc is not None:
             server_proc.terminate()

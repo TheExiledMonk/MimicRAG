@@ -45,6 +45,15 @@ struct FieldBatch {
     size_t bytes_size = 0;
 };
 
+struct DatasetCompressionStats {
+    uint64_t raw_bytes = 0;
+    uint64_t compressed_bytes = 0;
+    size_t segments = 0;
+    size_t compressed_segments = 0;
+    size_t compressed_columns = 0;
+    size_t active_rows = 0;
+};
+
 class Dataset {
 public:
     explicit Dataset(std::string name);
@@ -63,6 +72,7 @@ public:
     void DropSegments(size_t count);
     uint64_t SchemaFingerprint() const;
     Schema SchemaView() const;
+    DatasetCompressionStats CompressionStats() const;
 
 private:
     std::string name_;

@@ -7,6 +7,7 @@
 
 #include "mimicapi/core.h"
 #include "mimicdb/types.h"
+#include "mimicdb/compression.h"
 
 namespace {
 
@@ -672,6 +673,45 @@ PyObject* ApiClientCoreAggregate(ApiClientCoreObject* self, PyObject* args, PyOb
     return dict;
 }
 
+PyObject* ApiClientCoreCompressionStats(ApiClientCoreObject* self, PyObject* args) {
+    const char* db = nullptr;
+    const char* name = nullptr;
+    if (!PyArg_ParseTuple(args, "ss", &db, &name)) {
+        return nullptr;
+    }
+    std::string error;
+    const auto stats = self->core->CompressionStatsFor(db, name, &error);
+    if (!error.empty()) {
+        PyErr_SetString(PyExc_RuntimeError, error.c_str());
+        return nullptr;
+    }
+    PyObject* dict = PyDict_New();
+    PyDict_SetItemString(dict, "raw_bytes",
+                         PyLong_FromUnsignedLongLong(stats.raw_bytes));
+    PyDict_SetItemString(dict, "compressed_bytes",
+                         PyLong_FromUnsignedLongLong(stats.compressed_bytes));
+    PyDict_SetItemString(dict, "segments",
+                         PyLong_FromSize_t(stats.segments));
+    PyDict_SetItemString(dict, "compressed_segments",
+                         PyLong_FromSize_t(stats.compressed_segments));
+    PyDict_SetItemString(dict, "compressed_columns",
+                         PyLong_FromSize_t(stats.compressed_columns));
+    PyDict_SetItemString(dict, "active_rows",
+                         PyLong_FromSize_t(stats.active_rows));
+    return dict;
+}
+
+PyObject* SetCompressionEnabled(PyObject*, PyObject* args) {
+    int enabled = 0;
+    if (!PyArg_ParseTuple(args, "p", &enabled)) {
+        return nullptr;
+    }
+    mimicdb::CompressionConfig cfg = mimicdb::GetCompressionConfig();
+    cfg.enabled = enabled != 0;
+    mimicdb::SetCompressionConfig(cfg);
+    Py_RETURN_NONE;
+}
+
 PyMethodDef ApiClientCoreMethods[] = {
     {"create_database", (PyCFunction)ApiClientCoreCreateDatabase, METH_VARARGS, nullptr},
     {"create_dataset", (PyCFunction)ApiClientCoreCreateDataset, METH_VARARGS, nullptr},
@@ -680,6 +720,7 @@ PyMethodDef ApiClientCoreMethods[] = {
     {"append_batch", (PyCFunction)ApiClientCoreAppendBatch, METH_VARARGS, nullptr},
     {"scan", (PyCFunction)ApiClientCoreScan, METH_VARARGS | METH_KEYWORDS, nullptr},
     {"aggregate", (PyCFunction)ApiClientCoreAggregate, METH_VARARGS | METH_KEYWORDS, nullptr},
+    {"compression_stats", (PyCFunction)ApiClientCoreCompressionStats, METH_VARARGS, nullptr},
     {nullptr, nullptr, 0, nullptr},
 };
 
@@ -687,12 +728,17 @@ PyTypeObject ApiClientCoreType = {
     PyVarObject_HEAD_INIT(nullptr, 0)
 };
 
+PyMethodDef ModuleMethods[] = {
+    {"set_compression_enabled", (PyCFunction)SetCompressionEnabled, METH_VARARGS, nullptr},
+    {nullptr, nullptr, 0, nullptr},
+};
+
 PyModuleDef ModuleDef = {
     PyModuleDef_HEAD_INIT,
     "mimicapi._mimicapi_core",
     nullptr,
     -1,
-    nullptr,
+    ModuleMethods,
     nullptr,
     nullptr,
     nullptr,

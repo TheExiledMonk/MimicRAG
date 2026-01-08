@@ -65,6 +65,7 @@ public:
     bool LoadValidityWords(const uint64_t* words, size_t word_count, size_t bit_count);
     bool LoadVarlen(const uint32_t* lengths, size_t count, const uint8_t* bytes, size_t bytes_size);
     void Reserve(size_t size);
+    void ReleaseStorage();
 
 private:
     std::string name_;

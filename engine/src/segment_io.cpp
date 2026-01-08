@@ -12,6 +12,7 @@
 #include <unistd.h>
 #endif
 
+#include "mimicdb/compression.h"
 #include "mimicdb/schema.h"
 
 namespace mimicdb {
@@ -69,45 +70,63 @@ bool SegmentWriter::Write(const Segment& segment) {
     std::vector<SegmentColumnHeader> columns;
     columns.reserve(segment.Fields().size());
     const auto& stats = segment.ColumnStats();
+    const auto& compressed = segment.CompressedColumns();
+    const bool use_compressed = segment.IsSealed() && !compressed.empty();
     for (size_t i = 0; i < segment.Fields().size(); ++i) {
         const auto& field = segment.Fields()[i];
         if (field.Size() != header_.row_count) {
             return false;
         }
+        const CompressedColumnView* view = nullptr;
+        if (use_compressed && i < compressed.size()) {
+            view = &compressed[i];
+        }
         SegmentColumnHeader col;
         col.type = static_cast<uint32_t>(field.Type());
         col.value_count = field.Size();
-        switch (field.Type()) {
-            case FieldType::kInt32:
-                col.data_bytes = field.Size() * sizeof(int32_t);
-                break;
-            case FieldType::kInt64:
-                col.data_bytes = field.Size() * sizeof(int64_t);
-                break;
-            case FieldType::kFloat64:
-                col.data_bytes = field.Size() * sizeof(double);
-                break;
-            case FieldType::kBool:
-                col.data_bytes = field.Size() * sizeof(uint8_t);
-                break;
-            case FieldType::kDictInt32:
-                col.data_bytes = field.Size() * sizeof(uint32_t);
-                break;
-            case FieldType::kString:
-            case FieldType::kBytes:
-            case FieldType::kArray:
-                col.aux_bytes = field.Size() * sizeof(uint32_t);
-                col.data_bytes = field.BytesSize();
-                break;
-            case FieldType::kObject:
-                return false;
+        if (view) {
+            col.data_bytes = view->data_size;
+            col.aux_bytes = view->aux_size;
+            col.validity_words = view->validity_word_count;
+        } else {
+            switch (field.Type()) {
+                case FieldType::kInt32:
+                    col.data_bytes = field.Size() * sizeof(int32_t);
+                    break;
+                case FieldType::kInt64:
+                    col.data_bytes = field.Size() * sizeof(int64_t);
+                    break;
+                case FieldType::kFloat64:
+                    col.data_bytes = field.Size() * sizeof(double);
+                    break;
+                case FieldType::kBool:
+                    col.data_bytes = field.Size() * sizeof(uint8_t);
+                    break;
+                case FieldType::kDictInt32:
+                    col.data_bytes = field.Size() * sizeof(uint32_t);
+                    break;
+                case FieldType::kString:
+                case FieldType::kBytes:
+                case FieldType::kArray:
+                    col.aux_bytes = field.Size() * sizeof(uint32_t);
+                    col.data_bytes = field.BytesSize();
+                    break;
+                case FieldType::kObject:
+                    return false;
+            }
+            col.validity_words = field.HasNulls() ? field.Validity().WordCount() : 0;
         }
-        col.validity_words = field.HasNulls() ? field.Validity().WordCount() : 0;
         if (i < stats.size()) {
             col.min = stats[i].min;
             col.max = stats[i].max;
             col.null_count = stats[i].null_count;
             col.has_value = stats[i].has_value ? 1 : 0;
+            col.estimated_cardinality = stats[i].estimated_cardinality;
+            col.monotonic_hint = stats[i].monotonic_hint;
+        }
+        const auto& kinds = segment.CompressionKinds();
+        if (i < kinds.size()) {
+            col.compression_kind = static_cast<uint8_t>(kinds[i]);
         }
         columns.push_back(col);
     }
@@ -122,30 +141,43 @@ bool SegmentWriter::Write(const Segment& segment) {
 
     for (size_t i = 0; i < columns.size(); ++i) {
         const auto& field = segment.Fields()[i];
-        switch (field.Type()) {
-            case FieldType::kInt32:
-                out.write(reinterpret_cast<const char*>(field.DataInt32()), columns[i].data_bytes);
-                break;
-            case FieldType::kInt64:
-                out.write(reinterpret_cast<const char*>(field.DataInt64()), columns[i].data_bytes);
-                break;
-            case FieldType::kFloat64:
-                out.write(reinterpret_cast<const char*>(field.DataFloat64()), columns[i].data_bytes);
-                break;
-            case FieldType::kBool:
-                out.write(reinterpret_cast<const char*>(field.DataBool()), columns[i].data_bytes);
-                break;
-            case FieldType::kDictInt32:
-                out.write(reinterpret_cast<const char*>(field.DataDictIds()), columns[i].data_bytes);
-                break;
-            case FieldType::kString:
-            case FieldType::kBytes:
-            case FieldType::kArray:
-                out.write(reinterpret_cast<const char*>(field.DataLengths()), columns[i].aux_bytes);
-                out.write(reinterpret_cast<const char*>(field.DataBytes()), columns[i].data_bytes);
-                break;
-            case FieldType::kObject:
-                return false;
+        const CompressedColumnView* view = nullptr;
+        if (use_compressed && i < compressed.size()) {
+            view = &compressed[i];
+        }
+        if (view) {
+            if (view->aux_size > 0 && view->aux) {
+                out.write(reinterpret_cast<const char*>(view->aux), columns[i].aux_bytes);
+            }
+            if (view->data_size > 0 && view->data) {
+                out.write(reinterpret_cast<const char*>(view->data), columns[i].data_bytes);
+            }
+        } else {
+            switch (field.Type()) {
+                case FieldType::kInt32:
+                    out.write(reinterpret_cast<const char*>(field.DataInt32()), columns[i].data_bytes);
+                    break;
+                case FieldType::kInt64:
+                    out.write(reinterpret_cast<const char*>(field.DataInt64()), columns[i].data_bytes);
+                    break;
+                case FieldType::kFloat64:
+                    out.write(reinterpret_cast<const char*>(field.DataFloat64()), columns[i].data_bytes);
+                    break;
+                case FieldType::kBool:
+                    out.write(reinterpret_cast<const char*>(field.DataBool()), columns[i].data_bytes);
+                    break;
+                case FieldType::kDictInt32:
+                    out.write(reinterpret_cast<const char*>(field.DataDictIds()), columns[i].data_bytes);
+                    break;
+                case FieldType::kString:
+                case FieldType::kBytes:
+                case FieldType::kArray:
+                    out.write(reinterpret_cast<const char*>(field.DataLengths()), columns[i].aux_bytes);
+                    out.write(reinterpret_cast<const char*>(field.DataBytes()), columns[i].data_bytes);
+                    break;
+                case FieldType::kObject:
+                    return false;
+            }
         }
         if (!out.good()) {
             return false;
@@ -154,11 +186,20 @@ bool SegmentWriter::Write(const Segment& segment) {
 
     for (size_t i = 0; i < columns.size(); ++i) {
         const auto& field = segment.Fields()[i];
+        const CompressedColumnView* view = nullptr;
+        if (use_compressed && i < compressed.size()) {
+            view = &compressed[i];
+        }
         if (columns[i].validity_words == 0) {
             continue;
         }
-        out.write(reinterpret_cast<const char*>(field.Validity().Words()),
-                  columns[i].validity_words * sizeof(uint64_t));
+        if (view && view->validity_words) {
+            out.write(reinterpret_cast<const char*>(view->validity_words),
+                      columns[i].validity_words * sizeof(uint64_t));
+        } else {
+            out.write(reinterpret_cast<const char*>(field.Validity().Words()),
+                      columns[i].validity_words * sizeof(uint64_t));
+        }
         if (!out.good()) {
             return false;
         }
@@ -347,6 +388,12 @@ bool SegmentReader::Read(Segment* out_segment) {
         Segment segment(static_cast<size_t>(header_.row_capacity),
                         static_cast<size_t>(header_.row_count),
                         std::move(fields));
+        std::vector<ColumnCompressionKind> kinds;
+        kinds.reserve(column_headers_.size());
+        for (const auto& col : column_headers_) {
+            kinds.push_back(static_cast<ColumnCompressionKind>(col.compression_kind));
+        }
+        segment.SetCompressionKinds(std::move(kinds));
         *out_segment = std::move(segment);
     }
 #if defined(__unix__) || defined(__APPLE__)

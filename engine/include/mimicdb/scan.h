@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <vector>
 
+#include "mimicdb/compression.h"
 #include "mimicdb/mask.h"
 #include "mimicdb/metrics.h"
 #include "mimicdb/segment.h"
@@ -32,6 +33,8 @@ void ScanLoopMaskFirstWithMetrics(size_t count, PredicateFn predicate, void* pre
                                   size_t row_bytes);
 void ScanLoopMaskedWithValidity(size_t count, const Mask& mask, const uint8_t* validity,
                                 ConsumeFn consume, void* consume_ctx);
+bool BuildMaskCompressed(const CompressedColumnView& column, const CompressionPredicate& predicate,
+                         Mask* out);
 bool SegmentMatchesPredicate(const SegmentColumnStats& stats, CompareOp op, double value);
 void CollectRowIds(const Mask& mask, size_t count, std::vector<size_t>* out);
 std::vector<std::vector<size_t>> ScheduleSegments(size_t segment_count, size_t thread_count);

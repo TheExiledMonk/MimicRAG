@@ -12,6 +12,7 @@ public:
     uint32_t Add(int32_t value);
     int32_t Value(uint32_t id) const;
     uint32_t Size() const;
+    bool FindId(int32_t value, uint32_t* out_id) const;
 
 private:
     std::unordered_map<int32_t, uint32_t> index_;
