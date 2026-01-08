@@ -11,7 +11,13 @@ void PredicateInt64EqScalar(const int64_t* data, int64_t value, uint8_t* out, si
 }  // namespace
 
 PredicateKernelInt64 GetPredicateKernelInt64Eq() {
-    return &PredicateInt64EqScalar;
+    static const PredicateKernelInt64 kernel = []() {
+        if (CpuHasAvx2()) {
+            return &PredicateInt64EqScalar;
+        }
+        return &PredicateInt64EqScalar;
+    }();
+    return kernel;
 }
 
 }  // namespace mimicdb
