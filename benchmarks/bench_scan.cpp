@@ -3,8 +3,8 @@
 #include <iostream>
 #include <vector>
 
-#include "pcdb/scan.h"
-#include "pcdb/metrics.h"
+#include "mimicdb/scan.h"
+#include "mimicdb/metrics.h"
 
 namespace {
 struct PredCtx {
@@ -32,10 +32,10 @@ int main() {
     std::vector<int> data(kCount, 1);
     PredCtx pred{data.data(), 0};
     CountCtx out;
-    pcdb::Metrics metrics;
+    mimicdb::Metrics metrics;
 
     auto start = std::chrono::high_resolution_clock::now();
-    pcdb::ScanLoopWithMetrics(kCount, Predicate, &pred, Consume, &out, &metrics, sizeof(int));
+    mimicdb::ScanLoopWithMetrics(kCount, Predicate, &pred, Consume, &out, &metrics, sizeof(int));
     auto end = std::chrono::high_resolution_clock::now();
     const std::chrono::duration<double> elapsed = end - start;
 

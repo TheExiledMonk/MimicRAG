@@ -1,8 +1,8 @@
-#include "pcdb/schema.h"
+#include "mimicdb/schema.h"
 
-#include "pcdb/hash.h"
+#include "mimicdb/hash.h"
 
-namespace pcdb {
+namespace mimicdb {
 
 Schema::Schema(std::vector<SchemaField> fields) : fields_(std::move(fields)) {}
 
@@ -22,4 +22,4 @@ uint64_t Schema::Fingerprint() const {
     return hash;
 }
 
-}  // namespace pcdb
+}  // namespace mimicdb

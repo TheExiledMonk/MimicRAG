@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 import sys
 
-from pcdb import Dataset
+from mimicapi import Dataset
 
 
 _LOCK_MODES = ("append-only", "update-only", "full-crud")
@@ -119,11 +119,12 @@ def run_network_bench(
     host: str,
     port: int,
     server_bin: str | None,
+    database: str,
 ) -> dict[str, float]:
     repo_root = Path(__file__).resolve().parents[1]
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
-    from client.pcdb_client import PCDBClient
+    from client.mimicdb_client import MimicDBClient
 
     rng = random.Random(seed)
     server_proc = None
@@ -132,7 +133,7 @@ def run_network_bench(
         server_proc = subprocess.Popen([resolved, str(port)])
         time.sleep(0.2)
     try:
-        client = PCDBClient(host=host, port=port)
+        client = MimicDBClient(host=host, port=port, default_db=database)
         client.ping()
     except Exception:
         if server_proc is not None:
@@ -147,6 +148,7 @@ def run_network_bench(
         ("country", "int32"),
         ("income", "float64"),
     ]
+    client.create_database(database)
     client.create_dataset("users", fields)
 
     start = time.perf_counter()
@@ -209,6 +211,7 @@ def run_network_bench(
     print("transport=network")
     print(f"host={host}")
     print(f"port={port}")
+    print(f"database={database}")
     print(f"append_mode={append_mode}")
     print(f"rows={rows}")
     print(f"append_seconds={append_seconds:.6f}")
@@ -228,9 +231,9 @@ def resolve_server_bin(server_bin: str, repo_root: Path) -> str:
     if candidate.exists():
         return str(candidate)
     fallback = [
-        repo_root / "build" / "pcdb_server",
-        repo_root / "build" / "server" / "pcdb_server",
-        repo_root / "pcdb_server",
+        repo_root / "build" / "mimicdb_server",
+        repo_root / "build" / "server" / "mimicdb_server",
+        repo_root / "mimicdb_server",
     ]
     for path in fallback:
         if path.exists():
@@ -242,7 +245,7 @@ def resolve_server_bin(server_bin: str, repo_root: Path) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="PCDB Python API benchmark")
+    parser = argparse.ArgumentParser(description="MimicDB Python API benchmark")
     parser.add_argument("--rows", type=int, default=200_000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--batch-size", type=int, default=10_000)
@@ -252,6 +255,7 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9000)
     parser.add_argument("--server-bin", default=None)
+    parser.add_argument("--database", default="default")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--lock-mode", choices=_LOCK_MODES, default="append-only")
     parser.add_argument("--all-lock-modes", action="store_true")
@@ -284,6 +288,7 @@ def main() -> None:
             args.host,
             args.port,
             args.server_bin,
+            args.database,
         )
     if args.transport == "both" and local_results and network_results:
         print("comparison=local_vs_network")

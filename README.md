@@ -1,6 +1,6 @@
-# PCDB (Primitive Columnar Database)
+# MimicDB (Primitive Columnar Database)
 
-PCDB is a minimal, high‑performance columnar engine focused on a single hot scan loop. It keeps data storage/query physics separate from higher‑level logic. v0 is intentionally narrow: append‑only, columnar storage, batch scanning, simple filters, projections, and masked aggregations.
+MimicDB is a minimal, high‑performance columnar engine focused on a single hot scan loop. It keeps data storage/query physics separate from higher‑level logic. v0 is intentionally narrow: append‑only, columnar storage, batch scanning, simple filters, projections, and masked aggregations.
 
 ## What it is
 

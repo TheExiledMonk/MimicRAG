@@ -1,6 +1,6 @@
 import unittest
 
-from pcdb import Dataset
+from mimicapi import Dataset
 
 
 class TestPythonAPI(unittest.TestCase):
@@ -59,6 +59,31 @@ class TestPythonAPI(unittest.TestCase):
         result = users.filter(country_eq=1).aggregate(count=True, sum="income")
         self.assertEqual(result["count"], 2)
         self.assertEqual(result["sum"], 100.0)
+
+    def test_scan_projection(self):
+        users = Dataset(
+            name="users",
+            fields={
+                "age": "int32",
+                "country": "int32",
+            },
+        )
+        users.append(age=10, country=1)
+        users.append(age=20, country=2)
+        rows = users.scan(columns=["age"], country_eq=2)
+        self.assertEqual(rows, [{"age": 20}])
+
+    def test_string_field_scan(self):
+        users = Dataset(
+            name="users",
+            fields={
+                "name": "string",
+            },
+        )
+        users.append(name="alice")
+        users.append(name="bob")
+        rows = users.scan(columns=["name"])
+        self.assertEqual(rows[0]["name"], "alice")
 
     def test_pruning_debug_stats(self):
         users = Dataset(

@@ -1,6 +1,6 @@
-#include "pcdb/bitmap.h"
+#include "mimicdb/bitmap.h"
 
-namespace pcdb {
+namespace mimicdb {
 
 namespace {
 constexpr size_t kWordBits = 64;
@@ -72,4 +72,4 @@ void Bitmap::AppendBits(const uint8_t* validity, size_t count) {
     }
 }
 
-}  // namespace pcdb
+}  // namespace mimicdb

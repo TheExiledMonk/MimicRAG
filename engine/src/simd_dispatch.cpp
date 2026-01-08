@@ -1,7 +1,7 @@
-#include "pcdb/scan.h"
-#include "pcdb/simd.h"
+#include "mimicdb/scan.h"
+#include "mimicdb/simd.h"
 
-namespace pcdb {
+namespace mimicdb {
 
 ScanLoopFn GetScanKernel() {
     return &ScanLoop;
@@ -27,4 +27,4 @@ bool CpuHasNeon() {
 #endif
 }
 
-}  // namespace pcdb
+}  // namespace mimicdb

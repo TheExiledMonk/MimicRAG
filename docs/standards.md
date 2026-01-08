@@ -1,4 +1,4 @@
-# PCDB Standards
+# MimicDB Standards
 
 - No RTTI in hot paths
 - No exceptions in hot paths

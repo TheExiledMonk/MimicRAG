@@ -1,6 +1,6 @@
-#include "pcdb/simd.h"
+#include "mimicdb/simd.h"
 
-namespace pcdb {
+namespace mimicdb {
 
 namespace {
 void PredicateInt64EqScalar(const int64_t* data, int64_t value, uint8_t* out, size_t count) {
@@ -14,4 +14,4 @@ PredicateKernelInt64 GetPredicateKernelInt64Eq() {
     return &PredicateInt64EqScalar;
 }
 
-}  // namespace pcdb
+}  // namespace mimicdb

@@ -1,4 +1,4 @@
-# PCDB v0 Non-Negotiables
+# MimicDB v0 Non-Negotiables
 
 - The database stores facts, not programs
 - The database executes no user logic
@@ -32,6 +32,37 @@ aggregations without adding new engine logic.
 SQL parsing is an API concern that maps SQL to primitive operations. The engine
 remains SQL-agnostic.
 
+## Database namespaces (server)
+
+The server is aware of database namespaces only. This is the only server-side
+awareness beyond raw storage.
+
+On-disk layout:
+
+- storage_root/
+  - <db_name>/
+    - <dataset_name>/
+      - schema.bin
+      - segment_0000.mimicdb
+      - segment_0001.mimicdb
+
+Each request that addresses a dataset must include the database name. The server
+creates a default database named `default` on startup.
+
+## Durability model (v0.1)
+
+Segment-only durability is the only server-side “smart” behavior. Sealed
+segments are durable; the active (in-progress) segment may be lost on crash.
+
+Crash guarantees:
+
+- All sealed segment files are intact and readable after restart.
+- The active segment may be missing or partially written and should be discarded.
+- Recovery scans the database directories, loads sealed segments, and resumes
+  append into a fresh active segment.
+
+This guarantees deterministic recovery without WAL or replay logic.
+
 ## Networking (future)
 
 Networking is a thin transport layer that maps 1:1 to existing core operations.
@@ -43,7 +74,7 @@ Requests map directly to Dataset construction, AppendBatch, and aggregate scans.
 
 Startup:
 
-- Provide bind address/port via args or env (e.g., `PCDB_BIND=0.0.0.0:9000`).
+- Provide bind address/port via args or env (e.g., `MIMICDB_BIND=0.0.0.0:9000`).
 - Start listener, accept loop, and dataset registry.
 - Log version, port, and storage root.
 
@@ -56,11 +87,13 @@ Shutdown:
 
 Config (minimal):
 
-Config file `pcdb.conf` (or override with `PCDB_CONFIG`):
+Config file `mimicdb.conf` (or override with `MIMICDB_CONFIG`):
 
 - `bind=127.0.0.1:9000`
 - `storage_root=./data`
 - `flush_on_shutdown=false`
+- `flush_on_seal=true`
+- `flush_interval_ms=0`
 - `log_level=info` (reserved)
 
 ### Housekeeping / remote sync (post‑networking)
@@ -75,7 +108,7 @@ All messages are little-endian.
 
 Header (20 bytes):
 
-- u32 magic = 0x50434442 ("PCDB")
+- u32 magic = 0x50434442 ("MimicDB")
 - u16 version = 1
 - u16 flags (bit 0 = response)
 - u16 opcode
@@ -90,23 +123,30 @@ Opcodes:
 - 3: APPEND_BATCH
 - 4: QUERY_AGG (full-scan aggregate over a field, no predicates yet)
 - 5: HEALTH (request empty, response = dataset/segment/row counts)
+- 6: CREATE_DATABASE
+- 7: LIST_DATABASES
 
 Payloads:
 
 CREATE_DATASET:
 
+- u16 db_name_len
+- bytes db_name
 - u16 name_len
 - bytes name
 - u16 field_count
 - repeat field_count:
   - u16 field_name_len
   - bytes field_name
-  - u8 field_type (pcdb::FieldType enum)
+  - u8 field_type (mimicdb::FieldType enum)
 
 APPEND_BATCH:
 
+- u16 db_name_len
+- bytes db_name
 - u16 dataset_name_len
 - bytes dataset_name
+- u64 batch_id
 - u32 row_count
 - u16 field_count
 - repeat field_count:
@@ -119,9 +159,16 @@ APPEND_BATCH:
 
 QUERY_AGG:
 
+- u16 db_name_len
+- bytes db_name
 - u16 dataset_name_len
 - bytes dataset_name
 - u16 field_index
+- u16 predicate_count
+- repeat predicate_count:
+  - u16 field_index
+  - u8 op (0=eq,1=ne,2=lt,3=le,4=gt,5=ge)
+  - f64 value
 
 QUERY_AGG response payload:
 
@@ -136,3 +183,24 @@ HEALTH response payload:
 - u16 dataset_count
 - u64 segment_count
 - u64 row_count
+
+QUERY_AGG response payload (extended):
+
+- u64 count
+- f64 sum
+- f64 min
+- f64 max
+- u8 has_value
+- u64 rows_scanned
+
+CREATE_DATABASE:
+
+- u16 db_name_len
+- bytes db_name
+
+LIST_DATABASES response payload:
+
+- u16 db_count
+- repeat db_count:
+  - u16 db_name_len
+  - bytes db_name

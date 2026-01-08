@@ -1,6 +1,6 @@
-#include "pcdb/mask.h"
+#include "mimicdb/mask.h"
 
-namespace pcdb {
+namespace mimicdb {
 
 namespace {
 constexpr size_t kWordBits = 64;
@@ -143,4 +143,4 @@ PackedMask PackMask(const Mask& mask) {
     return packed;
 }
 
-}  // namespace pcdb
+}  // namespace mimicdb

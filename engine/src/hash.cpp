@@ -1,6 +1,6 @@
-#include "pcdb/hash.h"
+#include "mimicdb/hash.h"
 
-namespace pcdb {
+namespace mimicdb {
 
 namespace {
 constexpr uint64_t kFnvOffsetBasis = 14695981039346656037ULL;
@@ -28,4 +28,4 @@ uint64_t HashInit() {
     return kFnvOffsetBasis;
 }
 
-}  // namespace pcdb
+}  // namespace mimicdb

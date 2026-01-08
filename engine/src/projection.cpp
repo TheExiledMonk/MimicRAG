@@ -1,10 +1,10 @@
-#include "pcdb/projection.h"
+#include "mimicdb/projection.h"
 
 #include <cstddef>
 
-#include "pcdb/field_vector.h"
+#include "mimicdb/field_vector.h"
 
-namespace pcdb {
+namespace mimicdb {
 
 ProjectionResult ProjectRows(const std::vector<FieldVector>& fields,
                              const Projection& projection,
@@ -40,6 +40,44 @@ ProjectionResult ProjectRows(const std::vector<FieldVector>& fields,
                 case FieldType::kDictInt32:
                     dest.AppendDictInt32(field.DictionaryValue(field.DataDictIds()[row]));
                     break;
+                case FieldType::kString: {
+                    const auto* lengths = field.DataLengths();
+                    const auto* bytes = field.DataBytes();
+                    size_t offset = 0;
+                    for (size_t i = 0; i < row; ++i) {
+                        offset += lengths[i];
+                    }
+                    dest.AppendString(
+                        std::string(reinterpret_cast<const char*>(bytes + offset),
+                                    lengths[row]));
+                    break;
+                }
+                case FieldType::kBytes: {
+                    const auto* lengths = field.DataLengths();
+                    const auto* bytes = field.DataBytes();
+                    size_t offset = 0;
+                    for (size_t i = 0; i < row; ++i) {
+                        offset += lengths[i];
+                    }
+                    dest.AppendBytes(
+                        std::string(reinterpret_cast<const char*>(bytes + offset),
+                                    lengths[row]));
+                    break;
+                }
+                case FieldType::kArray: {
+                    const auto* lengths = field.DataLengths();
+                    const auto* bytes = field.DataBytes();
+                    size_t offset = 0;
+                    for (size_t i = 0; i < row; ++i) {
+                        offset += lengths[i];
+                    }
+                    dest.AppendBytes(
+                        std::string(reinterpret_cast<const char*>(bytes + offset),
+                                    lengths[row]));
+                    break;
+                }
+                case FieldType::kObject:
+                    break;
             }
         }
     }
@@ -47,4 +85,4 @@ ProjectionResult ProjectRows(const std::vector<FieldVector>& fields,
     return result;
 }
 
-}  // namespace pcdb
+}  // namespace mimicdb

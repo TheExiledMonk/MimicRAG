@@ -1,8 +1,8 @@
-#include "pcdb/simd.h"
+#include "mimicdb/simd.h"
 
-#include "pcdb/aggregate.h"
+#include "mimicdb/aggregate.h"
 
-namespace pcdb {
+namespace mimicdb {
 
 namespace {
 void AggregateDoubleScalar(const double* values, size_t count, const Mask* mask,
@@ -47,4 +47,4 @@ AggregateKernel GetAggregateKernelMixed() {
     return &AggregateMixedScalar;
 }
 
-}  // namespace pcdb
+}  // namespace mimicdb

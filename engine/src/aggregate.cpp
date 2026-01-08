@@ -1,10 +1,10 @@
-#include "pcdb/aggregate.h"
+#include "mimicdb/aggregate.h"
 
 #include <cstddef>
 #include <thread>
 #include <vector>
 
-namespace pcdb {
+namespace mimicdb {
 
 void AggregateDouble(const double* values, size_t count, const Mask* mask,
                      AggregateResult* out) {
@@ -186,6 +186,11 @@ void AggregateField(const FieldVector& field, const Mask* mask, AggregateResult*
             }
             break;
         }
+        case FieldType::kString:
+        case FieldType::kBytes:
+        case FieldType::kArray:
+        case FieldType::kObject:
+            break;
     }
     *out = result;
 }
@@ -291,6 +296,11 @@ void AggregateSum(const FieldVector& field, const Mask* mask, AggregateResult* o
             }
             break;
         }
+        case FieldType::kString:
+        case FieldType::kBytes:
+        case FieldType::kArray:
+        case FieldType::kObject:
+            break;
     }
     *out = result;
 }
@@ -437,6 +447,11 @@ void AggregateMinMax(const FieldVector& field, const Mask* mask, AggregateResult
             }
             break;
         }
+        case FieldType::kString:
+        case FieldType::kBytes:
+        case FieldType::kArray:
+        case FieldType::kObject:
+            break;
     }
     *out = result;
 }
@@ -528,6 +543,11 @@ void AggregateSumPredicate(const FieldVector& field, PredicateFn predicate, void
             }
             break;
         }
+        case FieldType::kString:
+        case FieldType::kBytes:
+        case FieldType::kArray:
+        case FieldType::kObject:
+            break;
     }
     *out = result;
 }
@@ -695,6 +715,11 @@ void AggregateMinMaxPredicate(const FieldVector& field, PredicateFn predicate, v
             }
             break;
         }
+        case FieldType::kString:
+        case FieldType::kBytes:
+        case FieldType::kArray:
+        case FieldType::kObject:
+            break;
     }
     *out = result;
 }
@@ -847,6 +872,10 @@ void AggregateMixedPredicate(const FieldVector& field, PredicateFn predicate, vo
             }
             break;
         }
+        case FieldType::kString:
+        case FieldType::kBytes:
+        case FieldType::kArray:
+            break;
     }
     *out = result;
 }
@@ -1013,6 +1042,11 @@ void AggregateFieldParallel(const FieldVector& field, const Mask* mask, size_t t
                     }
                     break;
                 }
+                case FieldType::kString:
+                case FieldType::kBytes:
+                case FieldType::kArray:
+                case FieldType::kObject:
+                    break;
             }
         });
     }
@@ -1041,4 +1075,4 @@ void AggregateFieldParallel(const FieldVector& field, const Mask* mask, size_t t
     *out = result;
 }
 
-}  // namespace pcdb
+}  // namespace mimicdb

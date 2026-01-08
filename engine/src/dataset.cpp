@@ -1,9 +1,10 @@
-#include "pcdb/dataset.h"
+#include "mimicdb/dataset.h"
 
-#include "pcdb/hash.h"
-#include "pcdb/config.h"
+#include "mimicdb/array_codec.h"
+#include "mimicdb/hash.h"
+#include "mimicdb/config.h"
 
-namespace pcdb {
+namespace mimicdb {
 
 Dataset::Dataset(std::string name)
     : name_(std::move(name)), segment_capacity_(Config::kDefaultSegmentRows) {}
@@ -72,6 +73,34 @@ FieldValue FieldValue::Bool(bool value) {
     return out;
 }
 
+FieldValue FieldValue::String(const std::string& value) {
+    FieldValue out;
+    out.type = FieldType::kString;
+    out.bytes = value;
+    return out;
+}
+
+FieldValue FieldValue::Bytes(const std::string& value) {
+    FieldValue out;
+    out.type = FieldType::kBytes;
+    out.bytes = value;
+    return out;
+}
+
+FieldValue FieldValue::Array(const std::vector<FieldValue>& value) {
+    FieldValue out;
+    out.type = FieldType::kArray;
+    out.array = value;
+    return out;
+}
+
+FieldValue FieldValue::Object(const std::unordered_map<std::string, FieldValue>& value) {
+    FieldValue out;
+    out.type = FieldType::kObject;
+    out.object = value;
+    return out;
+}
+
 FieldValue FieldValue::Null(FieldType type) {
     FieldValue out;
     out.type = type;
@@ -114,6 +143,20 @@ bool Dataset::Append(const std::vector<FieldValue>& values) {
                     break;
                 case FieldType::kDictInt32:
                     ok = field.AppendDictInt32(value.i32);
+                    break;
+                case FieldType::kString:
+                    ok = field.AppendString(value.bytes);
+                    break;
+                case FieldType::kBytes:
+                    ok = field.AppendBytes(value.bytes);
+                    break;
+                case FieldType::kArray: {
+                    const std::string encoded = EncodeArray(value.array);
+                    ok = field.AppendBytes(encoded);
+                    break;
+                }
+                case FieldType::kObject:
+                    ok = false;
                     break;
             }
         }
@@ -192,6 +235,29 @@ bool Dataset::AppendBatch(const std::vector<FieldBatch>& batches) {
                         static_cast<const int32_t*>(batch.data) + offset, take,
                         batch.validity ? batch.validity + offset : nullptr);
                     break;
+                case FieldType::kString:
+                case FieldType::kBytes:
+                case FieldType::kArray: {
+                    if (!batch.lengths || !batch.bytes) {
+                        return false;
+                    }
+                    uint64_t byte_offset = 0;
+                    for (size_t j = 0; j < offset; ++j) {
+                        byte_offset += batch.lengths[j];
+                    }
+                    const uint32_t* lengths = batch.lengths + offset;
+                    const uint8_t* bytes = batch.bytes + byte_offset;
+                    if (batch.type == FieldType::kString) {
+                        ok = field.AppendBatchString(
+                            lengths, bytes, take,
+                            batch.validity ? batch.validity + offset : nullptr);
+                    } else {
+                        ok = field.AppendBatchBytes(
+                            lengths, bytes, take,
+                            batch.validity ? batch.validity + offset : nullptr);
+                    }
+                    break;
+                }
             }
             if (!ok) {
                 return false;
@@ -246,4 +312,4 @@ Schema Dataset::SchemaView() const {
     return Schema(std::move(fields));
 }
 
-}  // namespace pcdb
+}  // namespace mimicdb

@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pcdb"
+name = "mimicapi"
 version = "0.0.0"
-description = "Primitive Columnar Database (PCDB) API"
+description = "MimicDB API"
 requires-python = ">=3.10"
 [tool.setuptools]
-packages = ["pcdb"]
+packages = ["mimicapi"]

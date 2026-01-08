@@ -1,7 +1,7 @@
-# PCDB v0 Benchmark Plan: Postgres vs DuckDB
+# MimicDB v0 Benchmark Plan: Postgres vs DuckDB
 
 ## Goal
-Compare PCDB sequential scan performance against PostgreSQL and DuckDB on simple filters.
+Compare MimicDB sequential scan performance against PostgreSQL and DuckDB on simple filters.
 
 ## Dataset
 - 10M rows

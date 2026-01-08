@@ -1,6 +1,6 @@
-#include "pcdb/simd_output.h"
+#include "mimicdb/simd_output.h"
 
-namespace pcdb {
+namespace mimicdb {
 
 void CompressStoreScalar(const Mask& mask, size_t count, std::vector<size_t>* out) {
     if (!out) {
@@ -14,4 +14,4 @@ void CompressStoreScalar(const Mask& mask, size_t count, std::vector<size_t>* ou
     }
 }
 
-}  // namespace pcdb
+}  // namespace mimicdb

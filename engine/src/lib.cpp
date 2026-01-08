@@ -1,3 +1,3 @@
-namespace pcdb {
-void pcdb_engine_placeholder() {}
+namespace mimicdb {
+void mimicdb_engine_placeholder() {}
 }

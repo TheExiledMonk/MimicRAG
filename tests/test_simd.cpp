@@ -2,14 +2,14 @@
 #include <cstddef>
 #include <vector>
 
-#include "pcdb/mask.h"
-#include "pcdb/simd.h"
+#include "mimicdb/mask.h"
+#include "mimicdb/simd.h"
 
 int main() {
     const int64_t values[] = {1, 2, 2, 5, 2};
     std::vector<uint8_t> out(5, 0);
 
-    auto pred = pcdb::GetPredicateKernelInt64Eq();
+    auto pred = mimicdb::GetPredicateKernelInt64Eq();
     assert(pred != nullptr);
     pred(values, 2, out.data(), out.size());
     assert(out[0] == 0);
@@ -19,8 +19,8 @@ int main() {
     assert(out[4] == 1);
 
     const double fvalues[] = {1.0, 2.0, 3.0};
-    pcdb::AggregateResult result;
-    auto agg = pcdb::GetAggregateKernelDouble();
+    mimicdb::AggregateResult result;
+    auto agg = mimicdb::GetAggregateKernelDouble();
     assert(agg != nullptr);
     agg(fvalues, 3, nullptr, &result);
     assert(result.count == 3);

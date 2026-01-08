@@ -1,7 +1,8 @@
-add_library(pcdb_engine
+add_library(mimicdb_engine
     src/lib.cpp
     src/batch.cpp
     src/bitmap.cpp
+    src/array_codec.cpp
     src/field_vector.cpp
     src/dataset.cpp
     src/schema.cpp
@@ -22,10 +23,10 @@ add_library(pcdb_engine
     src/simd_output.cpp
 )
 
-target_include_directories(pcdb_engine PUBLIC
+target_include_directories(mimicdb_engine PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 
-target_compile_features(pcdb_engine PUBLIC cxx_std_20)
+target_compile_features(mimicdb_engine PUBLIC cxx_std_20)
 
-target_compile_options(pcdb_engine PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(mimicdb_engine PRIVATE -Wall -Wextra -Wpedantic)

@@ -1,6 +1,6 @@
-#include "pcdb/predicate.h"
+#include "mimicdb/predicate.h"
 
-namespace pcdb {
+namespace mimicdb {
 
 bool CompareInt64(int64_t left, int64_t right, CompareOp op) {
     switch (op) {
@@ -90,4 +90,4 @@ bool PredicateCanMatchRange(double min, double max, CompareOp op, double value) 
     return true;
 }
 
-}  // namespace pcdb
+}  // namespace mimicdb

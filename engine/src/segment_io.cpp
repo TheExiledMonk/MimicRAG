@@ -1,4 +1,4 @@
-#include "pcdb/segment_io.h"
+#include "mimicdb/segment_io.h"
 
 #include <cstring>
 #include <fstream>
@@ -12,9 +12,26 @@
 #include <unistd.h>
 #endif
 
-#include "pcdb/schema.h"
+#include "mimicdb/schema.h"
 
-namespace pcdb {
+namespace mimicdb {
+
+namespace {
+bool FsyncPath(const std::string& path) {
+#if defined(__unix__) || defined(__APPLE__)
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        return false;
+    }
+    const int result = ::fsync(fd);
+    ::close(fd);
+    return result == 0;
+#else
+    (void)path;
+    return true;
+#endif
+}
+}  // namespace
 
 SegmentWriter::SegmentWriter(std::string path) {
     Open(std::move(path));
@@ -76,6 +93,14 @@ bool SegmentWriter::Write(const Segment& segment) {
             case FieldType::kDictInt32:
                 col.data_bytes = field.Size() * sizeof(uint32_t);
                 break;
+            case FieldType::kString:
+            case FieldType::kBytes:
+            case FieldType::kArray:
+                col.aux_bytes = field.Size() * sizeof(uint32_t);
+                col.data_bytes = field.BytesSize();
+                break;
+            case FieldType::kObject:
+                return false;
         }
         col.validity_words = field.HasNulls() ? field.Validity().WordCount() : 0;
         if (i < stats.size()) {
@@ -113,6 +138,14 @@ bool SegmentWriter::Write(const Segment& segment) {
             case FieldType::kDictInt32:
                 out.write(reinterpret_cast<const char*>(field.DataDictIds()), columns[i].data_bytes);
                 break;
+            case FieldType::kString:
+            case FieldType::kBytes:
+            case FieldType::kArray:
+                out.write(reinterpret_cast<const char*>(field.DataLengths()), columns[i].aux_bytes);
+                out.write(reinterpret_cast<const char*>(field.DataBytes()), columns[i].data_bytes);
+                break;
+            case FieldType::kObject:
+                return false;
         }
         if (!out.good()) {
             return false;
@@ -131,7 +164,12 @@ bool SegmentWriter::Write(const Segment& segment) {
         }
     }
 
-    return out.good();
+    const bool ok = out.good();
+    out.close();
+    if (!ok) {
+        return false;
+    }
+    return FsyncPath(path_);
 }
 
 const std::string& SegmentWriter::Path() const {
@@ -198,7 +236,7 @@ bool SegmentReader::Read(Segment* out_segment) {
     base = buffer.data();
     std::memcpy(&header_, base, sizeof(header_));
 #endif
-    if (header_.magic != 0x50434442 || header_.version != 1) {
+    if (header_.magic != 0x4D434442 || header_.version != 1) {
 #if defined(__unix__) || defined(__APPLE__)
         munmap(const_cast<uint8_t*>(base), mapped_size);
 #endif
@@ -233,14 +271,20 @@ bool SegmentReader::Read(Segment* out_segment) {
 #endif
             return false;
         }
-        if (offset + col.data_bytes > mapped_size) {
+        const size_t total_bytes =
+            static_cast<size_t>(col.data_bytes + col.aux_bytes);
+        if (offset + total_bytes > mapped_size) {
 #if defined(__unix__) || defined(__APPLE__)
             munmap(const_cast<uint8_t*>(base), mapped_size);
 #endif
             return false;
         }
         FieldVector field("col" + std::to_string(i), static_cast<FieldType>(col.type));
-        field.Resize(static_cast<size_t>(col.value_count));
+        const auto field_type = static_cast<FieldType>(col.type);
+        if (field_type != FieldType::kString && field_type != FieldType::kBytes &&
+            field_type != FieldType::kArray) {
+            field.Resize(static_cast<size_t>(col.value_count));
+        }
         switch (static_cast<FieldType>(col.type)) {
             case FieldType::kInt32:
                 std::memcpy(field.MutableInt32(), base + offset, col.data_bytes);
@@ -257,6 +301,30 @@ bool SegmentReader::Read(Segment* out_segment) {
             case FieldType::kDictInt32:
                 std::memcpy(field.MutableDictIds(), base + offset, col.data_bytes);
                 break;
+            case FieldType::kString:
+            case FieldType::kBytes:
+            case FieldType::kArray: {
+                const size_t length_bytes = static_cast<size_t>(col.aux_bytes);
+                if (offset + length_bytes + col.data_bytes > mapped_size) {
+#if defined(__unix__) || defined(__APPLE__)
+                    munmap(const_cast<uint8_t*>(base), mapped_size);
+#endif
+                    return false;
+                }
+                const auto* lengths = reinterpret_cast<const uint32_t*>(base + offset);
+                const auto* bytes = reinterpret_cast<const uint8_t*>(base + offset + length_bytes);
+                if (!field.LoadVarlen(lengths, static_cast<size_t>(col.value_count),
+                                      bytes, static_cast<size_t>(col.data_bytes))) {
+#if defined(__unix__) || defined(__APPLE__)
+                    munmap(const_cast<uint8_t*>(base), mapped_size);
+#endif
+                    return false;
+                }
+                offset += length_bytes;
+                break;
+            }
+            case FieldType::kObject:
+                return false;
         }
         offset += static_cast<size_t>(col.data_bytes);
         if (col.validity_words > 0) {
@@ -312,4 +380,4 @@ const std::vector<SegmentColumnHeader>& SegmentReader::ColumnHeaders() const {
     return column_headers_;
 }
 
-}  // namespace pcdb
+}  // namespace mimicdb

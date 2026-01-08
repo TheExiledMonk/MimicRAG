@@ -1,6 +1,6 @@
-#include "pcdb/dictionary.h"
+#include "mimicdb/dictionary.h"
 
-namespace pcdb {
+namespace mimicdb {
 
 uint32_t DictionaryInt32::Add(int32_t value) {
     auto it = index_.find(value);
@@ -21,4 +21,4 @@ uint32_t DictionaryInt32::Size() const {
     return static_cast<uint32_t>(values_.size());
 }
 
-}  // namespace pcdb
+}  // namespace mimicdb

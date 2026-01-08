@@ -1,6 +1,6 @@
-#include "pcdb/batch.h"
+#include "mimicdb/batch.h"
 
-namespace pcdb {
+namespace mimicdb {
 
 BatchIterator::BatchIterator(const Segment& segment, size_t batch_size)
     : total_(segment.RowCount()), batch_size_(batch_size), cursor_(0) {}
@@ -21,4 +21,4 @@ Batch BatchIterator::Next() {
     return batch;
 }
 
-}  // namespace pcdb
+}  // namespace mimicdb

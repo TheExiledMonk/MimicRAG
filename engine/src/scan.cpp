@@ -1,10 +1,10 @@
-#include "pcdb/scan.h"
+#include "mimicdb/scan.h"
 
 #include <thread>
 
-#include "pcdb/predicate.h"
+#include "mimicdb/predicate.h"
 
-namespace pcdb {
+namespace mimicdb {
 
 void ScanLoop(size_t count, PredicateFn predicate, void* predicate_ctx, ConsumeFn consume,
               void* consume_ctx) {
@@ -75,7 +75,7 @@ void ScanLoopMaskedWithValidity(size_t count, const Mask& mask, const uint8_t* v
 
 bool SegmentMatchesPredicate(const SegmentColumnStats& stats, CompareOp op, double value) {
     if (!stats.has_value) {
-        return false;
+        return true;
     }
     return PredicateCanMatchRange(stats.min, stats.max, op, value);
 }
@@ -182,4 +182,4 @@ std::vector<size_t> PruneSegmentsByPredicateWithMetrics(const std::vector<Segmen
     return indices;
 }
 
-}  // namespace pcdb
+}  // namespace mimicdb

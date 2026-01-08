@@ -1,8 +1,8 @@
-#include "pcdb/field_vector.h"
+#include "mimicdb/field_vector.h"
 
 #include <cstring>
 
-namespace pcdb {
+namespace mimicdb {
 
 FieldVector::FieldVector(std::string name, FieldType type)
     : name_(std::move(name)), type_(type) {}
@@ -89,6 +89,46 @@ int32_t FieldVector::DictionaryValue(uint32_t id) const {
     return dictionary_.Value(id);
 }
 
+const uint8_t* FieldVector::DataBytes() const {
+    return (type_ == FieldType::kString || type_ == FieldType::kBytes ||
+            type_ == FieldType::kArray)
+               ? data_bytes_.data()
+               : nullptr;
+}
+
+const uint32_t* FieldVector::DataLengths() const {
+    return (type_ == FieldType::kString || type_ == FieldType::kBytes ||
+            type_ == FieldType::kArray)
+               ? data_lengths_.data()
+               : nullptr;
+}
+
+const uint32_t* FieldVector::DataOffsets() const {
+    if (type_ != FieldType::kString && type_ != FieldType::kBytes &&
+        type_ != FieldType::kArray) {
+        return nullptr;
+    }
+    if (offsets_valid_) {
+        return data_offsets_.empty() ? nullptr : data_offsets_.data();
+    }
+    data_offsets_.resize(data_lengths_.size() + 1);
+    uint32_t offset = 0;
+    data_offsets_[0] = 0;
+    for (size_t i = 0; i < data_lengths_.size(); ++i) {
+        offset += data_lengths_[i];
+        data_offsets_[i + 1] = offset;
+    }
+    offsets_valid_ = true;
+    return data_offsets_.empty() ? nullptr : data_offsets_.data();
+}
+
+size_t FieldVector::BytesSize() const {
+    return (type_ == FieldType::kString || type_ == FieldType::kBytes ||
+            type_ == FieldType::kArray)
+               ? data_bytes_.size()
+               : 0;
+}
+
 int32_t* FieldVector::MutableInt32() {
     return type_ == FieldType::kInt32 ? data_i32_.data() : nullptr;
 }
@@ -112,6 +152,25 @@ uint32_t* FieldVector::MutableDictIds() {
 bool FieldVector::LoadValidityWords(const uint64_t* words, size_t word_count,
                                     size_t bit_count) {
     validity_.LoadWords(words, word_count, bit_count);
+    return true;
+}
+
+bool FieldVector::LoadVarlen(const uint32_t* lengths, size_t count, const uint8_t* bytes,
+                             size_t bytes_size) {
+    if (type_ != FieldType::kString && type_ != FieldType::kBytes &&
+        type_ != FieldType::kArray) {
+        return false;
+    }
+    data_lengths_.resize(count, 0);
+    if (count > 0) {
+        std::memcpy(data_lengths_.data(), lengths, count * sizeof(uint32_t));
+    }
+    data_bytes_.resize(bytes_size);
+    if (bytes_size > 0) {
+        std::memcpy(data_bytes_.data(), bytes, bytes_size);
+    }
+    offsets_valid_ = false;
+    size_ = count;
     return true;
 }
 
@@ -181,6 +240,38 @@ bool FieldVector::AppendDictInt32(int32_t value) {
     return true;
 }
 
+bool FieldVector::AppendString(const std::string& value) {
+    if (type_ != FieldType::kString) {
+        return false;
+    }
+    data_lengths_.push_back(static_cast<uint32_t>(value.size()));
+    data_bytes_.insert(data_bytes_.end(), value.begin(), value.end());
+    offsets_valid_ = false;
+    if (validity_.Size() != 0) {
+        validity_.Resize(data_lengths_.size());
+        validity_.Set(data_lengths_.size() - 1, true);
+    }
+    size_ = data_lengths_.size();
+    return true;
+}
+
+bool FieldVector::AppendBytes(const std::string& value) {
+    if (type_ != FieldType::kBytes && type_ != FieldType::kArray) {
+        return false;
+    }
+    data_lengths_.push_back(static_cast<uint32_t>(value.size()));
+    data_bytes_.insert(data_bytes_.end(),
+                       reinterpret_cast<const uint8_t*>(value.data()),
+                       reinterpret_cast<const uint8_t*>(value.data()) + value.size());
+    offsets_valid_ = false;
+    if (validity_.Size() != 0) {
+        validity_.Resize(data_lengths_.size());
+        validity_.Set(data_lengths_.size() - 1, true);
+    }
+    size_ = data_lengths_.size();
+    return true;
+}
+
 bool FieldVector::AppendNull() {
     if (!ResizeStorage(size_ + 1)) {
         return false;
@@ -193,6 +284,11 @@ bool FieldVector::AppendNull() {
     }
     validity_.Resize(size_ + 1);
     validity_.Set(size_, false);
+    if (type_ == FieldType::kString || type_ == FieldType::kBytes ||
+        type_ == FieldType::kArray) {
+        data_lengths_.push_back(0);
+        offsets_valid_ = false;
+    }
     size_ += 1;
     return true;
 }
@@ -213,6 +309,13 @@ void FieldVector::Reserve(size_t size) {
             break;
         case FieldType::kDictInt32:
             data_dict_ids_.reserve(size);
+            break;
+        case FieldType::kString:
+        case FieldType::kBytes:
+        case FieldType::kArray:
+            data_lengths_.reserve(size);
+            break;
+        case FieldType::kObject:
             break;
     }
 }
@@ -325,6 +428,66 @@ bool FieldVector::AppendBatchDictInt32(const int32_t* values, size_t count,
     return true;
 }
 
+bool FieldVector::AppendBatchString(const uint32_t* lengths, const uint8_t* bytes,
+                                    size_t count, const uint8_t* validity) {
+    if (type_ != FieldType::kString) {
+        return false;
+    }
+    if (count == 0) {
+        return true;
+    }
+    const size_t start = data_lengths_.size();
+    data_lengths_.resize(start + count, 0);
+    std::memcpy(data_lengths_.data() + start, lengths, count * sizeof(uint32_t));
+    offsets_valid_ = false;
+    size_t offset = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const uint32_t len = lengths[i];
+        if (len == 0) {
+            continue;
+        }
+        data_bytes_.insert(data_bytes_.end(), bytes + offset, bytes + offset + len);
+        offset += len;
+    }
+    if (validity) {
+        AppendValidity(validity, count);
+    } else if (validity_.Size() != 0) {
+        validity_.AppendAllTrue(count);
+    }
+    size_ = data_lengths_.size();
+    return true;
+}
+
+bool FieldVector::AppendBatchBytes(const uint32_t* lengths, const uint8_t* bytes,
+                                   size_t count, const uint8_t* validity) {
+    if (type_ != FieldType::kBytes && type_ != FieldType::kArray) {
+        return false;
+    }
+    if (count == 0) {
+        return true;
+    }
+    const size_t start = data_lengths_.size();
+    data_lengths_.resize(start + count, 0);
+    std::memcpy(data_lengths_.data() + start, lengths, count * sizeof(uint32_t));
+    offsets_valid_ = false;
+    size_t offset = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const uint32_t len = lengths[i];
+        if (len == 0) {
+            continue;
+        }
+        data_bytes_.insert(data_bytes_.end(), bytes + offset, bytes + offset + len);
+        offset += len;
+    }
+    if (validity) {
+        AppendValidity(validity, count);
+    } else if (validity_.Size() != 0) {
+        validity_.AppendAllTrue(count);
+    }
+    size_ = data_lengths_.size();
+    return true;
+}
+
 bool FieldVector::ResizeStorage(size_t size) {
     switch (type_) {
         case FieldType::kInt32:
@@ -342,8 +505,15 @@ bool FieldVector::ResizeStorage(size_t size) {
         case FieldType::kDictInt32:
             data_dict_ids_.resize(size, 0);
             break;
+        case FieldType::kString:
+        case FieldType::kBytes:
+        case FieldType::kArray:
+            data_lengths_.resize(size, 0);
+            break;
+        case FieldType::kObject:
+            break;
     }
     return true;
 }
 
-}  // namespace pcdb
+}  // namespace mimicdb

@@ -1,6 +1,6 @@
-#include "pcdb/output_compaction.h"
+#include "mimicdb/output_compaction.h"
 
-namespace pcdb {
+namespace mimicdb {
 
 void CompactRowIdsPrefixSum(const Mask& mask, size_t count, std::vector<size_t>* out) {
     if (!out) {
@@ -23,4 +23,4 @@ void CompactRowIdsPrefixSum(const Mask& mask, size_t count, std::vector<size_t>*
     }
 }
 
-}  // namespace pcdb
+}  // namespace mimicdb

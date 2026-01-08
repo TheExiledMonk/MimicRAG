@@ -1,8 +1,8 @@
-#include "pcdb/segment.h"
+#include "mimicdb/segment.h"
 
-#include "pcdb/hash.h"
+#include "mimicdb/hash.h"
 
-namespace pcdb {
+namespace mimicdb {
 
 namespace {
 size_t ResolveRowCount(const std::vector<FieldVector>& fields, size_t explicit_count) {
@@ -188,9 +188,53 @@ void Segment::ComputeStats() {
                 }
                 break;
             }
+            case FieldType::kDictInt32: {
+                const auto* values = field.DataDictIds();
+                for (size_t i = 0; i < count; ++i) {
+                    if (!field.IsValid(i)) {
+                        ++stats.null_count;
+                        continue;
+                    }
+                    const double value =
+                        static_cast<double>(field.DictionaryValue(values[i]));
+                    if (!stats.has_value) {
+                        stats.min = value;
+                        stats.max = value;
+                        stats.has_value = true;
+                    } else {
+                        if (value < stats.min) {
+                            stats.min = value;
+                        }
+                        if (value > stats.max) {
+                            stats.max = value;
+                        }
+                    }
+                }
+                break;
+            }
+            case FieldType::kString:
+            case FieldType::kBytes:
+            case FieldType::kArray: {
+                for (size_t i = 0; i < count; ++i) {
+                    if (!field.IsValid(i)) {
+                        ++stats.null_count;
+                    }
+                }
+                stats.has_value = false;
+                break;
+            }
+            case FieldType::kObject: {
+                for (size_t i = 0; i < count; ++i) {
+                    if (!field.IsValid(i)) {
+                        ++stats.null_count;
+                    }
+                }
+                stats.has_value = false;
+                break;
+            }
         }
         stats_.push_back(stats);
     }
 }
 
-}  // namespace pcdb
+}  // namespace mimicdb

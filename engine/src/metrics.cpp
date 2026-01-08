@@ -1,6 +1,6 @@
-#include "pcdb/metrics.h"
+#include "mimicdb/metrics.h"
 
-namespace pcdb {
+namespace mimicdb {
 
 void Metrics::Reset() {
     rows = 0;
@@ -29,4 +29,4 @@ void Metrics::AddSegmentsPruned(uint64_t count) {
     segments_pruned += count;
 }
 
-}  // namespace pcdb
+}  // namespace mimicdb
