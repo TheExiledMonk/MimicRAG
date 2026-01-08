@@ -1,7 +1,9 @@
 #include "mimicdb/segment.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "mimicdb/compression.h"
@@ -19,6 +21,244 @@ size_t ResolveRowCount(const std::vector<FieldVector>& fields, size_t explicit_c
         return 0;
     }
     return fields.front().Size();
+}
+
+struct DictHeader {
+    uint32_t count = 0;
+    uint32_t reserved = 0;
+};
+
+struct BitpackHeader {
+    int64_t base = 0;
+    uint8_t bits = 0;
+    uint8_t reserved[7] = {};
+};
+
+struct ForDeltaHeader {
+    int64_t base = 0;
+};
+
+uint8_t ChooseBitWidth(uint64_t range) {
+    const uint8_t max_bits = Config::kCompressionBitpackMaxBits;
+    uint64_t limit = 1;
+    for (uint8_t bits = 1; bits <= max_bits; bits *= 2) {
+        limit = bits == 1 ? 1 : (1ULL << bits) - 1ULL;
+        if (range <= limit) {
+            return bits;
+        }
+    }
+    return max_bits;
+}
+
+void WriteBits(uint8_t* data, size_t bit_offset, uint64_t value, uint8_t bits) {
+    if (!data || bits == 0) {
+        return;
+    }
+    for (uint8_t i = 0; i < bits; ++i) {
+        const size_t bit = bit_offset + i;
+        const size_t byte = bit / 8;
+        const uint8_t mask = static_cast<uint8_t>(1U << (bit % 8));
+        if (value & (1ULL << i)) {
+            data[byte] |= mask;
+        } else {
+            data[byte] &= static_cast<uint8_t>(~mask);
+        }
+    }
+}
+
+bool EncodeDictionary(const FieldVector& field, std::vector<uint8_t>* data,
+                      std::vector<uint8_t>* aux) {
+    if (!data || !aux) {
+        return false;
+    }
+    if (field.Type() != FieldType::kInt32 && field.Type() != FieldType::kInt64 &&
+        field.Type() != FieldType::kBool) {
+        return false;
+    }
+    std::unordered_map<int64_t, uint32_t> ids;
+    std::vector<int64_t> dict_values;
+    const size_t count = field.Size();
+    data->resize(count * sizeof(uint32_t));
+    auto* out_ids = reinterpret_cast<uint32_t*>(data->data());
+    for (size_t i = 0; i < count; ++i) {
+        if (!field.IsValid(i)) {
+            out_ids[i] = 0;
+            continue;
+        }
+        int64_t value = 0;
+        switch (field.Type()) {
+            case FieldType::kInt32:
+                value = static_cast<int64_t>(field.DataInt32()[i]);
+                break;
+            case FieldType::kInt64:
+                value = field.DataInt64()[i];
+                break;
+            case FieldType::kBool:
+                value = field.DataBool()[i] ? 1 : 0;
+                break;
+            default:
+                value = 0;
+                break;
+        }
+        const auto it = ids.find(value);
+        if (it != ids.end()) {
+            out_ids[i] = it->second;
+        } else {
+            const uint32_t id = static_cast<uint32_t>(dict_values.size());
+            ids.emplace(value, id);
+            dict_values.push_back(value);
+            out_ids[i] = id;
+        }
+    }
+    DictHeader header;
+    header.count = static_cast<uint32_t>(dict_values.size());
+    aux->resize(sizeof(DictHeader) + dict_values.size() * sizeof(int64_t));
+    std::memcpy(aux->data(), &header, sizeof(DictHeader));
+    if (!dict_values.empty()) {
+        std::memcpy(aux->data() + sizeof(DictHeader), dict_values.data(),
+                    dict_values.size() * sizeof(int64_t));
+    }
+    return true;
+}
+
+bool EncodeBitpack(const FieldVector& field, std::vector<uint8_t>* data,
+                   std::vector<uint8_t>* aux) {
+    if (!data || !aux) {
+        return false;
+    }
+    if (field.Type() != FieldType::kInt32 && field.Type() != FieldType::kInt64 &&
+        field.Type() != FieldType::kBool) {
+        return false;
+    }
+    const size_t count = field.Size();
+    int64_t min_value = 0;
+    int64_t max_value = 0;
+    bool has_value = false;
+    for (size_t i = 0; i < count; ++i) {
+        if (!field.IsValid(i)) {
+            continue;
+        }
+        int64_t value = 0;
+        switch (field.Type()) {
+            case FieldType::kInt32:
+                value = static_cast<int64_t>(field.DataInt32()[i]);
+                break;
+            case FieldType::kInt64:
+                value = field.DataInt64()[i];
+                break;
+            case FieldType::kBool:
+                value = field.DataBool()[i] ? 1 : 0;
+                break;
+            default:
+                value = 0;
+                break;
+        }
+        if (!has_value) {
+            min_value = value;
+            max_value = value;
+            has_value = true;
+        } else {
+            min_value = std::min(min_value, value);
+            max_value = std::max(max_value, value);
+        }
+    }
+    const uint64_t range =
+        has_value ? static_cast<uint64_t>(max_value - min_value) : 0;
+    const uint8_t bits = ChooseBitWidth(range);
+    const size_t total_bits = count * bits;
+    data->assign((total_bits + 7) / 8, 0);
+    for (size_t i = 0; i < count; ++i) {
+        int64_t value = 0;
+        if (field.IsValid(i)) {
+            switch (field.Type()) {
+                case FieldType::kInt32:
+                    value = static_cast<int64_t>(field.DataInt32()[i]);
+                    break;
+                case FieldType::kInt64:
+                    value = field.DataInt64()[i];
+                    break;
+                case FieldType::kBool:
+                    value = field.DataBool()[i] ? 1 : 0;
+                    break;
+                default:
+                    value = 0;
+                    break;
+            }
+        }
+        const uint64_t delta = static_cast<uint64_t>(value - min_value);
+        WriteBits(data->data(), i * bits, delta, bits);
+    }
+    BitpackHeader header;
+    header.base = min_value;
+    header.bits = bits;
+    aux->resize(sizeof(BitpackHeader));
+    std::memcpy(aux->data(), &header, sizeof(BitpackHeader));
+    return true;
+}
+
+bool EncodeForDelta(const FieldVector& field, std::vector<uint8_t>* data,
+                    std::vector<uint8_t>* aux) {
+    if (!data || !aux) {
+        return false;
+    }
+    if (field.Type() != FieldType::kInt32 && field.Type() != FieldType::kInt64 &&
+        field.Type() != FieldType::kBool) {
+        return false;
+    }
+    const size_t count = field.Size();
+    int64_t min_value = 0;
+    bool has_value = false;
+    for (size_t i = 0; i < count; ++i) {
+        if (!field.IsValid(i)) {
+            continue;
+        }
+        int64_t value = 0;
+        switch (field.Type()) {
+            case FieldType::kInt32:
+                value = static_cast<int64_t>(field.DataInt32()[i]);
+                break;
+            case FieldType::kInt64:
+                value = field.DataInt64()[i];
+                break;
+            case FieldType::kBool:
+                value = field.DataBool()[i] ? 1 : 0;
+                break;
+            default:
+                value = 0;
+                break;
+        }
+        if (!has_value || value < min_value) {
+            min_value = value;
+            has_value = true;
+        }
+    }
+    data->resize(count * sizeof(uint32_t));
+    auto* out = reinterpret_cast<uint32_t*>(data->data());
+    for (size_t i = 0; i < count; ++i) {
+        int64_t value = 0;
+        if (field.IsValid(i)) {
+            switch (field.Type()) {
+                case FieldType::kInt32:
+                    value = static_cast<int64_t>(field.DataInt32()[i]);
+                    break;
+                case FieldType::kInt64:
+                    value = field.DataInt64()[i];
+                    break;
+                case FieldType::kBool:
+                    value = field.DataBool()[i] ? 1 : 0;
+                    break;
+                default:
+                    value = 0;
+                    break;
+            }
+        }
+        out[i] = static_cast<uint32_t>(value - min_value);
+    }
+    ForDeltaHeader header;
+    header.base = min_value;
+    aux->resize(sizeof(ForDeltaHeader));
+    std::memcpy(aux->data(), &header, sizeof(ForDeltaHeader));
+    return true;
 }
 }  // namespace
 
@@ -410,7 +650,19 @@ void Segment::BuildCompressionViews() {
         switch (type) {
             case FieldType::kInt32: {
                 const size_t bytes = field.Size() * sizeof(int32_t);
-                if (kind == ColumnCompressionKind::kLz4) {
+                if (kind == ColumnCompressionKind::kDictionary) {
+                    if (!EncodeDictionary(field, &data, &aux)) {
+                        kind = ColumnCompressionKind::kNone;
+                    }
+                } else if (kind == ColumnCompressionKind::kBitPacked) {
+                    if (!EncodeBitpack(field, &data, &aux)) {
+                        kind = ColumnCompressionKind::kNone;
+                    }
+                } else if (kind == ColumnCompressionKind::kForDelta) {
+                    if (!EncodeForDelta(field, &data, &aux)) {
+                        kind = ColumnCompressionKind::kNone;
+                    }
+                } else if (kind == ColumnCompressionKind::kLz4) {
                     EncodeLz4Literal(reinterpret_cast<const uint8_t*>(field.DataInt32()),
                                      bytes, &data);
                 } else {
@@ -421,7 +673,19 @@ void Segment::BuildCompressionViews() {
             }
             case FieldType::kInt64: {
                 const size_t bytes = field.Size() * sizeof(int64_t);
-                if (kind == ColumnCompressionKind::kLz4) {
+                if (kind == ColumnCompressionKind::kDictionary) {
+                    if (!EncodeDictionary(field, &data, &aux)) {
+                        kind = ColumnCompressionKind::kNone;
+                    }
+                } else if (kind == ColumnCompressionKind::kBitPacked) {
+                    if (!EncodeBitpack(field, &data, &aux)) {
+                        kind = ColumnCompressionKind::kNone;
+                    }
+                } else if (kind == ColumnCompressionKind::kForDelta) {
+                    if (!EncodeForDelta(field, &data, &aux)) {
+                        kind = ColumnCompressionKind::kNone;
+                    }
+                } else if (kind == ColumnCompressionKind::kLz4) {
                     EncodeLz4Literal(reinterpret_cast<const uint8_t*>(field.DataInt64()),
                                      bytes, &data);
                 } else {
@@ -443,7 +707,19 @@ void Segment::BuildCompressionViews() {
             }
             case FieldType::kBool: {
                 const size_t bytes = field.Size() * sizeof(uint8_t);
-                if (kind == ColumnCompressionKind::kLz4) {
+                if (kind == ColumnCompressionKind::kDictionary) {
+                    if (!EncodeDictionary(field, &data, &aux)) {
+                        kind = ColumnCompressionKind::kNone;
+                    }
+                } else if (kind == ColumnCompressionKind::kBitPacked) {
+                    if (!EncodeBitpack(field, &data, &aux)) {
+                        kind = ColumnCompressionKind::kNone;
+                    }
+                } else if (kind == ColumnCompressionKind::kForDelta) {
+                    if (!EncodeForDelta(field, &data, &aux)) {
+                        kind = ColumnCompressionKind::kNone;
+                    }
+                } else if (kind == ColumnCompressionKind::kLz4) {
                     EncodeLz4Literal(reinterpret_cast<const uint8_t*>(field.DataBool()),
                                      bytes, &data);
                 } else {
@@ -454,6 +730,11 @@ void Segment::BuildCompressionViews() {
             }
             case FieldType::kDictInt32: {
                 const size_t bytes = field.Size() * sizeof(uint32_t);
+                if (kind == ColumnCompressionKind::kDictionary ||
+                    kind == ColumnCompressionKind::kBitPacked ||
+                    kind == ColumnCompressionKind::kForDelta) {
+                    kind = ColumnCompressionKind::kNone;
+                }
                 if (kind == ColumnCompressionKind::kLz4) {
                     EncodeLz4Literal(reinterpret_cast<const uint8_t*>(field.DataDictIds()),
                                      bytes, &data);
@@ -519,7 +800,7 @@ void Segment::BuildCompressionViews() {
         view.kind = kind;
         view.type = type;
         view.row_count = field.Size();
-        view.ops = kind == ColumnCompressionKind::kLz4 ? Lz4CompressionOps() : DefaultCompressionOps();
+        view.ops = CompressionOpsFor(kind);
         view.data = data.empty() ? nullptr : data.data();
         view.data_size = data.size();
         view.aux = aux.empty() ? nullptr : aux.data();

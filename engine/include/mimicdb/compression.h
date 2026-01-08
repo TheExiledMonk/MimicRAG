@@ -120,6 +120,9 @@ ColumnCompressionKind ChooseCompression(const SegmentColumnStats& stats, FieldTy
 CompressedColumnView MakeUncompressedView(const FieldVector& field);
 const CompressedColumnOps* DefaultCompressionOps();
 const CompressedColumnOps* Lz4CompressionOps();
+const CompressedColumnOps* CompressionOpsFor(ColumnCompressionKind kind);
+bool ReadInt64Value(const CompressedColumnView& column, size_t index, int64_t* out);
+bool ReadNumericValue(const CompressedColumnView& column, size_t index, double* out);
 bool EncodeLz4Literal(const uint8_t* src, size_t src_size, std::vector<uint8_t>* out);
 bool DecodeLz4Literal(const uint8_t* src, size_t src_size, uint8_t* dst, size_t dst_size);
 CompressionConfig GetCompressionConfig();

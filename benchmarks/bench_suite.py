@@ -160,39 +160,6 @@ def _run_mask_reuse_dataset(users: Dataset) -> dict[str, float]:
     }
 
 
-def _maybe_compression_stats(stats_source) -> dict[str, float]:
-    if not hasattr(stats_source, "compression_stats"):
-        return {}
-    try:
-        result = stats_source.compression_stats()
-    except Exception:
-        return {}
-    if not isinstance(result, dict):
-        return {}
-    raw_bytes = int(result.get("raw_bytes", 0))
-    compressed_bytes = int(result.get("compressed_bytes", 0))
-    ratio = 0.0 if compressed_bytes == 0 else raw_bytes / compressed_bytes
-    return {
-        "compression_raw_bytes": raw_bytes,
-        "compression_bytes": compressed_bytes,
-        "compression_ratio": ratio,
-        "compression_segments": result.get("segments", 0),
-        "compression_compressed_segments": result.get("compressed_segments", 0),
-        "compression_compressed_columns": result.get("compressed_columns", 0),
-    }
-
-
-def _set_compression_enabled(enabled: bool) -> None:
-    try:
-        from mimicapi import _mimicdb
-        _mimicdb.set_compression_enabled(enabled)
-    except Exception:
-        pass
-    try:
-        from mimicapi import _mimicapi_core
-        _mimicapi_core.set_compression_enabled(enabled)
-    except Exception:
-        pass
 
 
 def _compare_agg_results(left, right) -> bool:
@@ -213,45 +180,6 @@ def _validate_multi_aggregate(stats: dict[str, float]) -> None:
             raise RuntimeError("multi-aggregate sum mismatch")
 
 
-def _run_compression_validation(
-    rows_list: list[int],
-    args,
-    host: str | None,
-    port: int | None,
-) -> None:
-    for rows in rows_list:
-        _set_compression_enabled(True)
-        on_stats = run_dataset_bench(
-            rows,
-            args.seed,
-            args.batch_size,
-            args.append_mode,
-            args.backend,
-            host,
-            port,
-            f"{args.database}_validate_on_{rows}",
-            True,
-            args.append_sleep_ms,
-        )
-        _validate_multi_aggregate(on_stats)
-        _set_compression_enabled(False)
-        off_stats = run_dataset_bench(
-            rows,
-            args.seed,
-            args.batch_size,
-            args.append_mode,
-            args.backend,
-            host,
-            port,
-            f"{args.database}_validate_off_{rows}",
-            True,
-            args.append_sleep_ms,
-        )
-        _validate_multi_aggregate(off_stats)
-        if not _compare_agg_results(on_stats.get("result"), off_stats.get("result")):
-            raise RuntimeError("compression validation failed")
-        _set_compression_enabled(True)
-        print(f"compression_validation_rows={rows} status=ok")
 
 
 def _maybe_sleep(ms: int) -> None:
@@ -320,7 +248,6 @@ def run_dataset_bench(
         "rows_scanned": _extract_rows_scanned(result, rows),
         "selectivity": _selectivity(count, rows),
         **(_run_mask_reuse_dataset(users) if mask_reuse else {}),
-        **_maybe_compression_stats(users),
     }
 
 
@@ -404,7 +331,6 @@ def run_mimicapi_bench(
         "rows_scanned": _extract_rows_scanned(result, rows),
         "selectivity": _selectivity(count, rows),
         **reuse_stats,
-        **_maybe_compression_stats(client),
     }
     if cleanup:
         client.drop_database_all(database)
@@ -894,18 +820,6 @@ def print_results(label: str, rows: int, stats: dict[str, float]) -> None:
         print(f"query_single_seconds={stats['query_single_seconds']:.6f}")
     if "query_multi_seconds" in stats:
         print(f"query_multi_seconds={stats['query_multi_seconds']:.6f}")
-    if "compression_raw_bytes" in stats:
-        print(f"compression_raw_bytes={stats['compression_raw_bytes']}")
-    if "compression_bytes" in stats:
-        print(f"compression_bytes={stats['compression_bytes']}")
-    if "compression_ratio" in stats:
-        print(f"compression_ratio={stats['compression_ratio']:.3f}")
-    if "compression_segments" in stats:
-        print(f"compression_segments={stats['compression_segments']}")
-    if "compression_compressed_segments" in stats:
-        print(f"compression_compressed_segments={stats['compression_compressed_segments']}")
-    if "compression_compressed_columns" in stats:
-        print(f"compression_compressed_columns={stats['compression_compressed_columns']}")
     if "mongo_last_scan_rows" in stats:
         print(f"mongo_last_scan_rows={stats['mongo_last_scan_rows']}")
     if "mongo_last_returned_rows" in stats:
@@ -948,9 +862,6 @@ def main() -> None:
     parser.add_argument("--only-backend", default=None)
     parser.add_argument("--dialect", default=None)
     parser.add_argument("--no-server", action="store_true")
-    parser.add_argument("--compression-compare", action="store_true")
-    parser.add_argument("--compression-validate", action="store_true")
-    parser.add_argument("--compression-validate-rows", default=None)
     parser.add_argument("--perf-counters", action="store_true")
     parser.add_argument("--perf-events", default=None)
     parser.add_argument("--_perf-child", action="store_true", help=argparse.SUPPRESS)
@@ -998,17 +909,6 @@ def main() -> None:
             if not sweep_rows:
                 sweep_rows = [args.rows]
             row_sweep = sweep_rows
-
-        if args.compression_validate:
-            if args.compression_validate_rows:
-                rows_list = [
-                    int(value.strip())
-                    for value in args.compression_validate_rows.split(",")
-                    if value.strip()
-                ]
-            else:
-                rows_list = [200_000, 1_000_000]
-            _run_compression_validation(rows_list, args, host, port)
 
         backends = [b.strip() for b in args.backends.split(",")] if args.backends else ["all"]
         if "all" in backends:
@@ -1064,14 +964,6 @@ def main() -> None:
                                 child_args.append("--mask-reuse")
                             if not args.cleanup:
                                 child_args.append("--no-cleanup")
-                            if args.compression_compare:
-                                child_args.append("--compression-compare")
-                            if args.compression_validate:
-                                child_args.append("--compression-validate")
-                            if args.compression_validate_rows:
-                                child_args.extend(
-                                    ["--compression-validate-rows", args.compression_validate_rows]
-                                )
                             if args.mongo_cache_compare:
                                 child_args.append("--mongo-cache-compare")
                             if args.perf_counters:
@@ -1106,14 +998,6 @@ def main() -> None:
                             child_args.append("--mask-reuse")
                         if not args.cleanup:
                             child_args.append("--no-cleanup")
-                        if args.compression_compare:
-                            child_args.append("--compression-compare")
-                        if args.compression_validate:
-                            child_args.append("--compression-validate")
-                        if args.compression_validate_rows:
-                            child_args.extend(
-                                ["--compression-validate-rows", args.compression_validate_rows]
-                            )
                         if args.mongo_cache_compare:
                             child_args.append("--mongo-cache-compare")
                         if args.perf_counters:
@@ -1133,51 +1017,19 @@ def main() -> None:
             print(f"starting sweep rows={rows}", flush=True)
             sweep_suffix = f"{suffix}_{rows}" if suffix else f"_{rows}"
             if "dataset" in backends:
-                if args.compression_compare and args.transport == "local":
-                    _set_compression_enabled(True)
-                    dataset_stats = run_dataset_bench(
-                        rows,
-                        args.seed,
-                        args.batch_size,
-                        args.append_mode,
-                        args.backend,
-                        host,
-                        port,
-                        f"{dataset_db}{sweep_suffix}",
-                        args.mask_reuse,
-                        args.append_sleep_ms,
-                    )
-                    print_results("dataset_compression_on", rows, dataset_stats)
-                    print("---")
-                    _set_compression_enabled(False)
-                    dataset_stats = run_dataset_bench(
-                        rows,
-                        args.seed,
-                        args.batch_size,
-                        args.append_mode,
-                        args.backend,
-                        host,
-                        port,
-                        f"{dataset_db}{sweep_suffix}",
-                        args.mask_reuse,
-                        args.append_sleep_ms,
-                    )
-                    print_results("dataset_compression_off", rows, dataset_stats)
-                    _set_compression_enabled(True)
-                else:
-                    dataset_stats = run_dataset_bench(
-                        rows,
-                        args.seed,
-                        args.batch_size,
-                        args.append_mode,
-                        args.backend,
-                        host,
-                        port,
-                        f"{dataset_db}{sweep_suffix}",
-                        args.mask_reuse,
-                        args.append_sleep_ms,
-                    )
-                    print_results("dataset", rows, dataset_stats)
+                dataset_stats = run_dataset_bench(
+                    rows,
+                    args.seed,
+                    args.batch_size,
+                    args.append_mode,
+                    args.backend,
+                    host,
+                    port,
+                    f"{dataset_db}{sweep_suffix}",
+                    args.mask_reuse,
+                    args.append_sleep_ms,
+                )
+                print_results("dataset", rows, dataset_stats)
                 print("---")
 
             if "mimicapi" in backends:
@@ -1250,46 +1102,18 @@ def main() -> None:
                     print("---")
 
             if "cpp_core" in backends:
-                if args.compression_compare:
-                    _set_compression_enabled(True)
-                    cpp_core_stats = run_cpp_core_bench(
-                        rows,
-                        args.seed,
-                        args.batch_size,
-                        args.append_mode,
-                        f"{cpp_core_db}{sweep_suffix}",
-                        args.mask_reuse,
-                        args.append_sleep_ms,
-                        args.cleanup,
-                    )
-                    print_results("cpp_core_compression_on", rows, cpp_core_stats)
-                    print("---")
-                    _set_compression_enabled(False)
-                    cpp_core_stats = run_cpp_core_bench(
-                        rows,
-                        args.seed,
-                        args.batch_size,
-                        args.append_mode,
-                        f"{cpp_core_db}{sweep_suffix}",
-                        args.mask_reuse,
-                        args.append_sleep_ms,
-                        args.cleanup,
-                    )
-                    print_results("cpp_core_compression_off", rows, cpp_core_stats)
-                    _set_compression_enabled(True)
-                else:
-                    cpp_core_stats = run_cpp_core_bench(
-                        rows,
-                        args.seed,
-                        args.batch_size,
-                        args.append_mode,
-                        f"{cpp_core_db}{sweep_suffix}",
-                        args.mask_reuse,
-                        args.append_sleep_ms,
-                        args.cleanup,
-                    )
-                    print_results("cpp_core", rows, cpp_core_stats)
-                    print("---")
+                cpp_core_stats = run_cpp_core_bench(
+                    rows,
+                    args.seed,
+                    args.batch_size,
+                    args.append_mode,
+                    f"{cpp_core_db}{sweep_suffix}",
+                    args.mask_reuse,
+                    args.append_sleep_ms,
+                    args.cleanup,
+                )
+                print_results("cpp_core", rows, cpp_core_stats)
+                print("---")
     finally:
         if server_proc is not None:
             server_proc.terminate()

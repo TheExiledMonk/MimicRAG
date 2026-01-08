@@ -31,6 +31,109 @@ struct ParsedPredicate {
     double value = 0.0;
 };
 
+struct DecodedColumns {
+    std::vector<mimicdb::CompressedColumnView> views;
+    std::vector<std::vector<uint8_t>> data;
+    std::vector<std::vector<uint8_t>> aux;
+};
+
+bool NeedsLz4Decode(const std::vector<mimicdb::CompressedColumnView>& columns) {
+    for (const auto& col : columns) {
+        if (col.kind == mimicdb::ColumnCompressionKind::kLz4) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool BuildReadableColumns(const std::vector<mimicdb::CompressedColumnView>& columns,
+                          DecodedColumns* out) {
+    if (!out) {
+        return false;
+    }
+    out->views.clear();
+    out->views.reserve(columns.size());
+    if (out->data.size() < columns.size()) {
+        out->data.resize(columns.size());
+    }
+    if (out->aux.size() < columns.size()) {
+        out->aux.resize(columns.size());
+    }
+    for (size_t i = 0; i < columns.size(); ++i) {
+        out->data[i].clear();
+        out->aux[i].clear();
+        const auto& col = columns[i];
+        if (col.kind == mimicdb::ColumnCompressionKind::kLz4) {
+            if (col.raw_data_size > 0) {
+                out->data[i].resize(col.raw_data_size);
+                if (!mimicdb::DecodeLz4Literal(col.data, col.data_size,
+                                               out->data[i].data(),
+                                               out->data[i].size())) {
+                    return false;
+                }
+            }
+            if (col.raw_aux_size > 0) {
+                out->aux[i].resize(col.raw_aux_size);
+                if (!mimicdb::DecodeLz4Literal(col.aux, col.aux_size,
+                                               out->aux[i].data(),
+                                               out->aux[i].size())) {
+                    return false;
+                }
+            }
+            mimicdb::CompressedColumnView view = col;
+            view.kind = mimicdb::ColumnCompressionKind::kNone;
+            view.data = out->data[i].empty() ? nullptr : out->data[i].data();
+            view.data_size = col.raw_data_size;
+            view.aux = out->aux[i].empty() ? nullptr : out->aux[i].data();
+            view.aux_size = col.raw_aux_size;
+            out->views.push_back(view);
+        } else {
+            out->views.push_back(col);
+        }
+    }
+    return true;
+}
+
+bool BuildMaskCompressedColumns(const std::vector<mimicdb::CompressedColumnView>& columns,
+                                const std::vector<ParsedPredicate>& predicates,
+                                mimicdb::Mask* out_mask) {
+    if (!out_mask) {
+        return false;
+    }
+    if (predicates.empty()) {
+        out_mask->Resize(0);
+        return false;
+    }
+    bool has_mask = false;
+    mimicdb::Mask mask;
+    for (const auto& pred : predicates) {
+        if (pred.field_index >= columns.size()) {
+            return false;
+        }
+        const auto& col = columns[pred.field_index];
+        mimicdb::CompressionPredicate cpred;
+        cpred.type = col.type;
+        cpred.op = pred.op;
+        cpred.i64 = static_cast<int64_t>(pred.value);
+        cpred.f64 = pred.value;
+        mimicdb::Mask current;
+        if (col.ops && col.ops->scan_predicate) {
+            mimicdb::BuildMaskCompressed(col, cpred, &current);
+        } else {
+            current.Resize(0);
+            return false;
+        }
+        if (!has_mask) {
+            mask = std::move(current);
+            has_mask = true;
+        } else {
+            mask = mimicdb::Mask::And(mask, current);
+        }
+    }
+    *out_mask = std::move(mask);
+    return has_mask;
+}
+
 mimicdb::FieldType ParseFieldType(const std::string& type_name, bool* ok) {
     *ok = true;
     if (type_name == "int32") {
@@ -615,6 +718,72 @@ PyObject* DatasetAggregateInternal(DatasetObject* self, PyObject* predicates_obj
             metrics.AddSegmentsScanned(1);
         }
         const size_t count = seg->RowCount();
+        const bool compressed = seg->IsSealed() && !seg->CompressedColumns().empty();
+        if (compressed) {
+            const auto& cols = seg->CompressedColumns();
+            const auto* working = &cols;
+            if (NeedsLz4Decode(cols)) {
+                static thread_local DecodedColumns decoded;
+                if (!BuildReadableColumns(cols, &decoded)) {
+                    PyErr_SetString(PyExc_RuntimeError, "lz4 decode failed");
+                    return nullptr;
+                }
+                working = &decoded.views;
+            }
+            mimicdb::Mask mask;
+            const bool has_mask =
+                BuildMaskCompressedColumns(*working, predicates, &mask);
+            const mimicdb::Mask* mask_ptr = has_mask ? &mask : nullptr;
+            if (need_mixed) {
+                mimicdb::AggregateResult seg_result;
+                mimicdb::AggregateCompressed((*working)[sum_index], mask_ptr, &seg_result);
+                mixed_acc.sum += seg_result.sum;
+                mixed_acc.count += seg_result.count;
+                if (seg_result.has_value) {
+                    if (!mixed_has_value) {
+                        mixed_acc.min = seg_result.min;
+                        mixed_acc.max = seg_result.max;
+                        mixed_acc.has_value = true;
+                        mixed_has_value = true;
+                    } else {
+                        if (seg_result.min < mixed_acc.min) {
+                            mixed_acc.min = seg_result.min;
+                        }
+                        if (seg_result.max > mixed_acc.max) {
+                            mixed_acc.max = seg_result.max;
+                        }
+                    }
+                }
+            } else {
+                if (has_sum) {
+                    mimicdb::AggregateResult seg_sum;
+                    mimicdb::AggregateCompressed((*working)[sum_index], mask_ptr, &seg_sum);
+                    sum_acc.sum += seg_sum.sum;
+                    sum_acc.count += seg_sum.count;
+                }
+                if (has_min || has_max) {
+                    const size_t idx = has_min ? min_index : max_index;
+                    mimicdb::AggregateResult seg_mm;
+                    mimicdb::AggregateCompressed((*working)[idx], mask_ptr, &seg_mm);
+                    if (seg_mm.has_value) {
+                        if (!minmax_acc.has_value) {
+                            minmax_acc = seg_mm;
+                        } else {
+                            if (seg_mm.min < minmax_acc.min) {
+                                minmax_acc.min = seg_mm.min;
+                            }
+                            if (seg_mm.max > minmax_acc.max) {
+                                minmax_acc.max = seg_mm.max;
+                            }
+                            minmax_acc.count += seg_mm.count;
+                        }
+                    } else {
+                        minmax_acc.count += seg_mm.count;
+                    }
+                }
+            }
+            continue;
+        }
         mimicdb::Mask mask(count);
         for (size_t i = 0; i < count; ++i) {
             mask.Set(i, true);
@@ -931,6 +1100,163 @@ PyObject* DatasetScan(DatasetObject* self, PyObject* args) {
 
     for (const auto* seg : segments) {
         const size_t count = seg->RowCount();
+        const bool compressed = seg->IsSealed() && !seg->CompressedColumns().empty();
+        if (compressed) {
+            const auto& cols = seg->CompressedColumns();
+            const auto* working = &cols;
+            if (NeedsLz4Decode(cols)) {
+                static thread_local DecodedColumns decoded;
+                if (!BuildReadableColumns(cols, &decoded)) {
+                    Py_DECREF(rows);
+                    PyErr_SetString(PyExc_RuntimeError, "lz4 decode failed");
+                    return nullptr;
+                }
+                working = &decoded.views;
+            }
+            mimicdb::Mask mask;
+            const bool has_mask =
+                BuildMaskCompressedColumns(*working, predicates, &mask);
+            for (size_t row = 0; row < count; ++row) {
+                if (has_mask && !mask.Get(row)) {
+                    continue;
+                }
+                if (!has_mask && !predicates.empty()) {
+                    continue;
+                }
+                if (skipped < offset) {
+                    skipped += 1;
+                    continue;
+                }
+                PyObject* row_obj = PyDict_New();
+                if (!row_obj) {
+                    Py_DECREF(rows);
+                    return nullptr;
+                }
+                for (size_t i = 0; i < column_indices.size(); ++i) {
+                    const size_t field_index = column_indices[i];
+                    const auto& field = (*working)[field_index];
+                    const char* name = column_names[i].c_str();
+                    if (!mimicdb::IsValid(field, row)) {
+                        Py_INCREF(Py_None);
+                        PyDict_SetItemString(row_obj, name, Py_None);
+                        continue;
+                    }
+                    PyObject* value = nullptr;
+                    switch (field.type) {
+                        case mimicdb::FieldType::kInt32: {
+                            int64_t v = 0;
+                            if (!mimicdb::ReadInt64Value(field, row, &v)) {
+                                value = Py_None;
+                                Py_INCREF(Py_None);
+                            } else {
+                                value = PyLong_FromLong(static_cast<long>(v));
+                            }
+                            break;
+                        }
+                        case mimicdb::FieldType::kInt64: {
+                            int64_t v = 0;
+                            if (!mimicdb::ReadInt64Value(field, row, &v)) {
+                                value = Py_None;
+                                Py_INCREF(Py_None);
+                            } else {
+                                value = PyLong_FromLongLong(v);
+                            }
+                            break;
+                        }
+                        case mimicdb::FieldType::kFloat64: {
+                            double v = 0.0;
+                            if (!mimicdb::ReadNumericValue(field, row, &v)) {
+                                value = Py_None;
+                                Py_INCREF(Py_None);
+                            } else {
+                                value = PyFloat_FromDouble(v);
+                            }
+                            break;
+                        }
+                        case mimicdb::FieldType::kBool: {
+                            int64_t v = 0;
+                            if (!mimicdb::ReadInt64Value(field, row, &v)) {
+                                value = Py_None;
+                                Py_INCREF(Py_None);
+                            } else {
+                                value = PyBool_FromLong(v != 0);
+                            }
+                            break;
+                        }
+                        case mimicdb::FieldType::kDictInt32: {
+                            int64_t v = 0;
+                            if (!mimicdb::ReadInt64Value(field, row, &v)) {
+                                value = Py_None;
+                                Py_INCREF(Py_None);
+                            } else {
+                                value = PyLong_FromLong(static_cast<long>(v));
+                            }
+                            break;
+                        }
+                        case mimicdb::FieldType::kString: {
+                            const auto* lengths =
+                                reinterpret_cast<const uint32_t*>(field.aux);
+                            const auto* bytes = field.data;
+                            if (!lengths || !bytes) {
+                                value = Py_None;
+                                Py_INCREF(Py_None);
+                                break;
+                            }
+                            uint32_t offset_local = 0;
+                            for (size_t j = 0; j < row; ++j) {
+                                offset_local += lengths[j];
+                            }
+                            value = PyUnicode_FromStringAndSize(
+                                reinterpret_cast<const char*>(bytes + offset_local),
+                                static_cast<Py_ssize_t>(lengths[row]));
+                            break;
+                        }
+                        case mimicdb::FieldType::kBytes: {
+                            const auto* lengths =
+                                reinterpret_cast<const uint32_t*>(field.aux);
+                            const auto* bytes = field.data;
+                            if (!lengths || !bytes) {
+                                value = Py_None;
+                                Py_INCREF(Py_None);
+                                break;
+                            }
+                            uint32_t offset_local = 0;
+                            for (size_t j = 0; j < row; ++j) {
+                                offset_local += lengths[j];
+                            }
+                            value = PyBytes_FromStringAndSize(
+                                reinterpret_cast<const char*>(bytes + offset_local),
+                                static_cast<Py_ssize_t>(lengths[row]));
+                            break;
+                        }
+                        case mimicdb::FieldType::kArray:
+                        case mimicdb::FieldType::kObject:
+                            value = Py_None;
+                            Py_INCREF(Py_None);
+                            break;
+                    }
+                    if (!value) {
+                        Py_DECREF(row_obj);
+                        Py_DECREF(rows);
+                        return nullptr;
+                    }
+                    PyDict_SetItemString(row_obj, name, value);
+                    Py_DECREF(value);
+                }
+                PyList_Append(rows, row_obj);
+                Py_DECREF(row_obj);
+                added += 1;
+                if (limit && added >= limit) {
+                    stop = true;
+                    break;
+                }
+            }
+            if (stop) {
+                break;
+            }
+            continue;
+        }
+
         mimicdb::Mask mask(count);
         for (size_t i = 0; i < count; ++i) {
             mask.Set(i, true);

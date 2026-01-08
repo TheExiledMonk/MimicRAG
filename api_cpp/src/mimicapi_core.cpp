@@ -84,6 +84,44 @@ bool IsComparable(mimicdb::FieldType type) {
            type == mimicdb::FieldType::kBytes;
 }
 
+bool SegmentCanMatchPredicates(const mimicdb::Segment& segment,
+                               const std::vector<Predicate>& predicates) {
+    if (predicates.empty()) {
+        return true;
+    }
+    const auto& stats = segment.ColumnStats();
+    const auto& fields = segment.Fields();
+    for (const auto& pred : predicates) {
+        if (pred.field_index >= stats.size() || pred.field_index >= fields.size()) {
+            continue;
+        }
+        const auto& col_stats = stats[pred.field_index];
+        if (pred.is_null_check) {
+            if (pred.null_is) {
+                if (col_stats.null_count == 0) {
+                    return false;
+                }
+            } else if (col_stats.value_count > 0 &&
+                       col_stats.null_count >= col_stats.value_count) {
+                return false;
+            }
+            continue;
+        }
+        const auto type = fields[pred.field_index].Type();
+        if (!IsNumeric(type)) {
+            continue;
+        }
+        if (!col_stats.has_value) {
+            continue;
+        }
+        if (!mimicdb::PredicateCanMatchRange(col_stats.min, col_stats.max, pred.op,
+                                             pred.value)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool ReadNumeric(const mimicdb::FieldVector& field, size_t index, double* out) {
     if (!field.IsValid(index)) {
         return false;
@@ -110,36 +148,7 @@ bool ReadNumeric(const mimicdb::FieldVector& field, size_t index, double* out) {
 }
 
 bool ReadNumericCompressed(const mimicdb::CompressedColumnView& column, size_t index, double* out) {
-    if (!mimicdb::IsValid(column, index)) {
-        return false;
-    }
-    switch (column.type) {
-        case mimicdb::FieldType::kInt32:
-            *out = static_cast<double>(
-                reinterpret_cast<const int32_t*>(column.data)[index]);
-            return true;
-        case mimicdb::FieldType::kInt64:
-            *out = static_cast<double>(
-                reinterpret_cast<const int64_t*>(column.data)[index]);
-            return true;
-        case mimicdb::FieldType::kFloat64:
-            *out = reinterpret_cast<const double*>(column.data)[index];
-            return true;
-        case mimicdb::FieldType::kBool:
-            *out = reinterpret_cast<const uint8_t*>(column.data)[index] != 0;
-            return true;
-        case mimicdb::FieldType::kDictInt32:
-            if (column.dict) {
-                *out = static_cast<double>(
-                    column.dict->Value(reinterpret_cast<const uint32_t*>(column.data)[index]));
-                return true;
-            }
-            *out = static_cast<double>(
-                reinterpret_cast<const uint32_t*>(column.data)[index]);
-            return true;
-        default:
-            return false;
-    }
+    return mimicdb::ReadNumericValue(column, index, out);
 }
 
 std::string ReadVarlen(const mimicdb::FieldVector& field, size_t index);
@@ -223,27 +232,41 @@ mimicdb::FieldValue ReadValueCompressed(const mimicdb::CompressedColumnView& col
         return mimicdb::FieldValue::Null(column.type);
     }
     switch (column.type) {
-        case mimicdb::FieldType::kInt32:
-            return mimicdb::FieldValue::Int32(
-                reinterpret_cast<const int32_t*>(column.data)[index]);
-        case mimicdb::FieldType::kInt64:
-            return mimicdb::FieldValue::Int64(
-                reinterpret_cast<const int64_t*>(column.data)[index]);
-        case mimicdb::FieldType::kFloat64:
-            return mimicdb::FieldValue::Float64(
-                reinterpret_cast<const double*>(column.data)[index]);
-        case mimicdb::FieldType::kBool:
-            return mimicdb::FieldValue::Bool(
-                reinterpret_cast<const uint8_t*>(column.data)[index] != 0);
-        case mimicdb::FieldType::kDictInt32:
-            if (column.dict) {
-                return mimicdb::FieldValue::Int32(
-                    column.dict->Value(
-                        reinterpret_cast<const uint32_t*>(column.data)[index]));
+        case mimicdb::FieldType::kInt32: {
+            int64_t value = 0;
+            if (!mimicdb::ReadInt64Value(column, index, &value)) {
+                return mimicdb::FieldValue::Null(column.type);
             }
-            return mimicdb::FieldValue::Int32(
-                static_cast<int32_t>(
-                    reinterpret_cast<const uint32_t*>(column.data)[index]));
+            return mimicdb::FieldValue::Int32(static_cast<int32_t>(value));
+        }
+        case mimicdb::FieldType::kInt64: {
+            int64_t value = 0;
+            if (!mimicdb::ReadInt64Value(column, index, &value)) {
+                return mimicdb::FieldValue::Null(column.type);
+            }
+            return mimicdb::FieldValue::Int64(value);
+        }
+        case mimicdb::FieldType::kFloat64: {
+            double value = 0.0;
+            if (!mimicdb::ReadNumericValue(column, index, &value)) {
+                return mimicdb::FieldValue::Null(column.type);
+            }
+            return mimicdb::FieldValue::Float64(value);
+        }
+        case mimicdb::FieldType::kBool: {
+            int64_t value = 0;
+            if (!mimicdb::ReadInt64Value(column, index, &value)) {
+                return mimicdb::FieldValue::Null(column.type);
+            }
+            return mimicdb::FieldValue::Bool(value != 0);
+        }
+        case mimicdb::FieldType::kDictInt32: {
+            int64_t value = 0;
+            if (!mimicdb::ReadInt64Value(column, index, &value)) {
+                return mimicdb::FieldValue::Null(column.type);
+            }
+            return mimicdb::FieldValue::Int32(static_cast<int32_t>(value));
+        }
         case mimicdb::FieldType::kString: {
             return mimicdb::FieldValue::String(ReadVarlenCompressed(column, index));
         }
@@ -371,7 +394,19 @@ bool BuildPredicateMaskCompressed(const std::vector<mimicdb::CompressedColumnVie
         }
         const auto& col = columns[pred.field_index];
         mimicdb::Mask current;
-        if (pred.is_null_check) {
+        if (col.ops && col.ops->scan_predicate &&
+            col.type != mimicdb::FieldType::kString &&
+            col.type != mimicdb::FieldType::kBytes) {
+            mimicdb::CompressionPredicate cpred;
+            cpred.type = col.type;
+            cpred.op = pred.op;
+            cpred.is_null_check = pred.is_null_check;
+            cpred.is_not_null_check = pred.is_null_check && !pred.null_is;
+            cpred.null_is = pred.null_is;
+            cpred.i64 = static_cast<int64_t>(pred.value);
+            cpred.f64 = pred.value;
+            mimicdb::BuildMaskCompressed(col, cpred, &current);
+        } else if (pred.is_null_check) {
             current.Resize(col.row_count);
             for (size_t i = 0; i < col.row_count; ++i) {
                 const bool is_null = !mimicdb::IsValid(col, i);
@@ -596,6 +631,9 @@ ScanResult ApiClientCore::Scan(const std::string& db, const std::string& name,
     }
     size_t seen = 0;
     for (const auto& segment : state->dataset.Segments()) {
+        if (!SegmentCanMatchPredicates(segment, predicates)) {
+            continue;
+        }
         if (segment.IsSealed() && !segment.CompressedColumns().empty()) {
             const auto& columns = segment.CompressedColumns();
             if (NeedsLz4Decode(columns)) {
@@ -686,6 +724,9 @@ AggregateResult ApiClientCore::Aggregate(const std::string& db, const std::strin
         }
     };
     for (const auto& segment : state->dataset.Segments()) {
+        if (!SegmentCanMatchPredicates(segment, predicates)) {
+            continue;
+        }
         if (segment.IsSealed() && !segment.CompressedColumns().empty()) {
             result.rows_scanned += segment.RowCount();
             const auto& columns = segment.CompressedColumns();

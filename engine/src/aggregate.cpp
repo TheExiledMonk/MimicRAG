@@ -509,126 +509,19 @@ void AggregateCompressed(const CompressedColumnView& column, const Mask* mask,
     }
     AggregateResult result;
     switch (column.type) {
-        case FieldType::kInt32: {
-            const auto* values = reinterpret_cast<const int32_t*>(column.data);
-            for (size_t i = 0; i < column.row_count; ++i) {
-                if (mask && !mask->Get(i)) {
-                    continue;
-                }
-                if (!IsValid(column, i)) {
-                    continue;
-                }
-                const double value = static_cast<double>(values[i]);
-                result.sum += value;
-                if (!result.has_value) {
-                    result.min = value;
-                    result.max = value;
-                    result.has_value = true;
-                } else {
-                    if (value < result.min) {
-                        result.min = value;
-                    }
-                    if (value > result.max) {
-                        result.max = value;
-                    }
-                }
-                ++result.count;
-            }
-            break;
-        }
-        case FieldType::kInt64: {
-            const auto* values = reinterpret_cast<const int64_t*>(column.data);
-            for (size_t i = 0; i < column.row_count; ++i) {
-                if (mask && !mask->Get(i)) {
-                    continue;
-                }
-                if (!IsValid(column, i)) {
-                    continue;
-                }
-                const double value = static_cast<double>(values[i]);
-                result.sum += value;
-                if (!result.has_value) {
-                    result.min = value;
-                    result.max = value;
-                    result.has_value = true;
-                } else {
-                    if (value < result.min) {
-                        result.min = value;
-                    }
-                    if (value > result.max) {
-                        result.max = value;
-                    }
-                }
-                ++result.count;
-            }
-            break;
-        }
-        case FieldType::kFloat64: {
-            const auto* values = reinterpret_cast<const double*>(column.data);
-            for (size_t i = 0; i < column.row_count; ++i) {
-                if (mask && !mask->Get(i)) {
-                    continue;
-                }
-                if (!IsValid(column, i)) {
-                    continue;
-                }
-                const double value = values[i];
-                result.sum += value;
-                if (!result.has_value) {
-                    result.min = value;
-                    result.max = value;
-                    result.has_value = true;
-                } else {
-                    if (value < result.min) {
-                        result.min = value;
-                    }
-                    if (value > result.max) {
-                        result.max = value;
-                    }
-                }
-                ++result.count;
-            }
-            break;
-        }
-        case FieldType::kBool: {
-            const auto* values = reinterpret_cast<const uint8_t*>(column.data);
-            for (size_t i = 0; i < column.row_count; ++i) {
-                if (mask && !mask->Get(i)) {
-                    continue;
-                }
-                if (!IsValid(column, i)) {
-                    continue;
-                }
-                const double value = values[i] ? 1.0 : 0.0;
-                result.sum += value;
-                if (!result.has_value) {
-                    result.min = value;
-                    result.max = value;
-                    result.has_value = true;
-                } else {
-                    if (value < result.min) {
-                        result.min = value;
-                    }
-                    if (value > result.max) {
-                        result.max = value;
-                    }
-                }
-                ++result.count;
-            }
-            break;
-        }
+        case FieldType::kInt32:
+        case FieldType::kInt64:
+        case FieldType::kFloat64:
+        case FieldType::kBool:
         case FieldType::kDictInt32: {
-            const auto* values = reinterpret_cast<const uint32_t*>(column.data);
             for (size_t i = 0; i < column.row_count; ++i) {
                 if (mask && !mask->Get(i)) {
                     continue;
                 }
-                if (!IsValid(column, i)) {
+                double value = 0.0;
+                if (!ReadNumericValue(column, i, &value)) {
                     continue;
                 }
-                const double value = column.dict
-                    ? static_cast<double>(column.dict->Value(values[i]))
-                    : static_cast<double>(values[i]);
                 result.sum += value;
                 if (!result.has_value) {
                     result.min = value;

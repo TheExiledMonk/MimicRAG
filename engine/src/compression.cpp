@@ -1,5 +1,6 @@
 #include "mimicdb/compression.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include "mimicdb/config.h"
@@ -11,12 +12,76 @@ namespace mimicdb {
 namespace {
 
 constexpr size_t kLz4BlockSize = 64 * 1024;
+constexpr uint8_t kBitpackHeaderSize = 16;
+constexpr uint8_t kDictHeaderSize = 8;
 CompressionConfig g_compression_config = []() {
     CompressionConfig cfg;
     cfg.min_segment_rows = Config::kDefaultSegmentRows;
     cfg.min_ratio = Config::kCompressionMinRatio;
     return cfg;
 }();
+
+struct DictHeader {
+    uint32_t count = 0;
+    uint32_t reserved = 0;
+};
+
+struct BitpackHeader {
+    int64_t base = 0;
+    uint8_t bits = 0;
+    uint8_t reserved[7] = {};
+};
+
+struct ForDeltaHeader {
+    int64_t base = 0;
+};
+
+bool ReadDictHeader(const CompressedColumnView& column, DictHeader* out,
+                    const int64_t** values) {
+    if (!out || !values || !column.aux || column.aux_size < kDictHeaderSize) {
+        return false;
+    }
+    std::memcpy(out, column.aux, sizeof(DictHeader));
+    const size_t expected =
+        kDictHeaderSize + static_cast<size_t>(out->count) * sizeof(int64_t);
+    if (column.aux_size < expected) {
+        return false;
+    }
+    *values = reinterpret_cast<const int64_t*>(column.aux + kDictHeaderSize);
+    return true;
+}
+
+bool ReadBitpackHeader(const CompressedColumnView& column, BitpackHeader* out) {
+    if (!out || !column.aux || column.aux_size < kBitpackHeaderSize) {
+        return false;
+    }
+    std::memcpy(out, column.aux, sizeof(BitpackHeader));
+    return out->bits > 0 && out->bits <= 32;
+}
+
+bool ReadForDeltaHeader(const CompressedColumnView& column, ForDeltaHeader* out) {
+    if (!out || !column.aux || column.aux_size < sizeof(ForDeltaHeader)) {
+        return false;
+    }
+    std::memcpy(out, column.aux, sizeof(ForDeltaHeader));
+    return true;
+}
+
+uint64_t ReadBits(const uint8_t* data, size_t bit_offset, uint8_t bits) {
+    if (!data || bits == 0) {
+        return 0;
+    }
+    uint64_t value = 0;
+    for (uint8_t i = 0; i < bits; ++i) {
+        const size_t bit = bit_offset + i;
+        const size_t byte = bit / 8;
+        const uint8_t mask = static_cast<uint8_t>(1U << (bit % 8));
+        if (data[byte] & mask) {
+            value |= (1ULL << i);
+        }
+    }
+    return value;
+}
 
 bool EncodeLz4LiteralBlock(const uint8_t* src, size_t src_size,
                            std::vector<uint8_t>* out) {
@@ -85,6 +150,140 @@ void DecodeNone(const CompressedColumnView& column, const Mask& mask, void* out_
         return;
     }
     std::memcpy(out_buffer, column.data, column.data_size);
+}
+
+bool ReadInt64ValueInternal(const CompressedColumnView& column, size_t index, int64_t* out) {
+    if (!out || !IsValid(column, index)) {
+        return false;
+    }
+    switch (column.kind) {
+        case ColumnCompressionKind::kNone:
+        case ColumnCompressionKind::kLz4:
+            break;
+        case ColumnCompressionKind::kDictionary: {
+            DictHeader header;
+            const int64_t* values = nullptr;
+            if (!ReadDictHeader(column, &header, &values)) {
+                return false;
+            }
+            const auto* ids = reinterpret_cast<const uint32_t*>(column.data);
+            if (!ids || ids[index] >= header.count) {
+                return false;
+            }
+            *out = values[ids[index]];
+            return true;
+        }
+        case ColumnCompressionKind::kBitPacked: {
+            BitpackHeader header;
+            if (!ReadBitpackHeader(column, &header)) {
+                return false;
+            }
+            const uint64_t delta = ReadBits(column.data, index * header.bits, header.bits);
+            *out = header.base + static_cast<int64_t>(delta);
+            return true;
+        }
+        case ColumnCompressionKind::kForDelta: {
+            ForDeltaHeader header;
+            if (!ReadForDeltaHeader(column, &header)) {
+                return false;
+            }
+            const auto* deltas = reinterpret_cast<const uint32_t*>(column.data);
+            if (!deltas) {
+                return false;
+            }
+            *out = header.base + static_cast<int64_t>(deltas[index]);
+            return true;
+        }
+        case ColumnCompressionKind::kRle:
+            return false;
+    }
+    switch (column.type) {
+        case FieldType::kInt32:
+            *out = static_cast<int64_t>(
+                reinterpret_cast<const int32_t*>(column.data)[index]);
+            return true;
+        case FieldType::kInt64:
+            *out = reinterpret_cast<const int64_t*>(column.data)[index];
+            return true;
+        case FieldType::kBool:
+            *out = reinterpret_cast<const uint8_t*>(column.data)[index] ? 1 : 0;
+            return true;
+        case FieldType::kDictInt32: {
+            const auto* ids = reinterpret_cast<const uint32_t*>(column.data);
+            if (column.dict) {
+                *out = static_cast<int64_t>(column.dict->Value(ids[index]));
+            } else {
+                *out = static_cast<int64_t>(ids[index]);
+            }
+            return true;
+        }
+        case FieldType::kFloat64:
+        case FieldType::kString:
+        case FieldType::kBytes:
+        case FieldType::kArray:
+        case FieldType::kObject:
+            return false;
+    }
+    return false;
+}
+
+void DecodeDictionary(const CompressedColumnView& column, const Mask& mask, void* out_buffer) {
+    if (!out_buffer || !column.data) {
+        return;
+    }
+    auto* out = reinterpret_cast<int64_t*>(out_buffer);
+    DictHeader header;
+    const int64_t* values = nullptr;
+    if (!ReadDictHeader(column, &header, &values)) {
+        return;
+    }
+    const auto* ids = reinterpret_cast<const uint32_t*>(column.data);
+    for (size_t i = 0; i < column.row_count; ++i) {
+        if (mask.Size() > 0 && !mask.Get(i)) {
+            continue;
+        }
+        if (!IsValid(column, i) || !ids || ids[i] >= header.count) {
+            out[i] = 0;
+            continue;
+        }
+        out[i] = values[ids[i]];
+    }
+}
+
+void DecodeBitpack(const CompressedColumnView& column, const Mask& mask, void* out_buffer) {
+    if (!out_buffer || !column.data) {
+        return;
+    }
+    BitpackHeader header;
+    if (!ReadBitpackHeader(column, &header)) {
+        return;
+    }
+    auto* out = reinterpret_cast<int64_t*>(out_buffer);
+    for (size_t i = 0; i < column.row_count; ++i) {
+        if (mask.Size() > 0 && !mask.Get(i)) {
+            continue;
+        }
+        const uint64_t delta = ReadBits(column.data, i * header.bits, header.bits);
+        out[i] = header.base + static_cast<int64_t>(delta);
+    }
+}
+
+void DecodeForDelta(const CompressedColumnView& column, const Mask& mask, void* out_buffer) {
+    if (!out_buffer || !column.data) {
+        return;
+    }
+    ForDeltaHeader header;
+    if (!ReadForDeltaHeader(column, &header)) {
+        return;
+    }
+    const auto* deltas = reinterpret_cast<const uint32_t*>(column.data);
+    auto* out = reinterpret_cast<int64_t*>(out_buffer);
+    for (size_t i = 0; i < column.row_count; ++i) {
+        if (mask.Size() > 0 && !mask.Get(i)) {
+            continue;
+        }
+        out[i] = header.base + static_cast<int64_t>(deltas[i]);
+    }
 }
 
 void ScanPredicateNone(const CompressedColumnView& column, const CompressionPredicate& predicate,
@@ -202,6 +401,145 @@ void ScanPredicateNone(const CompressedColumnView& column, const CompressionPred
     }
 }
 
+void ScanPredicateDictionary(const CompressedColumnView& column,
+                             const CompressionPredicate& predicate,
+                             Mask* out_mask) {
+    if (!out_mask) {
+        return;
+    }
+    out_mask->Resize(column.row_count);
+    if (!column.data || column.row_count == 0) {
+        return;
+    }
+    if (predicate.is_null_check || predicate.is_not_null_check) {
+        for (size_t i = 0; i < column.row_count; ++i) {
+            const bool is_null = !IsValid(column, i);
+            const bool keep = predicate.is_not_null_check
+                                  ? !is_null
+                                  : (predicate.null_is ? is_null : !is_null);
+            out_mask->Set(i, keep);
+        }
+        return;
+    }
+    DictHeader header;
+    const int64_t* values = nullptr;
+    if (!ReadDictHeader(column, &header, &values)) {
+        return;
+    }
+    const auto* ids = reinterpret_cast<const uint32_t*>(column.data);
+    uint32_t match_id = 0;
+    bool has_id = false;
+    if (predicate.op == CompareOp::kEq || predicate.op == CompareOp::kNe) {
+        for (uint32_t i = 0; i < header.count; ++i) {
+            if (values[i] == predicate.i64) {
+                match_id = i;
+                has_id = true;
+                break;
+            }
+        }
+    }
+    for (size_t i = 0; i < column.row_count; ++i) {
+        if (!IsValid(column, i)) {
+            out_mask->Set(i, false);
+            continue;
+        }
+        if ((predicate.op == CompareOp::kEq || predicate.op == CompareOp::kNe) && !has_id) {
+            out_mask->Set(i, predicate.op == CompareOp::kNe);
+            continue;
+        }
+        int64_t value = 0;
+        if (predicate.op == CompareOp::kEq || predicate.op == CompareOp::kNe) {
+            const bool keep = predicate.op == CompareOp::kEq
+                ? ids[i] == match_id
+                : ids[i] != match_id;
+            out_mask->Set(i, keep);
+            continue;
+        }
+        if (!ids || ids[i] >= header.count) {
+            out_mask->Set(i, false);
+            continue;
+        }
+        value = values[ids[i]];
+        const uint8_t keep =
+            CompareInt64Branchless(value, predicate.i64, predicate.op);
+        out_mask->Set(i, keep != 0);
+    }
+}
+
+void ScanPredicateBitpack(const CompressedColumnView& column,
+                          const CompressionPredicate& predicate,
+                          Mask* out_mask) {
+    if (!out_mask) {
+        return;
+    }
+    out_mask->Resize(column.row_count);
+    if (!column.data || column.row_count == 0) {
+        return;
+    }
+    if (predicate.is_null_check || predicate.is_not_null_check) {
+        for (size_t i = 0; i < column.row_count; ++i) {
+            const bool is_null = !IsValid(column, i);
+            const bool keep = predicate.is_not_null_check
+                                  ? !is_null
+                                  : (predicate.null_is ? is_null : !is_null);
+            out_mask->Set(i, keep);
+        }
+        return;
+    }
+    BitpackHeader header;
+    if (!ReadBitpackHeader(column, &header)) {
+        return;
+    }
+    for (size_t i = 0; i < column.row_count; ++i) {
+        if (!IsValid(column, i)) {
+            out_mask->Set(i, false);
+            continue;
+        }
+        const uint64_t delta = ReadBits(column.data, i * header.bits, header.bits);
+        const int64_t value = header.base + static_cast<int64_t>(delta);
+        const uint8_t keep =
+            CompareInt64Branchless(value, predicate.i64, predicate.op);
+        out_mask->Set(i, keep != 0);
+    }
+}
+
+void ScanPredicateForDelta(const CompressedColumnView& column,
+                           const CompressionPredicate& predicate,
+                           Mask* out_mask) {
+    if (!out_mask) {
+        return;
+    }
+    out_mask->Resize(column.row_count);
+    if (!column.data || column.row_count == 0) {
+        return;
+    }
+    if (predicate.is_null_check || predicate.is_not_null_check) {
+        for (size_t i = 0; i < column.row_count; ++i) {
+            const bool is_null = !IsValid(column, i);
+            const bool keep = predicate.is_not_null_check
+                                  ? !is_null
+                                  : (predicate.null_is ? is_null : !is_null);
+            out_mask->Set(i, keep);
+        }
+        return;
+    }
+    ForDeltaHeader header;
+    if (!ReadForDeltaHeader(column, &header)) {
+        return;
+    }
+    const auto* deltas = reinterpret_cast<const uint32_t*>(column.data);
+    for (size_t i = 0; i < column.row_count; ++i) {
+        if (!IsValid(column, i)) {
+            out_mask->Set(i, false);
+            continue;
+        }
+        const int64_t value = header.base + static_cast<int64_t>(deltas[i]);
+        const uint8_t keep =
+            CompareInt64Branchless(value, predicate.i64, predicate.op);
+        out_mask->Set(i, keep != 0);
+    }
+}
+
 size_t MemoryBytesNone(const CompressedColumnView& column) {
     return column.data_size + column.aux_size;
 }
@@ -225,30 +563,29 @@ const CompressedColumnOps kNoneOps = {
     &MemoryBytesNone,
 };
 
+const CompressedColumnOps kDictionaryOps = {
+    &DecodeDictionary,
+    &ScanPredicateDictionary,
+    &MemoryBytesNone,
+};
+
+const CompressedColumnOps kBitpackOps = {
+    &DecodeBitpack,
+    &ScanPredicateBitpack,
+    &MemoryBytesNone,
+};
+
+const CompressedColumnOps kForDeltaOps = {
+    &DecodeForDelta,
+    &ScanPredicateForDelta,
+    &MemoryBytesNone,
+};
+
 const CompressedColumnOps kLz4Ops = {
     &DecodeLz4,
     nullptr,
     &MemoryBytesLz4,
 };
-
-bool IsCodecEnabled(ColumnCompressionKind kind) {
-    const auto cfg = g_compression_config;
-    switch (kind) {
-        case ColumnCompressionKind::kNone:
-            return true;
-        case ColumnCompressionKind::kDictionary:
-            return cfg.enable_dictionary;
-        case ColumnCompressionKind::kBitPacked:
-            return cfg.enable_bitpack;
-        case ColumnCompressionKind::kForDelta:
-            return cfg.enable_fordelta;
-        case ColumnCompressionKind::kLz4:
-            return cfg.enable_lz4;
-        case ColumnCompressionKind::kRle:
-            return false;
-    }
-    return false;
-}
 
 }  // namespace
 
@@ -370,6 +707,24 @@ CompressedColumnView MakeUncompressedView(const FieldVector& field) {
     return view;
 }
 
+const CompressedColumnOps* CompressionOpsFor(ColumnCompressionKind kind) {
+    switch (kind) {
+        case ColumnCompressionKind::kNone:
+            return &kNoneOps;
+        case ColumnCompressionKind::kDictionary:
+            return &kDictionaryOps;
+        case ColumnCompressionKind::kBitPacked:
+            return &kBitpackOps;
+        case ColumnCompressionKind::kForDelta:
+            return &kForDeltaOps;
+        case ColumnCompressionKind::kLz4:
+            return &kLz4Ops;
+        case ColumnCompressionKind::kRle:
+            return &kNoneOps;
+    }
+    return &kNoneOps;
+}
+
 const CompressedColumnOps* DefaultCompressionOps() {
     return &kNoneOps;
 }
@@ -394,6 +749,57 @@ bool DecodeLz4Literal(const uint8_t* src, size_t src_size, uint8_t* dst, size_t 
         return true;
     }
     return DecodeLz4LiteralBlock(src, src_size, dst, dst_size);
+}
+
+bool ReadInt64Value(const CompressedColumnView& column, size_t index, int64_t* out) {
+    return ReadInt64ValueInternal(column, index, out);
+}
+
+bool ReadNumericValue(const CompressedColumnView& column, size_t index, double* out) {
+    if (!out || !IsValid(column, index)) {
+        return false;
+    }
+    if (column.kind == ColumnCompressionKind::kDictionary ||
+        column.kind == ColumnCompressionKind::kBitPacked ||
+        column.kind == ColumnCompressionKind::kForDelta) {
+        int64_t value = 0;
+        if (!ReadInt64ValueInternal(column, index, &value)) {
+            return false;
+        }
+        *out = static_cast<double>(value);
+        return true;
+    }
+    switch (column.type) {
+        case FieldType::kInt32:
+            *out = static_cast<double>(
+                reinterpret_cast<const int32_t*>(column.data)[index]);
+            return true;
+        case FieldType::kInt64:
+            *out = static_cast<double>(
+                reinterpret_cast<const int64_t*>(column.data)[index]);
+            return true;
+        case FieldType::kFloat64:
+            *out = reinterpret_cast<const double*>(column.data)[index];
+            return true;
+        case FieldType::kBool:
+            *out = reinterpret_cast<const uint8_t*>(column.data)[index] != 0;
+            return true;
+        case FieldType::kDictInt32:
+            if (column.dict) {
+                *out = static_cast<double>(
+                    column.dict->Value(reinterpret_cast<const uint32_t*>(column.data)[index]));
+            } else {
+                *out = static_cast<double>(
+                    reinterpret_cast<const uint32_t*>(column.data)[index]);
+            }
+            return true;
+        case FieldType::kString:
+        case FieldType::kBytes:
+        case FieldType::kArray:
+        case FieldType::kObject:
+            return false;
+    }
+    return false;
 }
 
 CompressionConfig GetCompressionConfig() {
