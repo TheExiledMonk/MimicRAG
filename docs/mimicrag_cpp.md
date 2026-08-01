@@ -64,6 +64,15 @@ streams forward provider tokens immediately over SSE. Prompt-injection assessmen
 retrieval details, provider/model identity, latency, and citations are recorded in the
 bounded trace store and JSONL trace file.
 
+Retrieved chunks include a stable `node_id`. `POST /v1/graph/expand` accepts that ID,
+the tenant/access scope, and a neighbor limit, returning typed document, section, and
+chunk nodes without another embedding or global search. Every returned node has its own
+stable ID, allowing an agent to move upward, downward, or sideways through bounded,
+iterative deep dives. The initial search
+uses at most five seeds and 32 graph candidates by default; graph timings and retained
+hits are included in retrieval responses and traces. Set `graph_enabled:false` per
+request or `graph.enabled:false` globally to bypass the stage.
+
 The executable replaces the Python CLI as well:
 
 ```bash

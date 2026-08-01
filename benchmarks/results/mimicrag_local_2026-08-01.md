@@ -25,6 +25,14 @@ Sixteen threads reached 405.6 QPS but raised p50 to 36.78 ms, so eight workers a
 better latency/throughput operating point on this host. Corpus growth from 600 to
 5,000 rows is effectively flat after the change.
 
+## Structural graph overhead
+
+The optional document/section/chunk graph performs no embedding or global search.
+At 5,000 rows its measured stage time was 0.10 ms sequential and 0.12 ms under eight
+threads. A same-load enabled/disabled comparison measured 29.63 versus 29.51 sequential
+QPS; concurrent results were 133.8 versus 139.7 QPS while the host was thermally/load
+throttled. The direct stage timing is under the 1 ms p95 budget by a wide margin.
+
 The 5,000-document run crosses the 4,096-row segment boundary and exercises custom
 IVF plus its active-row overlay. It initially exposed an IVF crash: predicate-bound
 construction read numeric raw storage after compression released it. The benchmark

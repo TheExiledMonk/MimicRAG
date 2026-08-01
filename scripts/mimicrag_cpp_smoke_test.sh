@@ -39,3 +39,30 @@ done
 evaluation=$(curl -fsS -X POST http://127.0.0.1:18081/v1/evaluations -H 'Content-Type: application/json' \
     --data '{"top_k":3,"cases":[{"query":"native vector retrieval","relevant_source_uris":["smoke://guide"],"tenant_id":"smoke"}]}')
 [[ "$evaluation" == *'"recall_at_k":1.0'* ]]
+
+graph_text="# Graph section\\nquasargraph root $(printf 'structural context %.0s' {1..120})\\n# Details\\nquasargraph deep dive $(printf 'related evidence %.0s' {1..120})"
+curl -fsS -X POST http://127.0.0.1:18081/v1/documents -H 'Content-Type: application/json' \
+    --data "{\"text\":\"$graph_text\",\"source_uri\":\"smoke://graph\",\"tenant_id\":\"smoke\",\"background\":false}" >/dev/null
+graph_seed=$(curl -fsS -X POST http://127.0.0.1:18081/v1/retrieve -H 'Content-Type: application/json' \
+    --data '{"query":"quasargraph root","tenant_id":"smoke","top_k":3}')
+graph_hits=$(printf '%s' "$graph_seed" | sed -n 's/.*"graph":{"elapsed_ms":[^,]*,"examined":[0-9]*,"hits":\([0-9]*\)}.*/\1/p')
+[[ -n "$graph_hits" && "$graph_hits" -gt 0 ]]
+node_id=$(printf '%s' "$graph_seed" | sed -n 's/.*"node_id":"\([^"]*\)".*/\1/p')
+[[ -n "$node_id" ]]
+deep_dive=$(curl -fsS -X POST http://127.0.0.1:18081/v1/graph/expand -H 'Content-Type: application/json' \
+    --data "{\"node_id\":\"$node_id\",\"tenant_id\":\"smoke\",\"max_neighbors\":8}")
+[[ "$deep_dive" == *'"can_expand_further":true'* ]]
+[[ "$deep_dive" == *'smoke://graph'* ]]
+[[ "$deep_dive" == *'"node_type":"section"'* ]]
+if [[ "$deep_dive" =~ \"node_id\":\"([^\"]+)\",\"node_type\":\"section\" ]]; then
+    section_id="${BASH_REMATCH[1]}"
+else
+    exit 1
+fi
+section_dive=$(curl -fsS -X POST http://127.0.0.1:18081/v1/graph/expand -H 'Content-Type: application/json' \
+    --data "{\"node_id\":\"$section_id\",\"tenant_id\":\"smoke\",\"max_neighbors\":8}")
+[[ "$section_dive" == *'"node_type":"chunk"'* ]]
+if curl -fsS -X POST http://127.0.0.1:18081/v1/graph/expand -H 'Content-Type: application/json' \
+    --data "{\"node_id\":\"$section_id\",\"tenant_id\":\"wrong-tenant\"}" >/dev/null 2>&1; then
+    exit 1
+fi

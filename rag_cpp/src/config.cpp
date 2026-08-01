@@ -68,6 +68,12 @@ Config Config::Load(const std::string& path) {
     out.server.job_workers = server.value("job_workers", size_t{1});
     out.server.trace_memory = server.value("trace_memory", size_t{10000});
     out.server.trace_path = server.value("trace_path", "");
+    const auto graph = root.value("graph", json::object());
+    out.server.graph_enabled = graph.value("enabled", true);
+    out.server.graph_max_seeds = graph.value("max_seeds", size_t{5});
+    out.server.graph_max_neighbors = graph.value("max_neighbors", size_t{32});
+    out.server.graph_max_section_children = graph.value("max_section_children", size_t{8});
+    out.server.graph_min_seed_score = graph.value("min_seed_score", 0.01);
     if (out.local_embedding.enabled && out.local_embedding.model_path.empty()) {
         throw std::runtime_error("local_embedding.model_path is required when enabled");
     }

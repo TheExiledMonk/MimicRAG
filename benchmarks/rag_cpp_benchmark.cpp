@@ -36,11 +36,12 @@ double Percentile(std::vector<double> values, double fraction) {
     return values[std::min(values.size() - 1, static_cast<size_t>(fraction * (values.size() - 1)))];
 }
 
-struct QueryStats { std::vector<double> latency; size_t recall1 = 0, recall10 = 0, filter_errors = 0; };
+struct QueryStats { std::vector<double> latency; size_t recall1 = 0, recall10 = 0, filter_errors = 0, graph_hits = 0; double graph_ms = 0; };
 
 void Merge(QueryStats& target, QueryStats source) {
     target.latency.insert(target.latency.end(), source.latency.begin(), source.latency.end());
     target.recall1 += source.recall1; target.recall10 += source.recall10; target.filter_errors += source.filter_errors;
+    target.graph_hits += source.graph_hits; target.graph_ms += source.graph_ms;
 }
 
 QueryStats RunQueries(mimicrag::RagEngine& engine, size_t begin, size_t count) {
@@ -50,6 +51,8 @@ QueryStats RunQueries(mimicrag::RagEngine& engine, size_t begin, size_t count) {
         const auto started = Clock::now();
         const auto result = engine.Retrieve({{"query", kTopics[topic].query}, {"tenant_id", tenant}, {"access_scope", "public"}, {"top_k", 10}});
         stats.latency.push_back(Milliseconds(started));
+        stats.graph_ms += result.value("graph", Json::object()).value("elapsed_ms", 0.0);
+        stats.graph_hits += result.value("graph", Json::object()).value("hits", size_t{0});
         const std::string expected = "bench://topic/" + std::to_string(topic) + "/";
         bool found = false; size_t rank = 0;
         for (const auto& hit : result["hits"]) {
@@ -63,10 +66,11 @@ QueryStats RunQueries(mimicrag::RagEngine& engine, size_t begin, size_t count) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 3) { std::cerr << "usage: mimicrag_benchmark MODEL_GGUF DATA_DIR [documents=600] [queries=120] [threads=8]\n"; return 2; }
+    if (argc < 3) { std::cerr << "usage: mimicrag_benchmark MODEL_GGUF DATA_DIR [documents=600] [queries=120] [threads=8] [graph=on]\n"; return 2; }
     const size_t documents = argc > 3 ? std::stoull(argv[3]) : 600;
     const size_t queries = argc > 4 ? std::stoull(argv[4]) : 120;
     const size_t threads = argc > 5 ? std::stoull(argv[5]) : 8;
+    const bool graph_enabled = argc <= 6 || std::string(argv[6]) != "off";
     mimicrag::Config config;
     config.chat.provider = "openai_compatible"; config.chat.model = "disabled"; config.chat.base_url = "http://127.0.0.1:1";
     config.embedding.provider = "local"; config.embedding.model = "local-gguf";
@@ -74,6 +78,7 @@ int main(int argc, char** argv) {
     config.local_embedding.gpu_layers = -1; config.local_embedding.threads = 0; config.local_embedding.context_size = 2048;
     config.local_embedding.document_prefix = "search_document: "; config.local_embedding.query_prefix = "search_query: ";
     config.server.data_path = argv[2]; config.server.trace_path = std::string(argv[2]) + "/traces.jsonl"; config.server.top_k = 10;
+    config.server.graph_enabled = graph_enabled;
 
     const auto total_started = Clock::now(); auto engine = std::make_unique<mimicrag::RagEngine>(config);
     const auto ingest_started = Clock::now();
@@ -102,7 +107,8 @@ int main(int argc, char** argv) {
     const auto health = engine->Health();
     auto report = [&](const QueryStats& stats, double elapsed) { return Json{{"queries", stats.latency.size()}, {"qps", stats.latency.size() * 1000.0 / elapsed},
         {"latency_ms", {{"p50", Percentile(stats.latency, .50)}, {"p95", Percentile(stats.latency, .95)}, {"p99", Percentile(stats.latency, .99)}, {"mean", std::accumulate(stats.latency.begin(), stats.latency.end(), 0.0) / std::max<size_t>(1, stats.latency.size())}}},
-        {"recall_at_1", double(stats.recall1) / std::max<size_t>(1, stats.latency.size())}, {"recall_at_10", double(stats.recall10) / std::max<size_t>(1, stats.latency.size())}, {"filter_errors", stats.filter_errors}}; };
+        {"recall_at_1", double(stats.recall1) / std::max<size_t>(1, stats.latency.size())}, {"recall_at_10", double(stats.recall10) / std::max<size_t>(1, stats.latency.size())}, {"filter_errors", stats.filter_errors},
+        {"graph", {{"enabled", graph_enabled}, {"mean_ms", stats.graph_ms / std::max<size_t>(1, stats.latency.size())}, {"retained_hits", stats.graph_hits}}}}; };
     std::cout << Json{{"documents", documents}, {"model", argv[1]}, {"device", health["local_embedding_device"]},
         {"vector_rows", health["local_vector_rows"]}, {"ingestion", {{"elapsed_ms", ingest_ms}, {"documents_per_second", documents * 1000.0 / ingest_ms}}},
         {"sequential", report(sequential, sequential_ms)}, {"concurrent", {{"threads", threads}, {"result", report(concurrent, concurrent_ms)}}},

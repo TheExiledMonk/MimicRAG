@@ -56,7 +56,32 @@ struct Chunk {
     std::string id, document_id, version_id, tenant, scope, text, source_uri, title;
     size_t ordinal = 0, start = 0, end = 0;
     json metadata = json::object();
+    size_t section = SIZE_MAX;
 };
+
+enum class GraphEdgeType : uint8_t { kParent = 1, kChild = 2, kPrevious = 3, kNext = 4 };
+struct GraphEdge { uint32_t target = 0; GraphEdgeType type = GraphEdgeType::kChild; uint8_t weight = 0; };
+struct DocumentGraph {
+    size_t chunk_nodes = 0;
+    std::vector<size_t> global_chunks;
+    std::vector<std::string> node_ids, node_types, labels;
+    std::vector<uint32_t> offsets;
+    std::vector<GraphEdge> edges;
+};
+struct GraphRef { uint32_t graph = UINT32_MAX, node = UINT32_MAX; };
+
+struct Heading { size_t position = 0, level = 0; std::string title; };
+std::vector<Heading> FindHeadings(const std::string& text) {
+    std::vector<Heading> headings; size_t position = 0;
+    while (position < text.size()) {
+        const size_t end = text.find('\n', position); const size_t line_end = end == std::string::npos ? text.size() : end;
+        size_t level = 0; while (position + level < line_end && level < 6 && text[position + level] == '#') ++level;
+        if (level && position + level < line_end && text[position + level] == ' ') headings.push_back({position, level, text.substr(position + level + 1, line_end - position - level - 1)});
+        if (end == std::string::npos) break;
+        position = end + 1;
+    }
+    return headings;
+}
 
 struct VectorSpace {
     std::string identity;
@@ -78,7 +103,7 @@ struct VectorSpace {
     }
 };
 
-struct Ranked { size_t chunk = 0; double score = 0; int vector_rank = 0; int lexical_rank = 0; };
+struct Ranked { size_t chunk = 0; double score = 0; int vector_rank = 0; int lexical_rank = 0; int graph_hops = 0; std::string graph_relation; };
 
 std::vector<std::string> InjectionPatterns(const std::string& text) {
     static const std::vector<std::pair<std::string, std::regex>> patterns = {
@@ -89,6 +114,36 @@ std::vector<std::string> InjectionPatterns(const std::string& text) {
 }
 
 int64_t NowMs() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }
+
+DocumentGraph BuildGraph(const std::vector<Chunk>& chunks, const std::vector<Heading>& headings, size_t base) {
+    DocumentGraph graph; graph.chunk_nodes = chunks.size(); graph.global_chunks.reserve(chunks.size());
+    const size_t root = chunks.size() + headings.size(), nodes = root + 1;
+    graph.node_ids.resize(nodes); graph.node_types.resize(nodes); graph.labels.resize(nodes);
+    for (size_t i = 0; i < chunks.size(); ++i) { graph.node_ids[i] = chunks[i].id; graph.node_types[i] = "chunk"; graph.labels[i] = chunks[i].title; }
+    for (size_t i = 0; i < headings.size(); ++i) { graph.node_ids[chunks.size() + i] = StableId(chunks.front().version_id + "\nsection\n" + std::to_string(headings[i].position)); graph.node_types[chunks.size() + i] = "section"; graph.labels[chunks.size() + i] = headings[i].title; }
+    graph.node_ids[root] = StableId(chunks.front().version_id + "\ndocument"); graph.node_types[root] = "document"; graph.labels[root] = chunks.front().title.empty() ? chunks.front().source_uri : chunks.front().title;
+    std::vector<std::vector<GraphEdge>> adjacency(nodes);
+    auto link = [&](size_t from, size_t to, GraphEdgeType forward, GraphEdgeType reverse, uint8_t weight) {
+        adjacency[from].push_back({static_cast<uint32_t>(to), forward, weight}); adjacency[to].push_back({static_cast<uint32_t>(from), reverse, weight});
+    };
+    std::vector<size_t> stack;
+    for (size_t i = 0; i < headings.size(); ++i) {
+        while (!stack.empty() && headings[stack.back()].level >= headings[i].level) stack.pop_back();
+        const size_t parent = stack.empty() ? root : chunks.size() + stack.back();
+        link(chunks.size() + i, parent, GraphEdgeType::kParent, GraphEdgeType::kChild, 230);
+        stack.push_back(i);
+    }
+    for (size_t i = 0; i < chunks.size(); ++i) {
+        graph.global_chunks.push_back(base + i);
+        const size_t parent = chunks[i].section == SIZE_MAX ? root : chunks.size() + chunks[i].section;
+        link(i, parent, GraphEdgeType::kParent, GraphEdgeType::kChild, 217);
+        if (i) link(i - 1, i, GraphEdgeType::kNext, GraphEdgeType::kPrevious, 179);
+    }
+    graph.offsets.resize(nodes + 1);
+    for (size_t node = 0; node < nodes; ++node) { graph.offsets[node] = graph.edges.size(); graph.edges.insert(graph.edges.end(), adjacency[node].begin(), adjacency[node].end()); }
+    graph.offsets[nodes] = graph.edges.size();
+    return graph;
+}
 }  // namespace
 
 struct RagEngine::Impl {
@@ -113,6 +168,10 @@ struct RagEngine::Impl {
     std::vector<Chunk> chunks;
     std::vector<size_t> lexical_lengths;
     std::unordered_map<std::string, std::vector<std::pair<size_t, uint16_t>>> lexical_postings;
+    std::vector<DocumentGraph> graphs;
+    std::vector<GraphRef> graph_refs;
+    std::unordered_map<std::string, GraphRef> graph_node_refs;
+    size_t graph_edges = 0;
     std::unordered_map<std::string, std::string> current_versions;
     std::unordered_map<std::string, size_t> current_generations;
     std::unordered_map<std::string, size_t> current_chunk_counts;
@@ -216,8 +275,8 @@ struct RagEngine::Impl {
         return out;
     }
 
-    std::vector<Ranked> RetrieveLocked(const std::string& query, const std::string& tenant, const std::string& scope, size_t top_k, const std::vector<float>* query_embedding, bool use_local) {
-        auto visible = Visible(tenant, scope); const size_t candidates = std::max<size_t>(top_k * 4, top_k);
+    std::vector<Ranked> RetrieveLocked(const std::string& query, const std::string& tenant, const std::string& scope, size_t top_k, const std::vector<float>* query_embedding, bool use_local, const std::vector<size_t>& visible) {
+        const size_t candidates = std::max<size_t>(top_k * 4, top_k);
         auto lexical = Lexical(query, visible, candidates);
         std::vector<std::pair<size_t, double>> vectors;
         if (query_embedding) vectors = Vector(*query_embedding, use_local ? local_space : remote, tenant, scope, candidates);
@@ -230,6 +289,50 @@ struct RagEngine::Impl {
         std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.score != b.score ? a.score > b.score : a.chunk < b.chunk; });
         if (out.size() > top_k) out.resize(top_k);
         return out;
+    }
+
+    std::pair<size_t, size_t> ExpandGraph(std::vector<Ranked>* ranked, const std::vector<size_t>& visible,
+                                          size_t top_k, size_t max_seeds, size_t max_neighbors,
+                                          size_t max_section_children, double minimum_score) const {
+        if (!ranked || ranked->empty() || !max_neighbors) return {};
+        const std::unordered_set<size_t> allowed(visible.begin(), visible.end());
+        std::unordered_map<size_t, size_t> positions;
+        for (size_t i = 0; i < ranked->size(); ++i) positions[(*ranked)[i].chunk] = i;
+        const auto seeds = *ranked; size_t examined = 0, added = 0;
+        auto relation = [](GraphEdgeType type) {
+            switch (type) { case GraphEdgeType::kPrevious: return "previous"; case GraphEdgeType::kNext: return "next"; case GraphEdgeType::kChild: return "section_child"; case GraphEdgeType::kParent: return "parent"; }
+            return "related";
+        };
+        auto consider = [&](size_t chunk, const Ranked& seed, double weight, GraphEdgeType type, int hops) {
+            if (chunk == seed.chunk || !allowed.count(chunk) || examined++ >= max_neighbors) return;
+            const double score = seed.score * weight;
+            auto found = positions.find(chunk);
+            if (found != positions.end()) {
+                auto& existing = (*ranked)[found->second];
+                if (score > existing.score && !existing.vector_rank && !existing.lexical_rank) existing.score = score;
+                return;
+            }
+            positions[chunk] = ranked->size(); ranked->push_back({chunk, score, 0, 0, hops, relation(type)}); ++added;
+        };
+        for (size_t seed_index = 0; seed_index < std::min(max_seeds, seeds.size()) && examined < max_neighbors; ++seed_index) {
+            const auto& seed = seeds[seed_index]; if (seed.score < minimum_score || seed.chunk >= graph_refs.size()) continue;
+            const auto reference = graph_refs[seed.chunk]; if (reference.graph >= graphs.size()) continue;
+            const auto& graph = graphs[reference.graph]; if (reference.node + 1 >= graph.offsets.size()) continue;
+            for (size_t edge_index = graph.offsets[reference.node]; edge_index < graph.offsets[reference.node + 1] && examined < max_neighbors; ++edge_index) {
+                const auto& edge = graph.edges[edge_index]; const double weight = edge.weight / 255.0;
+                if (edge.target < graph.chunk_nodes) consider(graph.global_chunks[edge.target], seed, weight, edge.type, 1);
+                else {
+                    size_t children = 0;
+                    for (size_t child_index = graph.offsets[edge.target]; child_index < graph.offsets[edge.target + 1] && examined < max_neighbors && children < max_section_children; ++child_index) {
+                        const auto& child = graph.edges[child_index]; if (child.target >= graph.chunk_nodes) continue;
+                        consider(graph.global_chunks[child.target], seed, weight * child.weight / 255.0, GraphEdgeType::kChild, 1); ++children;
+                    }
+                }
+            }
+        }
+        std::sort(ranked->begin(), ranked->end(), [](const auto& a, const auto& b) { return a.score != b.score ? a.score > b.score : a.chunk < b.chunk; });
+        if (ranked->size() > top_k) ranked->resize(top_k);
+        size_t retained = 0; for (const auto& item : *ranked) retained += item.graph_hops > 0; return {examined, retained};
     }
 };
 
@@ -249,6 +352,7 @@ json RagEngine::Ingest(const json& request) {
         return {{"accepted", true}, {"job_id", job_id}, {"status", "queued"}};
     }
     const std::string text = request.at("text"), source = request.at("source_uri");
+    if (text.find_first_not_of(" \t\r\n") == std::string::npos) throw std::runtime_error("document text is empty");
     if (text.size() > config_.server.max_body_bytes) throw std::runtime_error("document exceeds configured limit");
     const std::string tenant = request.value("tenant_id", "default"), title = request.value("title", ""), scope = request.value("access_scope", request.value("metadata", json::object()).value("access_scope", "public"));
     const std::string document_id = request.value("document_id", StableId(tenant + "\n" + source));
@@ -264,11 +368,13 @@ json RagEngine::Ingest(const json& request) {
     }
     std::vector<Chunk> created;
     std::vector<std::unordered_map<std::string, uint16_t>> created_terms;
+    const auto headings = FindHeadings(text);
     constexpr size_t target = 1600, overlap = 200;
     for (size_t start = 0, ordinal = 0; start < text.size(); ++ordinal) {
         size_t end = std::min(text.size(), start + target);
         if (end < text.size()) { const size_t boundary = text.rfind(' ', end); if (boundary != std::string::npos && boundary > start + 80) end = boundary; }
         created.push_back({StableId(version_id + std::to_string(ordinal)), document_id, version_id, tenant, scope, text.substr(start, end - start), source, title, ordinal, start, end, metadata});
+        for (size_t heading = 0; heading < headings.size() && headings[heading].position < end; ++heading) created.back().section = heading;
         std::unordered_map<std::string, uint16_t> counts;
         for (const auto& term : Tokenize(created.back().text)) { auto& count = counts[term]; if (count != UINT16_MAX) ++count; }
         created_terms.push_back(std::move(counts));
@@ -298,6 +404,13 @@ json RagEngine::Ingest(const json& request) {
         if (found != impl_->current_versions.end() && found->second == version_id) return {{"document_id", document_id}, {"version_id", version_id}, {"generation", impl_->current_generations[document_id]}, {"chunk_count", impl_->current_chunk_counts[document_id]}, {"unchanged", true}};
         const size_t base = impl_->chunks.size();
         impl_->chunks.insert(impl_->chunks.end(), created.begin(), created.end());
+        const uint32_t graph_index = static_cast<uint32_t>(impl_->graphs.size());
+        impl_->graphs.push_back(BuildGraph(created, headings, base));
+        impl_->graph_edges += impl_->graphs.back().edges.size();
+        impl_->graph_refs.resize(base + created.size());
+        for (size_t i = 0; i < created.size(); ++i) impl_->graph_refs[base + i] = {graph_index, static_cast<uint32_t>(i)};
+        const auto& published_graph = impl_->graphs.back();
+        for (size_t node = 0; node < published_graph.node_ids.size(); ++node) impl_->graph_node_refs[published_graph.node_ids[node]] = {graph_index, static_cast<uint32_t>(node)};
         for (size_t i = 0; i < created_terms.size(); ++i) {
             size_t length = 0;
             for (const auto& [term, count] : created_terms[i]) { length += count; impl_->lexical_postings[term].emplace_back(base + i, count); }
@@ -334,13 +447,21 @@ json RagEngine::Retrieve(const json& request) {
             use_local = true; backend = impl_->local.UsingGpu() ? "local_gpu" : "local_cpu";
         }
     }
-    json hits = json::array(); bool approximate = false;
+    json hits = json::array(); bool approximate = false; double graph_ms = 0; size_t graph_examined = 0, graph_hits = 0;
     { std::shared_lock lock(impl_->state_mutex);
       const auto& selected = use_local ? impl_->local_space : impl_->remote;
       approximate = mimicdb::VectorIvfReady(selected.dataset, 0, mimicdb::VectorMetric::kCosine);
       if (query_embedding.empty() || !selected.dimension) { query_embedding.clear(); backend = "bm25"; }
-      auto ranked = impl_->RetrieveLocked(query, tenant, scope, top_k, query_embedding.empty() ? nullptr : &query_embedding, use_local);
-      for (const auto& item : ranked) { const auto& chunk = impl_->chunks[item.chunk]; hits.push_back({{"chunk_id", chunk.id}, {"document_id", chunk.document_id}, {"version_id", chunk.version_id}, {"tenant_id", chunk.tenant}, {"access_scope", chunk.scope}, {"text", chunk.text}, {"source_uri", chunk.source_uri}, {"title", chunk.title}, {"metadata", chunk.metadata}, {"ordinal", chunk.ordinal}, {"token_estimate", (chunk.text.size() + 3) / 4}, {"start_char", chunk.start}, {"end_char", chunk.end}, {"score", item.score}, {"vector_rank", item.vector_rank}, {"lexical_rank", item.lexical_rank}}); }
+      const auto visible = impl_->Visible(tenant, scope);
+      auto ranked = impl_->RetrieveLocked(query, tenant, scope, top_k, query_embedding.empty() ? nullptr : &query_embedding, use_local, visible);
+      if (request.value("graph_enabled", config_.server.graph_enabled)) {
+          const auto graph_started = std::chrono::steady_clock::now();
+          const auto stats = impl_->ExpandGraph(&ranked, visible, top_k, config_.server.graph_max_seeds,
+              request.value("graph_max_neighbors", config_.server.graph_max_neighbors), config_.server.graph_max_section_children,
+              config_.server.graph_min_seed_score);
+          graph_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - graph_started).count(); graph_examined = stats.first; graph_hits = stats.second;
+      }
+      for (const auto& item : ranked) { const auto& chunk = impl_->chunks[item.chunk]; hits.push_back({{"node_id", chunk.id}, {"chunk_id", chunk.id}, {"document_id", chunk.document_id}, {"version_id", chunk.version_id}, {"tenant_id", chunk.tenant}, {"access_scope", chunk.scope}, {"text", chunk.text}, {"source_uri", chunk.source_uri}, {"title", chunk.title}, {"metadata", chunk.metadata}, {"ordinal", chunk.ordinal}, {"token_estimate", (chunk.text.size() + 3) / 4}, {"start_char", chunk.start}, {"end_char", chunk.end}, {"score", item.score}, {"vector_rank", item.vector_rank}, {"lexical_rank", item.lexical_rank}, {"graph_hops", item.graph_hops}, {"graph_relation", item.graph_relation}}); }
     }
     const std::string trace_id = HexId(query);
     json ids = json::array(); for (const auto& hit : hits) ids.push_back(hit["chunk_id"]);
@@ -348,8 +469,10 @@ json RagEngine::Retrieve(const json& request) {
         {"duration_ms", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count()}, {"query", query},
         {"provider", config_.embedding.provider}, {"model", config_.embedding.model}, {"embedding_model_key", use_local ? impl_->local_space.identity : impl_->remote.identity},
         {"approximate", approximate},
-        {"retrieved_chunk_ids", ids}, {"injection_patterns", InjectionPatterns(query)}, {"status", "ok"}, {"attributes", {{"embedding_backend", backend}}}});
-    return {{"hits", hits}, {"embedding_backend", backend}, {"trace_id", trace_id}};
+        {"retrieved_chunk_ids", ids}, {"injection_patterns", InjectionPatterns(query)}, {"status", "ok"},
+        {"attributes", {{"embedding_backend", backend}, {"graph_ms", graph_ms}, {"graph_examined", graph_examined}, {"graph_hits", graph_hits}}}});
+    return {{"hits", hits}, {"embedding_backend", backend}, {"trace_id", trace_id},
+        {"graph", {{"elapsed_ms", graph_ms}, {"examined", graph_examined}, {"hits", graph_hits}}}};
 }
 
 json RagEngine::Answer(const json& request) {
@@ -406,6 +529,37 @@ json RagEngine::Trace(const std::string& trace_id) const { std::lock_guard lock(
 
 json RagEngine::RecentTraces(size_t limit) const { std::lock_guard lock(impl_->mutex); json result = json::array(); limit = std::min(limit, impl_->trace_order.size()); for (size_t i = 0; i < limit; ++i) result.push_back(impl_->traces.at(impl_->trace_order[impl_->trace_order.size() - 1 - i])); return result; }
 
+json RagEngine::GraphExpand(const json& request) const {
+    const auto started = std::chrono::steady_clock::now(); const std::string node_id = request.at("node_id");
+    const std::string tenant = request.value("tenant_id", "default"), scope = request.value("access_scope", "public");
+    const size_t maximum = std::clamp<size_t>(request.value("max_neighbors", config_.server.graph_max_neighbors), 1, 256);
+    std::shared_lock lock(impl_->state_mutex); const auto found = impl_->graph_node_refs.find(node_id);
+    if (found == impl_->graph_node_refs.end() || found->second.graph >= impl_->graphs.size()) throw std::out_of_range("graph node not found");
+    const auto& graph = impl_->graphs[found->second.graph];
+    const auto visible = impl_->Visible(tenant, scope); const std::unordered_set<size_t> allowed(visible.begin(), visible.end());
+    bool authorized = false; for (size_t chunk : graph.global_chunks) authorized |= allowed.count(chunk);
+    if (!authorized || found->second.node + 1 >= graph.offsets.size()) throw std::out_of_range("graph node not found");
+    auto relation = [](GraphEdgeType type) { switch (type) { case GraphEdgeType::kParent: return "parent"; case GraphEdgeType::kChild: return "child"; case GraphEdgeType::kPrevious: return "previous"; case GraphEdgeType::kNext: return "next"; } return "related"; };
+    json nodes = json::array();
+    size_t examined = 0;
+    for (size_t index = graph.offsets[found->second.node]; index < graph.offsets[found->second.node + 1] && examined < maximum; ++index) {
+        const auto& edge = graph.edges[index]; ++examined;
+        json node = {{"node_id", graph.node_ids[edge.target]}, {"node_type", graph.node_types[edge.target]}, {"label", graph.labels[edge.target]},
+            {"relationship", relation(edge.type)}, {"weight", edge.weight / 255.0}, {"expandable", graph.offsets[edge.target + 1] > graph.offsets[edge.target]}};
+        if (edge.target < graph.chunk_nodes) {
+            const size_t chunk_index = graph.global_chunks[edge.target]; if (!allowed.count(chunk_index)) continue; const auto& chunk = impl_->chunks[chunk_index];
+            node.update({{"chunk_id", chunk.id}, {"document_id", chunk.document_id}, {"version_id", chunk.version_id}, {"tenant_id", chunk.tenant},
+                {"access_scope", chunk.scope}, {"text", chunk.text}, {"source_uri", chunk.source_uri}, {"title", chunk.title},
+                {"ordinal", chunk.ordinal}, {"start_char", chunk.start}, {"end_char", chunk.end}});
+        }
+        nodes.push_back(std::move(node));
+    }
+    return {{"node_id", node_id}, {"node_type", graph.node_types[found->second.node]}, {"label", graph.labels[found->second.node]},
+        {"nodes", nodes}, {"examined", examined},
+        {"elapsed_ms", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count()},
+        {"can_expand_further", !nodes.empty()}};
+}
+
 json RagEngine::Evaluate(const json& request) {
     const size_t top_k = request.value("top_k", config_.server.top_k); const bool generate = request.value("generate", false); std::vector<double> latencies;
     double recalled = 0, reciprocal = 0, terms = 0, cited = 0; const auto& cases = request.at("cases");
@@ -427,6 +581,7 @@ json RagEngine::Health() const {
     std::lock_guard runtime_lock(impl_->mutex);
     return {{"status", "ok"}, {"ready", true}, {"implementation", "c++"}, {"chunks", impl_->chunks.size()}, {"pending_jobs", impl_->job_queue.size()},
         {"embedding_model_key", impl_->remote.identity}, {"remote_embedding_healthy", impl_->remote_healthy.load()},
+        {"graph_documents", impl_->graphs.size()}, {"graph_edges", impl_->graph_edges},
         {"local_embedding_available", impl_->local.Available()}, {"local_embedding_device", impl_->local.UsingGpu() ? "gpu" : "cpu"},
         {"remote_vector_rows", impl_->remote.dataset.RowCount()}, {"local_vector_rows", impl_->local_space.dataset.RowCount()}};
 }

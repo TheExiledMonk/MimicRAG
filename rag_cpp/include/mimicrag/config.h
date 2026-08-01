@@ -46,6 +46,11 @@ struct ServerConfig {
     size_t job_workers = 1;
     size_t trace_memory = 10000;
     std::string trace_path;
+    bool graph_enabled = true;
+    size_t graph_max_seeds = 5;
+    size_t graph_max_neighbors = 32;
+    size_t graph_max_section_children = 8;
+    double graph_min_seed_score = 0.01;
 };
 
 struct Config {

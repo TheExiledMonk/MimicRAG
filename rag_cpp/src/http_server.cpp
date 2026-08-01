@@ -88,6 +88,7 @@ void Handle(int socket, RagEngine& engine) {
         if (method == "POST" && path == "/v1/documents") Reply(socket, 200, engine.Ingest(input));
         else if (method == "POST" && path == "/v1/retrieve") Reply(socket, 200, engine.Retrieve(input));
         else if (method == "POST" && path == "/v1/evaluations") Reply(socket, 200, engine.Evaluate(input));
+        else if (method == "POST" && path == "/v1/graph/expand") Reply(socket, 200, engine.GraphExpand(input));
         else if (method == "POST" && path == "/v1/answers") {
             if (input.value("stream", false)) { StartSse(socket); try { auto result = engine.AnswerStream(input, [&](const std::string& token) { SendAll(socket, "data: " + json({{"type", "token"}, {"token", token}}).dump() + "\n\n"); }); SendAll(socket, "data: " + json({{"type", "complete"}, {"trace_id", result["trace_id"]}, {"citations", result["citations"]}}).dump() + "\n\ndata: [DONE]\n\n"); } catch (const std::exception& error) { SendAll(socket, "data: " + json({{"type", "error"}, {"error", error.what()}}).dump() + "\n\ndata: [DONE]\n\n"); } }
             else Reply(socket, 200, engine.Answer(input));
