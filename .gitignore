@@ -6,21 +6,43 @@ __pycache__/
 *.so
 *.egg-info/
 .venv/
+.test-venv/
+.pytest_cache/
+api/build/
 
-# C/C++ build artifacts
+# C/C++ and CMake
 *.o
 *.a
 *.so.*
-
-# CMake
 build/
+build-*/
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 CTestTestfile.cmake
-Makefile
+compile_commands.json
 
-# Local tooling
-*.swp
-.DS_Store
+# JavaScript / desktop bundles
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Runtime data, models, and generated state
 data/
+models/
+tmp_restart*/
+*.checkpoint.json
+*.mrg
+*.ivf
+*.idx
+content.dat
+content.manifest
+traces.jsonl
+mimicrag.json
+*.local_embedding.json
+
+# Local packaging and tooling
+*.swp
+*.swo
+.DS_Store
+*.log

@@ -57,9 +57,14 @@ temporary binary catalog and atomically publishes `catalog.mrg` after every lega
 record has replayed successfully. The legacy file is left untouched for explicit
 operator removal after verification.
 
-Catalog replay rebuilds both configured spaces. Tenant and access-scope predicates are
+Catalog replay restores both configured spaces. Persisted IVF vector blocks and the
+compact BM25 dictionary/postings are memory-mapped when their catalog generation and
+checksums match; stale or missing derived indexes are rebuilt. Sealed duplicate vector
+columns are released after IVF publication, article text remains disk-backed, and
+document metadata is interned once per version. Tenant and access-scope predicates are
 applied by the MimicDB engine before vectors are loaded and scored; superseded document
-versions are removed before fusion.
+versions are removed before fusion. Newly appended BM25 rows use a small heap delta
+until the next persisted-index rebuild.
 
 Endpoints are `/health`, `/ready`, `/v1/documents`, `/v1/retrieve`, `/v1/answers`, and
 OpenAI-compatible `/v1/chat/completions`. The HTTP server uses a bounded native worker

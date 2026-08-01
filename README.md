@@ -1,213 +1,414 @@
-# MimicDB
+# MimicDB / MimicRAG
 
-MimicDB is a minimal, high-performance columnar engine built around a single hot scan
-loop. The design is intentionally narrow: append-only data, explicit scan physics,
-mask-based predicates, and deterministic aggregates. It is a prototype database engine,
-but the performance targets are analytics-engine class.
+MimicRAG is a self-contained native C++ RAG runtime built on the MimicDB columnar and
+vector engine. One executable handles document ingestion, chunking, local or remote
+embeddings, hybrid BM25/vector retrieval, metadata filtering, document-graph
+navigation, cited answer generation, tracing, and evaluation.
 
-## What this is
+It does not require a Python runtime, separate vector database, search engine, graph
+database, or embedding server. Remote model APIs remain optional: embeddings can run
+in-process through the pinned `llama.cpp` submodule with Vulkan, CUDA, Metal, or CPU.
 
-- A C++ columnar engine with SoA layout and a predictable scan loop.
-- A strict split between engine physics and higher-level API logic.
-- A single-node prototype with a custom binary protocol and a thin Python API.
-- Built for scan throughput and straightforward aggregation.
+MimicDB, the underlying engine, is also available as a standalone columnar database
+with a native server, C++ API, compatibility layers, and management UI.
 
-## What this is not (v0)
+## Why MimicRAG
 
-- No SQL optimizer, joins, transactions, updates, or deletes.
-- No distributed or multi-node execution.
-- No full SQL engine. SQL is parsed and mapped to the fixed scan model.
+- One C++ executable and one data directory
+- Dense vector search plus exact BM25 with reciprocal-rank fusion
+- Custom IVF routing with adaptive shortlist and exact noise fallback
+- Predicate filtering before vector values are loaded and scored
+- Local GGUF embeddings on GPU with CPU fallback
+- OpenAI, Anthropic, Google, Cohere, Ollama, Azure OpenAI, and OpenAI-compatible chat
+- Custom provider URLs, model names, headers, and environment-based API keys
+- Tenant and access-scope filtering
+- Document, section, and chunk graph traversal for iterative research
+- OpenAI-compatible chat-completions endpoint and SSE streaming
+- Citations, bounded traces, background ingestion jobs, and golden-set evaluation
+- Disk-backed content and memory-mapped vector and lexical indexes
+- Append-only, checksummed binary catalog with partial-tail recovery
+
+## Architecture
+
+```text
+documents / Wikipedia dump
+          |
+          v
+  native chunker + graph builder
+          |
+          +---- local llama.cpp embeddings ----+
+          |                                     |
+          +---- remote embeddings (optional)    |
+                                                v
+                     +--------------------------+------------------+
+                     | MimicDB vector engine + mapped custom IVF   |
+                     | mapped BM25 + tenant/access predicates       |
+                     | reciprocal-rank fusion + bounded graph walk  |
+                     +--------------------------+------------------+
+                                                |
+                         disk-backed winning passages only
+                                                |
+                                                v
+                           cited answer / OpenAI-compatible stream
+```
+
+Search-critical structures are compact or memory-mapped. Article text is addressed by
+offset and read only for selected results. Document metadata is interned once per
+document version, and newly ingested lexical terms use a small heap overlay until the
+next persisted-index rebuild.
+
+## Current benchmark
+
+Measured on an AMD Ryzen 9 7950X3D and Radeon RX 7900 XTX using Vulkan, local Nomic
+Embed Text v1.5 embeddings, 10,000 real English Wikipedia articles, 148,671 chunks,
+768-dimensional vectors, and 930,440 graph edges:
+
+| Measurement | Result |
+|---|---:|
+| Warm startup | 4.31 s |
+| Ready-state RSS | 1.25 GiB |
+| Private/anonymous memory | 570 MiB |
+| Sequential end-to-end retrieval | 44.46 QPS |
+| Sequential average / p95 | 18.63 / 20.39 ms |
+| Eight-client retrieval | 249–256 QPS |
+| Eight-client p95 | 31–36 ms |
+
+These are end-to-end loopback HTTP results including local query embedding, BM25,
+vector search, filtering, fusion, graph expansion, passage loading, and JSON encoding.
+They are not directly comparable to ANN-only benchmarks that receive a precomputed
+query vector. Full methodology is in
+[`benchmarks/results/mimicrag_wikipedia_10000_2026-08-02.md`](benchmarks/results/mimicrag_wikipedia_10000_2026-08-02.md).
+
+## Status
+
+MimicRAG is suitable for evaluation and controlled single-node commercial deployments.
+It is not yet a distributed or high-availability database. Before using it for a
+mission-critical public service, put TLS in front of it and establish backups,
+monitoring, capacity limits, relevance tests, and recovery drills.
+
+## Prerequisites
+
+- Linux, macOS, or another C++20 platform
+- CMake 3.20 or newer
+- A C++20 compiler
+- Git and `pkg-config`
+- libcurl, BZip2, Zstandard, and nlohmann-json development packages
+- Optional Vulkan/CUDA/Metal development stack for GPU embeddings
+
+Example Ubuntu/Debian CPU build dependencies:
+
+```bash
+sudo apt update
+sudo apt install -y build-essential cmake git pkg-config curl \
+  libcurl4-openssl-dev libbz2-dev libzstd-dev nlohmann-json3-dev
+```
+
+For Vulkan builds, also install your vendor driver and distribution Vulkan development
+packages (commonly `libvulkan-dev`, `glslc`, and `libshaderc-dev`).
+
+## Clone and build
+
+Clone with the pinned `llama.cpp` submodule:
+
+```bash
+git clone --recurse-submodules https://github.com/YOUR_ACCOUNT/YOUR_REPOSITORY.git
+cd YOUR_REPOSITORY
+```
+
+If the repository was cloned without submodules:
+
+```bash
+git submodule update --init --recursive
+```
+
+Build an optimized native server with automatic GPU backend detection:
+
+```bash
+cmake -S . -B build-release \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DMIMICRAG_ENABLE_LLAMA=ON \
+  -DMIMICRAG_LLAMA_GPU=auto \
+  -DMIMICDB_NATIVE_ARCH=ON
+cmake --build build-release -j --target mimicrag_server
+```
+
+The executable is `build-release/rag_cpp/mimicrag_server`.
+
+GPU selection can be forced with `-DMIMICRAG_LLAMA_GPU=vulkan`, `cuda`, `metal`, or
+`cpu`. To build without in-process llama.cpp support, set
+`-DMIMICRAG_ENABLE_LLAMA=OFF`; remote embeddings or BM25-only fallback remain
+available.
+
+## Download a local embedding model
+
+The downloader selects a larger Qwen embedding model on GPUs with at least 5 GiB VRAM
+and a smaller Nomic model on CPU or lower-memory hosts:
+
+```bash
+scripts/download_embedding_model.sh
+```
+
+Override detection when needed:
+
+```bash
+scripts/download_embedding_model.sh --gpu
+scripts/download_embedding_model.sh --cpu
+scripts/download_embedding_model.sh --output-dir /var/lib/mimicrag/models
+```
+
+Downloads are resumable and validated for minimum size and GGUF magic. The script also
+writes `mimicrag.local_embedding.json`; copy its `local_embedding` object into your
+runtime configuration.
+
+## Configure
+
+```bash
+cp mimicrag.example.json mimicrag.json
+```
+
+Edit `mimicrag.json` so `local_embedding.model_path` matches the downloaded model.
+Keep secrets in environment variables, not JSON or Git:
+
+```bash
+export MIMICRAG_API_KEY='replace-with-a-long-random-server-key'
+export OPENAI_API_KEY='provider-key-if-used'
+```
+
+Set `embedding.provider` to `local` to make the embedded GGUF model primary. With a
+remote embedding provider and `local_embedding.eager_dual_index=true`, MimicRAG keeps
+separate compatible vector spaces and automatically falls back to the local model.
+Anthropic does not provide embeddings, so use the local fallback or another embedding
+provider with Anthropic chat.
+
+Recognized provider defaults include `openai`, `anthropic`, `google`, `cohere`,
+`ollama`, `groq`, `mistral`, `xai`, `deepseek`, and `together`. Use
+`openai_compatible` plus `base_url` for vLLM, llama.cpp server, MiniMax-compatible
+gateways, or other compatible services. Azure OpenAI uses `azure_openai` and
+`api_version`.
+
+## Run
+
+```bash
+./build-release/rag_cpp/mimicrag_server serve --config mimicrag.json
+```
+
+Equivalent positional configuration syntax is supported:
+
+```bash
+./build-release/rag_cpp/mimicrag_server mimicrag.json
+```
+
+Check readiness:
+
+```bash
+curl -fsS http://127.0.0.1:8080/health \
+  -H "Authorization: Bearer $MIMICRAG_API_KEY"
+```
+
+## Ingest and retrieve
+
+Ingest a local document:
+
+```bash
+./build-release/rag_cpp/mimicrag_server ingest handbook.md \
+  --config mimicrag.json \
+  --tenant acme \
+  --source-uri file:///knowledge/handbook.md \
+  --title 'Company handbook'
+```
+
+Or use HTTP:
+
+```bash
+curl -fsS http://127.0.0.1:8080/v1/documents \
+  -H "Authorization: Bearer $MIMICRAG_API_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "text":"MimicRAG combines vector, lexical, and graph retrieval.",
+    "source_uri":"docs://overview",
+    "title":"Overview",
+    "tenant_id":"acme",
+    "access_scope":"engineering"
+  }'
+```
+
+Retrieve evidence without generating an answer:
+
+```bash
+curl -fsS http://127.0.0.1:8080/v1/retrieve \
+  -H "Authorization: Bearer $MIMICRAG_API_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "query":"How does retrieval work?",
+    "tenant_id":"acme",
+    "access_scope":"engineering",
+    "top_k":5
+  }'
+```
+
+Generate a cited answer:
+
+```bash
+curl -fsS http://127.0.0.1:8080/v1/answers \
+  -H "Authorization: Bearer $MIMICRAG_API_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "query":"How does retrieval work?",
+    "tenant_id":"acme",
+    "access_scope":"engineering",
+    "top_k":5
+  }'
+```
+
+The `/v1/chat/completions` route accepts OpenAI-style messages and supports
+`"stream":true` over server-sent events. Its response includes MimicRAG trace,
+citation, and embedding-backend metadata.
+
+## Graph deep dives
+
+Every retrieval hit contains a stable `node_id`. Explore its document structure
+without another global vector search:
+
+```bash
+curl -fsS http://127.0.0.1:8080/v1/graph/expand \
+  -H "Authorization: Bearer $MIMICRAG_API_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "node_id":"NODE_ID_FROM_RETRIEVAL",
+    "tenant_id":"acme",
+    "access_scope":"engineering",
+    "max_neighbors":16
+  }'
+```
+
+Returned document, section, and chunk nodes are individually expandable, enabling an
+agent to move upward, downward, and sideways through related evidence.
+
+## Wikipedia ingestion
+
+The native importer streams plain XML or Wikimedia multistream BZip2 dumps without
+materializing the decompressed file. Validate parsing first:
+
+```bash
+./build-release/rag_cpp/mimicrag_server wiki-ingest /data/enwiki.xml.bz2 \
+  --config mimicrag.json --limit 10000 --dry-run --no-resume
+```
+
+Then ingest with a resumable checkpoint:
+
+```bash
+./build-release/rag_cpp/mimicrag_server wiki-ingest /data/enwiki.xml.bz2 \
+  --config mimicrag.json \
+  --tenant wikipedia \
+  --limit 10000 \
+  --checkpoint /var/lib/mimicrag/enwiki.checkpoint.json
+```
+
+The importer retains main-namespace non-redirect articles and preserves headings for
+graph construction.
+
+## API summary
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/health`, `/ready` | Readiness and index/storage state |
+| `POST` | `/v1/documents` | Versioned document ingestion |
+| `POST` | `/v1/retrieve` | Hybrid evidence retrieval |
+| `POST` | `/v1/answers` | Cited RAG answer, optionally SSE |
+| `POST` | `/v1/chat/completions` | OpenAI-compatible chat endpoint |
+| `POST` | `/v1/graph/expand` | Bounded structural deep dive |
+| `POST` | `/v1/evaluations` | Golden-set evaluation |
+| `GET` | `/v1/jobs/{id}` | Background-ingestion job state |
+| `GET` | `/v1/traces`, `/v1/traces/{id}` | Retrieval and answer traces |
+
+## Persistence
+
+The configured `server.data_path` contains all runtime state:
+
+- `catalog.mrg`: append-only, checksummed catalog with compressed metadata and vectors
+- `content.dat`: disk-backed chunk text addressed by byte offsets
+- `content.manifest`: content/catalog generation match
+- `local.ivf` / `remote.ivf`: persisted, memory-mapped vector indexes
+- `lexical.idx`: compact memory-mapped BM25 dictionary, lengths, and postings
+- trace JSONL and optional Wikipedia checkpoint
+
+Back up the whole directory as one consistency unit while ingestion is stopped. The
+catalog can recover a truncated final append and stale derived indexes are rebuilt, but
+this is not a substitute for tested backups.
+
+## Production deployment
+
+A sample unit is provided at [`deploy/mimicrag_cpp.service`](deploy/mimicrag_cpp.service),
+with a complete installation, TLS, backup, restore, upgrade, and monitoring guide in
+[`docs/deployment.md`](docs/deployment.md).
+Adjust its paths, copy configuration to `/etc/mimicdb/mimicrag.json`, put secrets in
+`/etc/mimicdb/mimicrag.env`, and make `server.data_path` writable by the service user.
+
+The native HTTP listener is IPv4 HTTP, not TLS. Bind to loopback or a private network
+and place a TLS reverse proxy or load balancer in front of it. Set `server.api_key_env`,
+restrict filesystem permissions, and never commit provider keys.
+
+Recommended production checks:
+
+- Backup and restore rehearsal
+- Golden-query relevance regression suite
+- Sustained ingestion/query soak test
+- Memory, disk, latency, error-rate, and provider monitoring
+- Per-tenant rate and storage policy
+- Reverse-proxy request limits and TLS
+- API-key rotation and incident procedure
+
+## Tests
+
+```bash
+ctest --test-dir build-release --output-on-failure
+```
+
+Focused native RAG tests include catalog recovery, Wikipedia parsing, HTTP retrieval,
+graph expansion, provider streaming, evaluation, and vector-index persistence. Some
+legacy CLI/API tests require the optional Python dependencies in `requirements.txt`.
 
 ## Repository layout
 
-- `engine/`: core C++ columnar engine.
-- `server/`: TCP server exposing the wire protocol and auth layer.
-- `client/`: Python client for the protocol (secure channel + auth).
-- `api/`: Python API layer and adapters.
-- `api_cpp/`: C++ API helpers.
-- `management_ui/`: FastAPI service and React UI.
-- `tests/`: C++ and Python tests.
+- `rag_cpp/`: native MimicRAG executable and HTTP API
+- `engine/`: MimicDB columnar, SIMD, vector, IVF, and Vulkan engine
+- `server/`: MimicDB binary-protocol database server
+- `api_cpp/`: C++ API and compatibility helpers
+- `client/`, `api/`: legacy/reference Python clients and adapters
+- `management_ui/`: optional management service and desktop/web UI
+- `benchmarks/`: engine and RAG benchmarks with recorded results
+- `docs/`: design, security, API, and operational documentation
+- `scripts/`: model download and smoke-test helpers
+- `deploy/`: deployment templates
 
-## Build and run
+## MimicDB engine
 
-Build the C++ binaries:
+The underlying MimicDB engine remains independently usable for append-oriented
+columnar workloads. It includes mask-based predicates, deterministic aggregates,
+segment persistence/compression, SIMD execution, a custom binary server protocol,
+vector search, adaptive multicore execution, and optional Vulkan residency. See
+[`docs/design.md`](docs/design.md), [`docs/mimicapi.md`](docs/mimicapi.md), and
+[`docs/security_v1.md`](docs/security_v1.md).
 
-```
-cmake -S . -B build
-cmake --build build
-```
+## Limitations
 
-Build the Python extension:
+- Single-node runtime; no replication or automatic failover
+- Append/version model rather than general transactions and arbitrary updates
+- Native HTTP API supports bearer authentication but does not terminate TLS
+- Large-corpus recall and performance still require workload-specific validation
+- Index formats are versioned but rolling-upgrade tooling is not yet complete
+- Not a general-purpose graph-query engine
 
-```
-python3.12 -m venv --system-site-packages .venv
-.venv/bin/python api/setup.py build_ext --inplace
-```
+## License
 
-Run tests:
+No open-source license has been selected yet. Until a `LICENSE` file is added, the
+source is publicly visible but normal copyright restrictions apply. Choose and add a
+license before inviting external reuse or contributions.
 
-```
-ctest --test-dir build --output-on-failure
-PYTHONPATH=api .venv/bin/python -m unittest tests/test_python_api.py
-```
+## Further documentation
 
-## Security v1 summary
-
-Security is implemented from day one:
-
-- Public key authentication only (Ed25519 identity, X25519 key exchange).
-- Encrypted transport (HKDF-SHA256, ChaCha20-Poly1305).
-- Server-side authorization with explicit capabilities + scopes.
-- Local-only bootstrap and root init.
-- Dedicated internal auth database `__auth__`.
-
-See `docs/security_v1.md` for full protocol and workflow details.
-
-## Benchmarks (best-case, light and optimal scenarios)
-
-All numbers below are best-case, warm, and tuned for ideal paths. Treat them as
-upper bounds, not production baselines.
-
-### 1) Native engine (dataset path) — headline
-
-Query throughput:
-
-```
-Rows     Time        Rows/sec
-200k     0.00207 s   96.7 M
-1M       0.00797 s   125.4 M
-5M       0.03989 s   125.3 M
-```
-
-Key observations:
-- Crossed the 100M rows/sec barrier.
-- Scaling is linear after warm-up.
-- 1M and 5M converge: memory + SIMD fully saturated.
-- Single vs multi aggregates are identical: aggregation overhead is gone.
-- This is no longer "fast for a database".
-- This is vectorized analytics-engine class performance.
-
-### 2) MimicAPI overhead (native API)
-
-```
-Rows     Time        Rows/sec
-200k     0.00213 s   93.8 M
-1M       0.00798 s   125.3 M
-5M       0.03982 s   125.5 M
-```
-
-Conclusion:
-- MimicAPI is now statistically free.
-- Zero structural penalty.
-- This is effectively the same engine path.
-
-### 3) MongoDB compatibility layer (mongodb_cpp)
-
-Query throughput:
-
-```
-Rows     Time        Rows/sec
-200k     0.00327 s   61.2 M
-1M       0.01614 s   61.9 M
-5M       0.08248 s   60.6 M
-```
-
-What this means:
-- Exactly ~1/2 of native throughput.
-- Perfect linearity.
-- Single-aggregate path runs at native speed.
-- Multi-aggregate path doubles work (expected with Mongo semantics).
-- For a Mongo-compatible aggregation model, ~60M rows/sec is exceptional.
-
-### 4) SQL dialect execution (engine-side SQL)
-
-Query throughput (all dialects):
-
-```
-Rows     Time        Rows/sec
-200k     ~0.00252 s  ~79 M
-1M       ~0.0102 s   ~98 M
-5M       ~0.050 s    ~100 M
-```
-
-Important facts:
-- ANSI / Postgres / MySQL / SQLite / Oracle / SQL Server are indistinguishable.
-- DuckDB dialect is aligned.
-- SQL semantics retain ~80-85% of native engine speed.
-- Above real PostgreSQL / MySQL / SQLite and on par or faster than DuckDB scans.
-
-### 5) Append performance (steady-state)
-
-Append is stable across all paths:
-- 1.3-1.35 M rows/sec.
-- Linear scaling.
-- Mongo layer pays expected semantic cost.
-- SQL append identical across dialects.
-
-### 6) C++ API vs Python baseline (sanity check)
-
-```
-Query path            Time       Speed
-C++ API               0.00255 s  ~78 M rows/sec
-Python baseline       0.03087 s  ~6.5 M rows/sec
-```
-
-This confirms:
-- Python overhead is ~12x (expected).
-- C++ core matches SQL-layer numbers.
-- No hidden slow path.
-
-### 7) What actually changed
-
-At this point:
-- Further gains are single-digit percent.
-- Any change will be micro-architectural or NUMA-related.
-- You are at the realistic ceiling for a single socket.
-
-Final assessment:
-- Native engine: ~125M rows/sec.
-- SQL dialects: ~100M rows/sec.
-- MongoDB layer: ~60M rows/sec.
-- API overhead: effectively zero.
-
-## Hybrid CPU/Vulkan vector execution
-
-Vector search keeps immutable sealed segments resident in device-local GPU memory when
-Vulkan and shaderc are available. The automatic router retains small or selective searches
-on the SIMD CPU path and sends sufficiently large scoring workloads to Vulkan. Active rows
-remain immediately searchable on CPU and are merged with GPU results.
-
-Runtime controls:
-
-- `MIMICDB_VECTOR_BACKEND=auto` (default), `cpu`, or `vulkan`
-- `MIMICDB_VECTOR_GPU_MIN_ELEMENTS`: optional fixed crossover override measured as
-  `candidate_count * dimension`; without it, MimicDB benchmarks CPU and Vulkan on the
-  first resident vector workload and learns the crossover for that process
-- `MIMICDB_VECTOR_GPU_MAX_BYTES`: process-wide residency budget (default: 4 GiB);
-  fields that do not fit transparently stay on CPU
-- `MIMICDB_VECTOR_CPU_THREADS`: bounded CPU vector worker count (defaults to detected
-  hardware concurrency)
-- `MIMICDB_VECTOR_PIN_THREADS=1`: pin persistent vector workers to logical CPUs; useful
-  on dedicated hosts, but disabled by default because container/NUMA topology varies
-- `MIMICDB_IVF_MAX_ASSIGNMENT_DISTANCE`: cosine clusterability cutoff for automatic IVF
-  (default: `0.35`); fields above it use exact CPU/Vulkan search unless probes are explicit
-
-The server's existing `query_threads` setting configures the same persistent vector worker
-pool. Embedded applications can call `ConfigureVectorSearchThreads()` before their first
-vector query.
-
-The server preloads new sealed vector segments during append processing, outside query
-latency. Embedded users can call `PreloadVectorField()` explicitly during warm-up.
-Vector-bearing server datasets currently retain their sealed CPU segments as well, ensuring
-the normal segment-cache eviction policy cannot remove rows from exact search results.
-IVF indexes are saved beside dataset segments as versioned `.ivf` sidecars. Recovery checks
-the schema, sealed-row generation, and payload checksum before publishing an index. Missing,
-stale, or corrupt sidecars are rebuilt by idle maintenance; approximate requests use exact
-CPU/Vulkan search until the replacement is ready.
-
-## Integrated MimicRAG
-
-MimicRAG is implemented by the native C++ `mimicrag_server`. It provides versioned
-ingestion, hybrid vector/BM25 retrieval, generation, streaming, evaluation, jobs, and
-tracing without a Python runtime. It embeds llama.cpp directly for GPU/CPU local
-embedding fallback; see `mimicrag.example.json` and `docs/mimicrag_cpp.md`.
+- [`docs/mimicrag_cpp.md`](docs/mimicrag_cpp.md): native runtime details
+- [`docs/design.md`](docs/design.md): MimicDB architecture and durability
+- [`docs/security_v1.md`](docs/security_v1.md): database protocol security
+- [`docs/security_setup_howto.md`](docs/security_setup_howto.md): security setup
+- [`benchmarks/results/`](benchmarks/results/): reproducible benchmark records
