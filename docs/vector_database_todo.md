@@ -50,6 +50,7 @@
 - [x] Maintain an append-sensitive micro-index for the mutable active segment.
 - [x] Benchmark recall across a query suite instead of relying on a single query.
 - [x] Reduce learned routing to 32 dimensions after a recall-gated projection sweep.
+- [x] Scale broad-probe shortlist capacity by probe pressure, candidate volume, and routing confidence.
 - [ ] Persist a versioned per-segment IVF sidecar and load it during recovery.
 - [ ] Rebuild changed sealed indexes in the background rather than on the first ANN query.
 - [ ] Add representative-dataset recall calibration for automatic default probe selection.

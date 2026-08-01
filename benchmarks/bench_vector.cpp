@@ -125,7 +125,9 @@ int main(int argc, char** argv) {
               << " routing_dimensions=" << ivf.routing_dimensions
               << " candidates=" << ivf.candidates
               << " shortlisted=" << ivf.shortlisted
+              << " shortlist_limit=" << ivf.shortlist_limit
               << " lists_pruned=" << ivf.lists_pruned
+              << " routing_confidence=" << ivf.routing_confidence
               << " routing_seconds=" << ivf.routing_seconds
               << " shortlist_seconds=" << ivf.shortlist_seconds
               << " rerank_seconds=" << ivf.rerank_seconds

@@ -406,11 +406,19 @@ bool VectorSearchIvf(const Dataset& dataset, size_t field, const float* query,
     }
 
     const auto shortlist_start=Clock::now();
-    size_t shortlist_limit=std::max<size_t>(top_k*32,1024);
+    const double routing_confidence=ranked.size()>1
+        ? std::max(0.0,double(ranked[1].first-ranked[0].first)) /
+          std::max(1e-3,std::fabs(double(ranked[0].first))) : 1.0;
+    const size_t base_shortlist=std::max<size_t>(top_k*32,1024);
+    const size_t probe_factor=std::max<size_t>(1,(probes*4+index->centroids-1)/index->centroids);
+    size_t shortlist_limit=std::max({base_shortlist*probe_factor,
+                                     (positions.size()+15)/16,base_shortlist});
+    if(routing_confidence<0.25) shortlist_limit=std::max(shortlist_limit,base_shortlist*4);
     if (const char* value=std::getenv("MIMICDB_IVF_SHORTLIST")) { const size_t parsed=std::strtoull(value,nullptr,10); if(parsed) shortlist_limit=std::max(parsed,top_k); }
+    shortlist_limit=std::min(shortlist_limit,positions.size());
     // Predicate paths retain all row IDs: the existing scorer intersects predicates before full vectors.
-    const size_t shortlist_crossover=std::max<size_t>(16384,shortlist_limit*4);
-    const bool use_shortlist=predicates.empty() && positions.size()>shortlist_crossover;
+    const bool use_shortlist=predicates.empty() && positions.size()>16384 &&
+                             positions.size()>shortlist_limit;
     if (use_shortlist) {
         std::vector<int16_t> quantized(index->routing_dimensions);
         for(size_t d=0;d<index->routing_dimensions;++d) quantized[d]=int16_t(std::clamp(
@@ -488,6 +496,7 @@ bool VectorSearchIvf(const Dataset& dataset, size_t field, const float* query,
         last_stats={}; last_stats.indexed_rows=index->rows; last_stats.centroid_count=index->centroids;
         last_stats.probes=probes; last_stats.candidates=candidates; last_stats.routing_dimensions=index->routing_dimensions;
         last_stats.builds=index->builds; last_stats.shortlisted=rows.size(); last_stats.lists_pruned=pruned;
+        last_stats.shortlist_limit=shortlist_limit; last_stats.routing_confidence=routing_confidence;
         last_stats.routing_seconds=routing_seconds; last_stats.shortlist_seconds=shortlist_seconds;
         last_stats.rerank_seconds=rerank_seconds; last_stats.build_seconds=index->build_seconds;
         last_key={&dataset,field,metric};
