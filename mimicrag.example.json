@@ -28,6 +28,8 @@
     "answer_max_tokens": 1024,
     "data_path": "data/mimicrag_cpp",
     "worker_threads": 0,
+    "job_workers": 1,
+    "trace_memory": 10000,
     "trace_path": "data/mimicrag/traces.jsonl"
   },
   "chat": {

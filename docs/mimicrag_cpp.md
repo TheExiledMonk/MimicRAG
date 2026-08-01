@@ -53,3 +53,18 @@ Endpoints are `/health`, `/ready`, `/v1/documents`, `/v1/retrieve`, `/v1/answers
 OpenAI-compatible `/v1/chat/completions`. The HTTP server uses a bounded native worker
 pool, request-size limits, bearer authentication, constant-time key comparison, and
 rate limiting.
+
+Native parity endpoints also include `GET /v1/jobs/{id}`, `GET /v1/traces/{id}`,
+`GET /v1/traces?limit=N`, and `POST /v1/evaluations`. Answer and OpenAI-compatible
+streams forward provider tokens immediately over SSE. Prompt-injection assessments,
+retrieval details, provider/model identity, latency, and citations are recorded in the
+bounded trace store and JSONL trace file.
+
+The executable replaces the Python CLI as well:
+
+```bash
+mimicrag_server ingest document.txt --config mimicrag.json --tenant acme
+mimicrag_server query "What does the document say?" --config mimicrag.json --tenant acme
+mimicrag_server evaluate golden-set.json --config mimicrag.json
+mimicrag_server --config mimicrag.json serve
+```

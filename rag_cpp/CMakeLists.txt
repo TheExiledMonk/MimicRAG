@@ -68,4 +68,12 @@ if(MIMICDB_BUILD_TESTS)
     add_test(NAME mimicrag_cpp_smoke
         COMMAND ${PROJECT_SOURCE_DIR}/scripts/mimicrag_cpp_smoke_test.sh
                 $<TARGET_FILE:mimicrag_server> ${PROJECT_SOURCE_DIR}/tests/mimicrag_cpp_test.json)
+    add_executable(mimicrag_provider_stream_smoke tests/provider_stream_smoke.cpp src/provider.cpp src/config.cpp)
+    target_include_directories(mimicrag_provider_stream_smoke PRIVATE include)
+    target_link_libraries(mimicrag_provider_stream_smoke PRIVATE CURL::libcurl nlohmann_json::nlohmann_json Threads::Threads)
+    add_test(NAME mimicrag_provider_stream_smoke COMMAND mimicrag_provider_stream_smoke)
+    add_test(NAME mimicrag_cpp_evaluate_cli
+        COMMAND $<TARGET_FILE:mimicrag_server> evaluate ${PROJECT_SOURCE_DIR}/tests/mimicrag_cpp_golden.json
+                --config ${PROJECT_SOURCE_DIR}/tests/mimicrag_cpp_test.json)
+    set_tests_properties(mimicrag_cpp_evaluate_cli PROPERTIES DEPENDS mimicrag_cpp_smoke PASS_REGULAR_EXPRESSION "\"recall_at_k\": 1.0")
 endif()

@@ -35,11 +35,8 @@ void Reply(int socket, int status, const json& body, const std::string& content_
     SendAll(socket, response.str());
 }
 
-void ReplySse(int socket, const json& chunk) {
-    const std::string encoded = "data: " + chunk.dump() + "\n\ndata: [DONE]\n\n";
-    std::ostringstream response;
-    response << "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nContent-Length: " << encoded.size() << "\r\nConnection: close\r\n\r\n" << encoded;
-    SendAll(socket, response.str());
+void StartSse(int socket) {
+    SendAll(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nX-Accel-Buffering: no\r\nConnection: close\r\n\r\n");
 }
 
 bool ConstantEqual(const std::string& left, const std::string& right) {
@@ -49,12 +46,13 @@ bool ConstantEqual(const std::string& left, const std::string& right) {
     return difference == 0;
 }
 
-bool RateAllowed(size_t limit) {
+bool RateAllowed(const std::string& identity, size_t limit) {
     if (!limit) return true;
     static std::mutex mutex;
-    static std::deque<std::chrono::steady_clock::time_point> events;
+    static std::unordered_map<std::string, std::deque<std::chrono::steady_clock::time_point>> identities;
     const auto now = std::chrono::steady_clock::now();
     std::lock_guard lock(mutex);
+    auto& events = identities[identity];
     while (!events.empty() && now - events.front() >= std::chrono::minutes(1)) events.pop_front();
     if (events.size() >= limit) return false;
     events.push_back(now);
@@ -80,21 +78,30 @@ void Handle(int socket, RagEngine& engine) {
         const std::string expected = ResolveServerKey(engine.GetConfig().server);
         std::string supplied = fields["authorization"]; if (supplied.rfind("Bearer ", 0) == 0) supplied.erase(0, 7);
         if (!expected.empty() && !ConstantEqual(supplied, expected)) { Reply(socket, 401, {{"error", "invalid API key"}}); return; }
-        if (!RateAllowed(engine.GetConfig().server.requests_per_minute)) { Reply(socket, 429, {{"error", "rate limit exceeded"}}); return; }
+        const std::string identity = supplied.empty() ? fields["x-forwarded-for"] : supplied;
+        if (!RateAllowed(identity, engine.GetConfig().server.requests_per_minute)) { Reply(socket, 429, {{"error", "rate limit exceeded"}}); return; }
         if (method == "GET" && (path == "/health" || path == "/ready")) { Reply(socket, 200, engine.Health()); return; }
+        if (method == "GET" && path.rfind("/v1/jobs/", 0) == 0) { Reply(socket, 200, engine.Job(path.substr(9))); return; }
+        if (method == "GET" && path.rfind("/v1/traces/", 0) == 0) { Reply(socket, 200, engine.Trace(path.substr(11))); return; }
+        if (method == "GET" && path.rfind("/v1/traces", 0) == 0) { size_t limit = 100; const auto marker = path.find("limit="); if (marker != std::string::npos) limit = std::stoull(path.substr(marker + 6)); Reply(socket, 200, {{"traces", engine.RecentTraces(std::min<size_t>(limit, 1000))}}); return; }
         const json input = body.empty() ? json::object() : json::parse(body);
         if (method == "POST" && path == "/v1/documents") Reply(socket, 200, engine.Ingest(input));
         else if (method == "POST" && path == "/v1/retrieve") Reply(socket, 200, engine.Retrieve(input));
-        else if (method == "POST" && path == "/v1/answers") Reply(socket, 200, engine.Answer(input));
+        else if (method == "POST" && path == "/v1/evaluations") Reply(socket, 200, engine.Evaluate(input));
+        else if (method == "POST" && path == "/v1/answers") {
+            if (input.value("stream", false)) { StartSse(socket); try { auto result = engine.AnswerStream(input, [&](const std::string& token) { SendAll(socket, "data: " + json({{"type", "token"}, {"token", token}}).dump() + "\n\n"); }); SendAll(socket, "data: " + json({{"type", "complete"}, {"trace_id", result["trace_id"]}, {"citations", result["citations"]}}).dump() + "\n\ndata: [DONE]\n\n"); } catch (const std::exception& error) { SendAll(socket, "data: " + json({{"type", "error"}, {"error", error.what()}}).dump() + "\n\ndata: [DONE]\n\n"); } }
+            else Reply(socket, 200, engine.Answer(input));
+        }
         else if (method == "POST" && path == "/v1/chat/completions") {
             std::string query; for (auto it = input.at("messages").rbegin(); it != input.at("messages").rend(); ++it) if (it->value("role", "") == "user") { query = it->value("content", ""); break; }
-            json adapted = {{"query", query}, {"tenant_id", input.value("tenant_id", "default")}, {"access_scope", input.value("access_scope", "public")}, {"top_k", input.value("top_k", engine.GetConfig().server.top_k)}};
-            auto answer = engine.Answer(adapted);
+            json options = json::object(); for (const auto& key : {"max_tokens", "temperature", "top_p", "stop"}) if (input.contains(key)) options[key] = input[key];
+            json adapted = {{"query", query}, {"tenant_id", input.value("tenant_id", "default")}, {"access_scope", input.value("access_scope", "public")}, {"top_k", input.value("top_k", engine.GetConfig().server.top_k)}, {"options", options}, {"conversation", input.at("messages")}};
             if (input.value("stream", false)) {
-                ReplySse(socket, {{"id", "chatcmpl-cpp"}, {"object", "chat.completion.chunk"}, {"model", engine.GetConfig().chat.model}, {"choices", json::array({{{"index", 0}, {"delta", {{"content", answer["answer"]}}}, {"finish_reason", "stop"}}})}});
-            } else Reply(socket, 200, {{"id", "chatcmpl-cpp"}, {"object", "chat.completion"}, {"model", engine.GetConfig().chat.model}, {"choices", json::array({{{"index", 0}, {"message", {{"role", "assistant"}, {"content", answer["answer"]}}}, {"finish_reason", "stop"}}})}, {"mimicrag", {{"trace_id", answer["trace_id"]}, {"citations", answer["citations"]}, {"embedding_backend", answer["embedding_backend"]}}}});
+                StartSse(socket); try { engine.AnswerStream(adapted, [&](const std::string& token) { SendAll(socket, "data: " + json({{"id", "chatcmpl-cpp"}, {"object", "chat.completion.chunk"}, {"model", engine.GetConfig().chat.model}, {"choices", json::array({{{"index", 0}, {"delta", {{"content", token}}}, {"finish_reason", nullptr}}})}}).dump() + "\n\n"); }); } catch (const std::exception& error) { SendAll(socket, "data: " + json({{"error", {{"message", error.what()}, {"type", "provider_error"}}}}).dump() + "\n\n"); } SendAll(socket, "data: [DONE]\n\n");
+            } else { auto answer = engine.Answer(adapted); Reply(socket, 200, {{"id", "chatcmpl-cpp"}, {"object", "chat.completion"}, {"model", engine.GetConfig().chat.model}, {"choices", json::array({{{"index", 0}, {"message", {{"role", "assistant"}, {"content", answer["answer"]}}}, {"finish_reason", "stop"}}})}, {"mimicrag", {{"trace_id", answer["trace_id"]}, {"citations", answer["citations"]}, {"embedding_backend", answer["embedding_backend"]}}}}); }
         } else Reply(socket, 404, {{"error", "not found"}});
-    } catch (const std::exception& error) { Reply(socket, 400, {{"error", error.what()}}); }
+    } catch (const std::out_of_range& error) { Reply(socket, 404, {{"error", error.what()}}); }
+      catch (const std::exception& error) { Reply(socket, 400, {{"error", error.what()}}); }
     ::close(socket);
 }
 }  // namespace

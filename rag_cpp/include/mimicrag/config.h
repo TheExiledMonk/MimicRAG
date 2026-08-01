@@ -15,6 +15,8 @@ struct ModelConfig {
     std::string api_key_env;
     std::string api_version;
     long timeout_seconds = 60;
+    int max_retries = 2;
+    std::unordered_map<std::string, std::string> headers;
 };
 
 struct LocalEmbeddingConfig {
@@ -40,6 +42,10 @@ struct ServerConfig {
     size_t top_k = 10;
     size_t worker_threads = 0;
     size_t requests_per_minute = 120;
+    size_t answer_max_tokens = 1024;
+    size_t job_workers = 1;
+    size_t trace_memory = 10000;
+    std::string trace_path;
 };
 
 struct Config {

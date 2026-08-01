@@ -1,0 +1,8 @@
+[
+  {
+    "query": "native vector retrieval",
+    "relevant_source_uris": ["smoke://guide"],
+    "tenant_id": "smoke",
+    "access_scope": "public"
+  }
+]
