@@ -10,6 +10,21 @@ access scopes; a filter error means an unauthorized hit escaped its predicate.
 | 600 | 306.5 | 57.5 | 17.43 ms | 19.61 ms | 20.71 ms | 382.1 | 28.86 ms | 1.00 / 1.00 | 0 | 134.5 ms |
 | 5,000 | 312.0 | 29.4 | 33.91 ms | 37.14 ms | 45.15 ms | 50.6 | 188.48 ms | 1.00 / 1.00 | 0 | 857.1 ms |
 
+## Post-optimization result
+
+The catalog now uses shared read locking and builds immutable BM25 postings during
+ingestion instead of tokenizing every visible chunk for every request.
+
+| Corpus | Sequential QPS | p50 | p95 | 8-thread QPS | concurrent p50 | concurrent p95 | R@1 / R@10 | filter errors |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 600 | 64.1 | 15.86 ms | 17.89 ms | 399.1 | 18.50 ms | 27.63 ms | 1.00 / 1.00 | 0 |
+| 5,000 | 63.6 | 15.92 ms | 18.00 ms | 398.7 | 18.36 ms | 27.23 ms | 1.00 / 1.00 | 0 |
+
+At 5,000 rows this is a 2.17x sequential and 7.88x eight-thread throughput gain.
+Sixteen threads reached 405.6 QPS but raised p50 to 36.78 ms, so eight workers are the
+better latency/throughput operating point on this host. Corpus growth from 600 to
+5,000 rows is effectively flat after the change.
+
 The 5,000-document run crosses the 4,096-row segment boundary and exercises custom
 IVF plus its active-row overlay. It initially exposed an IVF crash: predicate-bound
 construction read numeric raw storage after compression released it. The benchmark

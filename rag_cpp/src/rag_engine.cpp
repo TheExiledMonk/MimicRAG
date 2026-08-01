@@ -15,6 +15,7 @@
 #include <iomanip>
 #include <random>
 #include <regex>
+#include <shared_mutex>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -99,6 +100,7 @@ struct RagEngine::Impl {
         local_space.identity = local.Identity();
         std::filesystem::create_directories(data_path);
         if (trace_path.has_parent_path()) std::filesystem::create_directories(trace_path.parent_path());
+        trace_output.open(trace_path, std::ios::app);
         const size_t workers = std::max<size_t>(1, config.server.job_workers);
         for (size_t i = 0; i < workers; ++i) job_threads.emplace_back([this] { Work(); });
     }
@@ -109,11 +111,14 @@ struct RagEngine::Impl {
     VectorSpace remote;
     VectorSpace local_space;
     std::vector<Chunk> chunks;
+    std::vector<size_t> lexical_lengths;
+    std::unordered_map<std::string, std::vector<std::pair<size_t, uint16_t>>> lexical_postings;
     std::unordered_map<std::string, std::string> current_versions;
     std::unordered_map<std::string, size_t> current_generations;
     std::unordered_map<std::string, size_t> current_chunk_counts;
     std::filesystem::path data_path;
     mutable std::mutex mutex;
+    mutable std::shared_mutex state_mutex;
     std::mutex local_embedding_mutex;
     std::atomic<bool> remote_healthy{true};
     std::unordered_map<std::string, json> jobs;
@@ -125,11 +130,14 @@ struct RagEngine::Impl {
     std::deque<std::string> trace_order;
     size_t trace_memory;
     std::filesystem::path trace_path;
+    std::mutex trace_file_mutex;
+    std::ofstream trace_output;
 
     void AddTrace(json trace) {
         const std::string id = trace.at("trace_id");
         { std::lock_guard lock(mutex); traces[id] = trace; trace_order.push_back(id); while (trace_order.size() > trace_memory) { traces.erase(trace_order.front()); trace_order.pop_front(); } }
-        std::ofstream output(trace_path, std::ios::app); output << trace.dump() << '\n';
+        std::lock_guard file_lock(trace_file_mutex);
+        if (trace_output) trace_output << trace.dump() << '\n';
     }
 
     std::string Submit(std::string kind, std::function<json()> action) {
@@ -161,29 +169,23 @@ struct RagEngine::Impl {
     std::vector<std::pair<size_t, double>> Lexical(const std::string& query, const std::vector<size_t>& visible, size_t limit) const {
         auto query_terms = Tokenize(query);
         std::unordered_set<std::string> unique(query_terms.begin(), query_terms.end());
-        std::unordered_map<std::string, size_t> df;
-        std::vector<std::unordered_map<std::string, size_t>> counts;
-        counts.reserve(visible.size());
-        double average = 0;
-        for (size_t index : visible) {
-            auto terms = Tokenize(chunks[index].text); average += terms.size();
-            std::unordered_map<std::string, size_t> count;
-            for (const auto& term : terms) ++count[term];
-            for (const auto& item : count) ++df[item.first];
-            counts.push_back(std::move(count));
-        }
+        const std::unordered_set<size_t> allowed(visible.begin(), visible.end());
+        double average = 0; for (size_t index : visible) average += lexical_lengths[index];
         average /= std::max<size_t>(1, visible.size());
-        std::vector<std::pair<size_t, double>> result;
-        for (size_t i = 0; i < visible.size(); ++i) {
-            double score = 0; size_t length = 0; for (const auto& item : counts[i]) length += item.second;
-            for (const auto& term : unique) {
-                auto found = counts[i].find(term); if (found == counts[i].end()) continue;
-                const double idf = std::log(1.0 + (visible.size() - df[term] + 0.5) / (df[term] + 0.5));
-                const double tf = found->second, k1 = 1.2, b = 0.75;
-                score += idf * tf * (k1 + 1.0) / (tf + k1 * (1.0 - b + b * length / std::max(1.0, average)));
+        std::unordered_map<size_t, double> scores;
+        for (const auto& term : unique) {
+            const auto posting = lexical_postings.find(term); if (posting == lexical_postings.end()) continue;
+            size_t df = 0; for (const auto& item : posting->second) df += allowed.count(item.first);
+            if (!df) continue;
+            const double idf = std::log(1.0 + (visible.size() - df + 0.5) / (df + 0.5));
+            for (const auto& [index, frequency] : posting->second) {
+                if (!allowed.count(index)) continue;
+                const double tf = frequency, k1 = 1.2, b = 0.75;
+                scores[index] += idf * tf * (k1 + 1.0) /
+                    (tf + k1 * (1.0 - b + b * lexical_lengths[index] / std::max(1.0, average)));
             }
-            if (score > 0) result.emplace_back(visible[i], score);
         }
+        std::vector<std::pair<size_t, double>> result(scores.begin(), scores.end());
         std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
         if (result.size() > limit) result.resize(limit);
         return result;
@@ -254,17 +256,22 @@ json RagEngine::Ingest(const json& request) {
     const json metadata = request.value("metadata", json::object());
     size_t generation = 1;
     {
-        std::lock_guard lock(impl_->mutex);
+        std::shared_lock lock(impl_->state_mutex);
         auto found = impl_->current_versions.find(document_id);
-        if (found != impl_->current_versions.end() && found->second == version_id) return {{"document_id", document_id}, {"version_id", version_id}, {"generation", impl_->current_generations[document_id]}, {"chunk_count", impl_->current_chunk_counts[document_id]}, {"unchanged", true}};
-        generation = impl_->current_generations[document_id] + 1;
+        if (found != impl_->current_versions.end() && found->second == version_id) return {{"document_id", document_id}, {"version_id", version_id}, {"generation", impl_->current_generations.at(document_id)}, {"chunk_count", impl_->current_chunk_counts.at(document_id)}, {"unchanged", true}};
+        const auto previous_generation = impl_->current_generations.find(document_id);
+        generation = (previous_generation == impl_->current_generations.end() ? 0 : previous_generation->second) + 1;
     }
     std::vector<Chunk> created;
+    std::vector<std::unordered_map<std::string, uint16_t>> created_terms;
     constexpr size_t target = 1600, overlap = 200;
     for (size_t start = 0, ordinal = 0; start < text.size(); ++ordinal) {
         size_t end = std::min(text.size(), start + target);
         if (end < text.size()) { const size_t boundary = text.rfind(' ', end); if (boundary != std::string::npos && boundary > start + 80) end = boundary; }
         created.push_back({StableId(version_id + std::to_string(ordinal)), document_id, version_id, tenant, scope, text.substr(start, end - start), source, title, ordinal, start, end, metadata});
+        std::unordered_map<std::string, uint16_t> counts;
+        for (const auto& term : Tokenize(created.back().text)) { auto& count = counts[term]; if (count != UINT16_MAX) ++count; }
+        created_terms.push_back(std::move(counts));
         if (end == text.size()) break;
         start = end > overlap ? end - overlap : end;
     }
@@ -286,11 +293,16 @@ json RagEngine::Ingest(const json& request) {
         local_indexed = local_vectors.size() == created.size();
     }
     {
-        std::lock_guard lock(impl_->mutex);
+        std::unique_lock lock(impl_->state_mutex);
         auto found = impl_->current_versions.find(document_id);
         if (found != impl_->current_versions.end() && found->second == version_id) return {{"document_id", document_id}, {"version_id", version_id}, {"generation", impl_->current_generations[document_id]}, {"chunk_count", impl_->current_chunk_counts[document_id]}, {"unchanged", true}};
         const size_t base = impl_->chunks.size();
         impl_->chunks.insert(impl_->chunks.end(), created.begin(), created.end());
+        for (size_t i = 0; i < created_terms.size(); ++i) {
+            size_t length = 0;
+            for (const auto& [term, count] : created_terms[i]) { length += count; impl_->lexical_postings[term].emplace_back(base + i, count); }
+            impl_->lexical_lengths.push_back(length);
+        }
         if (remote_indexed) for (size_t i = 0; i < remote_vectors.size(); ++i) impl_->remote.Add(remote_vectors[i], created[i], base + i);
         if (local_indexed) for (size_t i = 0; i < local_vectors.size(); ++i) impl_->local_space.Add(local_vectors[i], created[i], base + i);
         impl_->current_versions[document_id] = version_id;
@@ -323,7 +335,7 @@ json RagEngine::Retrieve(const json& request) {
         }
     }
     json hits = json::array(); bool approximate = false;
-    { std::lock_guard lock(impl_->mutex);
+    { std::shared_lock lock(impl_->state_mutex);
       const auto& selected = use_local ? impl_->local_space : impl_->remote;
       approximate = mimicdb::VectorIvfReady(selected.dataset, 0, mimicdb::VectorMetric::kCosine);
       if (query_embedding.empty() || !selected.dimension) { query_embedding.clear(); backend = "bm25"; }
@@ -411,7 +423,8 @@ json RagEngine::Evaluate(const json& request) {
 }
 
 json RagEngine::Health() const {
-    std::lock_guard lock(impl_->mutex);
+    std::shared_lock state_lock(impl_->state_mutex);
+    std::lock_guard runtime_lock(impl_->mutex);
     return {{"status", "ok"}, {"ready", true}, {"implementation", "c++"}, {"chunks", impl_->chunks.size()}, {"pending_jobs", impl_->job_queue.size()},
         {"embedding_model_key", impl_->remote.identity}, {"remote_embedding_healthy", impl_->remote_healthy.load()},
         {"local_embedding_available", impl_->local.Available()}, {"local_embedding_device", impl_->local.UsingGpu() ? "gpu" : "cpu"},
