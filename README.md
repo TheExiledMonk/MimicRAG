@@ -412,6 +412,7 @@ Third-party dependencies and the `llama.cpp` submodule remain under their respec
 
 ## Further documentation
 
+- [`roadmap.md`](roadmap.md): prioritized post-V1 development roadmap
 - [`docs/mimicrag_cpp.md`](docs/mimicrag_cpp.md): native runtime details
 - [`docs/agent-integration.md`](docs/agent-integration.md): OpenClaw, Hermes, and generic agent integration
 - [`docs/design.md`](docs/design.md): MimicDB architecture and durability
