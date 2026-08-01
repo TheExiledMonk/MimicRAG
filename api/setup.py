@@ -73,5 +73,4 @@ setup(
     version="0.0.0",
     packages=find_packages(),
     ext_modules=[ext, ext_core, ext_mongo],
-    entry_points={"console_scripts": ["mimicrag=mimicrag.cli:main"]},
 )
