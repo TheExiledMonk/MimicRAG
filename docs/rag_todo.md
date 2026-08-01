@@ -21,15 +21,22 @@ replaceable execution dependencies.
 
 ## Run 2 — retrieval pipeline
 
-- [ ] Batched embedding jobs with retry, provenance, and idempotence.
-- [ ] MimicDB vector dataset and linkage to published chunks.
-- [ ] Native lexical/BM25 index.
-- [ ] ACL and tenant predicates before vector scoring.
-- [ ] Exact/IVF planner with workload-aware defaults.
-- [ ] Hybrid vector + lexical retrieval and reciprocal-rank fusion.
-- [ ] Optional provider/local reranking.
-- [ ] Context packing, deduplication, token budget, and source citations.
-- [ ] Retrieval benchmarks and recall evaluation fixtures.
+- [x] Batched embedding jobs with retry, provenance, and idempotence.
+- [x] MimicDB vector dataset and linkage to published chunks.
+- [x] Built-in lexical/BM25 index.
+- [x] ACL, embedding-model, and tenant predicate masks before vector scoring.
+- [x] Exact/IVF planner with workload-aware defaults.
+- [x] Hybrid vector + lexical retrieval and reciprocal-rank fusion.
+- [x] Optional provider/local reranking.
+- [x] Context packing, deduplication, token budget, and source citations.
+- [x] Retrieval benchmarks and recall evaluation fixtures.
+
+The deterministic reference benchmark (`benchmarks/bench_rag.py`) reached recall@1
+of 1.0 for 100 queries over 2,000 documents. Its in-memory brute-force reference
+backend measured 31.9 ms median, 63.4 ms p95, and 120.1 ms p99. Production vector
+retrieval uses MimicDB's optimized exact/IVF path; the reference numbers isolate the
+Python orchestration and correctness fixture rather than replacing the native vector
+benchmark.
 
 ## Run 3 — complete RAG server
 

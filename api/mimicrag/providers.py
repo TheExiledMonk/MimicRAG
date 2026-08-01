@@ -22,6 +22,9 @@ class ModelProvider(ABC):
     @abstractmethod
     def embed(self, texts: list[str], **options: Any) -> list[list[float]]: ...
 
+    def rerank(self, query: str, documents: list[str], **options: Any) -> list[tuple[int, float]]:
+        raise ProviderError(f"{type(self).__name__} does not support reranking")
+
 
 class HttpProvider(ModelProvider):
     def __init__(self, config: ModelConfig) -> None:
@@ -102,6 +105,10 @@ class CohereProvider(HttpProvider):
         body = {"model": self.config.model, "texts": texts, "input_type": "search_document", "embedding_types": ["float"], **options}
         data = self._post("/embed", body, self._bearer())
         return [[float(value) for value in vector] for vector in data["embeddings"]["float"]]
+
+    def rerank(self, query: str, documents: list[str], **options: Any) -> list[tuple[int, float]]:
+        data = self._post("/rerank", {"model": self.config.model, "query": query, "documents": documents, "top_n": len(documents), **options}, self._bearer())
+        return [(int(item["index"]), float(item["relevance_score"])) for item in data["results"]]
 
 
 class GoogleProvider(HttpProvider):

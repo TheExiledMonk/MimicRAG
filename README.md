@@ -204,3 +204,12 @@ IVF indexes are saved beside dataset segments as versioned `.ivf` sidecars. Reco
 the schema, sealed-row generation, and payload checksum before publishing an index. Missing,
 stale, or corrupt sidecars are rebuilt by idle maintenance; approximate requests use exact
 CPU/Vulkan search until the replacement is ready.
+
+## Integrated MimicRAG
+
+The `mimicrag` Python package provides versioned document ingestion and a retrieval
+pipeline backed by MimicDB. It supports batched embeddings, built-in BM25, exact/IVF
+vector planning, reciprocal-rank fusion, reranking, and citation-aware context packing.
+Tenant, access-scope, and embedding-model tags are applied as engine predicates before
+vector values are loaded or scored. See `mimicrag.example.json` for provider configuration
+and `docs/rag_todo.md` for the three-run implementation roadmap.

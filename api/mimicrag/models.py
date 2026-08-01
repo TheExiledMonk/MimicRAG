@@ -43,3 +43,33 @@ class Publication:
     version_id: str
     generation: int
     published_at_ms: int
+
+
+@dataclass(frozen=True)
+class EmbeddingRecord:
+    chunk_id: str
+    version_id: str
+    tenant_id: str
+    access_scope: str
+    model_key: str
+    vector: tuple[float, ...]
+    created_at_ms: int
+
+
+@dataclass(frozen=True)
+class RetrievalHit:
+    chunk: Chunk
+    score: float
+    vector_rank: int | None = None
+    lexical_rank: int | None = None
+
+
+@dataclass(frozen=True)
+class Citation:
+    citation_id: int
+    chunk_id: str
+    document_id: str
+    source_uri: str
+    title: str
+    start_char: int
+    end_char: int
