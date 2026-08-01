@@ -4,7 +4,6 @@
 #include "mimicdb/dataset.h"
 #include "mimicdb/vector_ivf.h"
 #include "mimicdb/vector_search.h"
-#include <zstd.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -21,9 +20,16 @@
 #include <regex>
 #include <shared_mutex>
 #include <sstream>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <thread>
+#if defined(__linux__)
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace mimicrag {
 namespace {
@@ -125,22 +131,23 @@ std::vector<std::string> InjectionPatterns(const std::string& text) {
 int64_t NowMs() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }
 
 struct LexicalHeader {
-    uint64_t magic = 0x3158454c4741524dULL;  // MRAGLEX1
-    uint64_t catalog_bytes = 0, chunk_count = 0, raw_bytes = 0, compressed_bytes = 0, checksum = 0;
+    uint64_t magic = 0x3258454c4741524dULL;  // MRAGLEX2
+    uint32_t version = 2, header_bytes = sizeof(LexicalHeader);
+    uint64_t catalog_bytes = 0, chunk_count = 0, term_count = 0;
+    uint64_t lengths_offset = 0, terms_offset = 0, strings_offset = 0, postings_offset = 0;
+    uint64_t file_bytes = 0, checksum = 0;
 };
+struct LexicalTermEntry {
+    uint64_t postings_offset = 0;
+    uint32_t postings_count = 0, string_offset = 0;
+    uint16_t string_bytes = 0, reserved = 0;
+};
+struct LexicalPosting { uint32_t row = 0; uint16_t frequency = 0, reserved = 0; };
+static_assert(sizeof(LexicalTermEntry) == 24 && sizeof(LexicalPosting) == 8);
 uint64_t HashBytes(const void* data, size_t size) {
     uint64_t hash = 1469598103934665603ULL; const auto* bytes = static_cast<const uint8_t*>(data);
     for (size_t i = 0; i < size; ++i) { hash ^= bytes[i]; hash *= 1099511628211ULL; } return hash;
 }
-template <typename T> void AppendPod(std::vector<uint8_t>* out, T value) {
-    static_assert(std::is_trivially_copyable_v<T>); const auto* bytes = reinterpret_cast<const uint8_t*>(&value);
-    out->insert(out->end(), bytes, bytes + sizeof(value));
-}
-template <typename T> bool ConsumePod(const std::vector<uint8_t>& input, size_t* cursor, T* value) {
-    if (*cursor > input.size() || sizeof(T) > input.size() - *cursor) return false;
-    std::memcpy(value, input.data() + *cursor, sizeof(T)); *cursor += sizeof(T); return true;
-}
-
 DocumentGraph BuildGraph(const std::vector<Chunk>& chunks, const DocumentRecord& document,
                          const std::vector<Heading>& headings, size_t base) {
     DocumentGraph graph; graph.chunk_nodes = chunks.size(); graph.first_chunk = base;
@@ -216,6 +223,19 @@ struct RagEngine::Impl {
     std::vector<std::thread> job_threads;
     bool stopping = false;
     bool replay_skip_lexical = false;
+#if defined(__linux__)
+    struct LexicalMapping {
+        void* address = MAP_FAILED; size_t bytes = 0;
+        ~LexicalMapping() { if (address != MAP_FAILED) munmap(address, bytes); }
+    };
+    std::shared_ptr<LexicalMapping> lexical_mapping;
+    const LexicalHeader* mapped_lexical_header = nullptr;
+    const uint32_t* mapped_lexical_lengths = nullptr;
+    const LexicalTermEntry* mapped_lexical_terms = nullptr;
+    const char* mapped_lexical_strings = nullptr;
+    const LexicalPosting* mapped_lexical_postings = nullptr;
+    size_t mapped_lexical_chunks = 0;
+#endif
     std::unordered_map<std::string, json> traces;
     std::deque<std::string> trace_order;
     size_t trace_memory;
@@ -303,54 +323,75 @@ struct RagEngine::Impl {
     }
 
     bool LexicalSnapshotMatches(uint64_t catalog_bytes) const {
+#if !defined(__linux__)
+        (void)catalog_bytes; return false;
+#else
         LexicalHeader header{}; std::ifstream input(data_path / "lexical.idx", std::ios::binary);
         return static_cast<bool>(input.read(reinterpret_cast<char*>(&header), sizeof(header))) &&
-            header.magic == LexicalHeader{}.magic && header.catalog_bytes == catalog_bytes;
+            header.magic == LexicalHeader{}.magic && header.version == 2 &&
+            header.header_bytes == sizeof(LexicalHeader) && header.catalog_bytes == catalog_bytes;
+#endif
     }
     void SaveLexicalIndex() const {
         const auto catalog = data_path / "catalog.mrg"; if (!std::filesystem::exists(catalog) || lexical_lengths.size() != chunks.size()) return;
-        std::vector<uint8_t> raw; raw.reserve(lexical_lengths.size() * sizeof(uint32_t) + lexical_postings.size() * 24);
-        AppendPod(&raw, static_cast<uint64_t>(lexical_lengths.size()));
-        for (size_t length : lexical_lengths) AppendPod(&raw, static_cast<uint32_t>(std::min<size_t>(length, UINT32_MAX)));
         std::vector<std::string> terms; terms.reserve(lexical_postings.size()); for (const auto& item : lexical_postings) terms.push_back(item.first);
-        std::sort(terms.begin(), terms.end()); AppendPod(&raw, static_cast<uint64_t>(terms.size()));
-        for (const auto& term : terms) {
-            const auto& postings = lexical_postings.at(term); AppendPod(&raw, static_cast<uint32_t>(term.size())); raw.insert(raw.end(), term.begin(), term.end());
-            AppendPod(&raw, static_cast<uint64_t>(postings.size()));
-            for (const auto& [row, frequency] : postings) { AppendPod(&raw, static_cast<uint32_t>(row)); AppendPod(&raw, frequency); }
-        }
-        std::vector<uint8_t> compressed(ZSTD_compressBound(raw.size()));
-        const size_t bytes = ZSTD_compress(compressed.data(), compressed.size(), raw.data(), raw.size(), 3);
-        if (ZSTD_isError(bytes)) return;
-        compressed.resize(bytes);
-        LexicalHeader header; header.catalog_bytes = std::filesystem::file_size(catalog); header.chunk_count = chunks.size();
-        header.raw_bytes = raw.size(); header.compressed_bytes = compressed.size(); header.checksum = HashBytes(compressed.data(), compressed.size());
+        std::sort(terms.begin(), terms.end());
+        uint64_t string_bytes = 0, posting_count = 0;
+        for (const auto& term : terms) { const auto count = lexical_postings.at(term).size();
+            if (term.size() > UINT16_MAX || string_bytes + term.size() > UINT32_MAX || count > UINT32_MAX) return;
+            string_bytes += term.size(); posting_count += count; }
+        auto align8 = [](uint64_t value) { return (value + 7) & ~uint64_t{7}; };
+        LexicalHeader header; header.catalog_bytes = std::filesystem::file_size(catalog); header.chunk_count = chunks.size(); header.term_count = terms.size();
+        header.lengths_offset = sizeof(header); header.terms_offset = align8(header.lengths_offset + chunks.size() * sizeof(uint32_t));
+        header.strings_offset = header.terms_offset + terms.size() * sizeof(LexicalTermEntry);
+        header.postings_offset = align8(header.strings_offset + string_bytes); header.file_bytes = header.postings_offset + posting_count * sizeof(LexicalPosting);
         const auto target = data_path / "lexical.idx";
         const auto temporary = target.string() + ".tmp";
         std::ofstream output(temporary, std::ios::binary | std::ios::trunc); output.write(reinterpret_cast<const char*>(&header), sizeof(header));
-        output.write(reinterpret_cast<const char*>(compressed.data()), static_cast<std::streamsize>(compressed.size())); output.close();
+        uint64_t hash = 1469598103934665603ULL, written = sizeof(header);
+        auto write = [&](const void* data, size_t bytes) { output.write(static_cast<const char*>(data), static_cast<std::streamsize>(bytes)); const auto* p = static_cast<const uint8_t*>(data); for (size_t i = 0; i < bytes; ++i) { hash ^= p[i]; hash *= 1099511628211ULL; } written += bytes; };
+        auto pad_to = [&](uint64_t target_offset) { const uint8_t zero = 0; while (written < target_offset) write(&zero, 1); };
+        for (size_t length : lexical_lengths) { const uint32_t value = static_cast<uint32_t>(std::min<size_t>(length, UINT32_MAX)); write(&value, sizeof(value)); }
+        pad_to(header.terms_offset); uint32_t string_offset = 0; uint64_t posting_offset = 0;
+        for (const auto& term : terms) { const auto& list = lexical_postings.at(term); LexicalTermEntry entry{posting_offset, static_cast<uint32_t>(list.size()), string_offset, static_cast<uint16_t>(term.size()), 0}; write(&entry, sizeof(entry)); string_offset += term.size(); posting_offset += list.size(); }
+        for (const auto& term : terms) write(term.data(), term.size());
+        pad_to(header.postings_offset);
+        for (const auto& term : terms) for (const auto& [row, frequency] : lexical_postings.at(term)) { LexicalPosting posting{static_cast<uint32_t>(row), frequency, 0}; write(&posting, sizeof(posting)); }
+        header.checksum = hash; output.seekp(0); output.write(reinterpret_cast<const char*>(&header), sizeof(header)); output.close();
         if (output.good()) { std::error_code error; std::filesystem::rename(temporary, target, error); if (error) std::filesystem::remove(temporary); }
     }
     bool LoadLexicalIndex(uint64_t catalog_bytes) {
-        LexicalHeader header{}; std::ifstream input(data_path / "lexical.idx", std::ios::binary);
-        if (!input.read(reinterpret_cast<char*>(&header), sizeof(header)) || header.magic != LexicalHeader{}.magic ||
-            header.catalog_bytes != catalog_bytes || header.chunk_count != chunks.size() || header.raw_bytes > (1ULL << 34) || header.compressed_bytes > (1ULL << 34)) return false;
-        std::vector<uint8_t> compressed(header.compressed_bytes), raw(header.raw_bytes);
-        if (!input.read(reinterpret_cast<char*>(compressed.data()), static_cast<std::streamsize>(compressed.size())) || HashBytes(compressed.data(), compressed.size()) != header.checksum) return false;
-        if (ZSTD_decompress(raw.data(), raw.size(), compressed.data(), compressed.size()) != raw.size()) return false;
-        size_t cursor = 0; uint64_t length_count = 0; if (!ConsumePod(raw, &cursor, &length_count) || length_count != chunks.size()) return false;
-        std::vector<size_t> lengths(length_count); for (auto& length : lengths) { uint32_t value = 0; if (!ConsumePod(raw, &cursor, &value)) return false; length = value; }
-        uint64_t term_count = 0; if (!ConsumePod(raw, &cursor, &term_count) || term_count > raw.size()) return false;
-        std::unordered_map<std::string, std::vector<std::pair<size_t, uint16_t>>> postings; postings.reserve(term_count);
-        for (uint64_t i = 0; i < term_count; ++i) {
-            uint32_t term_bytes = 0; uint64_t count = 0; if (!ConsumePod(raw, &cursor, &term_bytes) || term_bytes > raw.size() - cursor) return false;
-            std::string term(reinterpret_cast<const char*>(raw.data() + cursor), term_bytes); cursor += term_bytes;
-            if (!ConsumePod(raw, &cursor, &count) || count > (raw.size() - cursor) / (sizeof(uint32_t) + sizeof(uint16_t))) return false;
-            auto& list = postings[std::move(term)]; list.reserve(count);
-            for (uint64_t p = 0; p < count; ++p) { uint32_t row = 0; uint16_t frequency = 0; if (!ConsumePod(raw, &cursor, &row) || !ConsumePod(raw, &cursor, &frequency) || row >= chunks.size()) return false; list.emplace_back(row, frequency); }
+#if !defined(__linux__)
+        (void)catalog_bytes; return false;
+#else
+        const auto path = data_path / "lexical.idx"; const int fd = open(path.c_str(), O_RDONLY); if (fd < 0) return false; struct stat status{};
+        if (fstat(fd, &status) != 0 || status.st_size < static_cast<off_t>(sizeof(LexicalHeader))) { close(fd); return false; }
+        auto mapping = std::make_shared<LexicalMapping>(); mapping->bytes = static_cast<size_t>(status.st_size); mapping->address = mmap(nullptr, mapping->bytes, PROT_READ, MAP_SHARED, fd, 0); close(fd);
+        if (mapping->address == MAP_FAILED) return false;
+        const auto* header = static_cast<const LexicalHeader*>(mapping->address);
+        if (header->magic != LexicalHeader{}.magic || header->version != 2 || header->header_bytes != sizeof(LexicalHeader) || header->catalog_bytes != catalog_bytes ||
+            header->chunk_count != chunks.size() || header->file_bytes != mapping->bytes || header->lengths_offset != sizeof(LexicalHeader) ||
+            header->terms_offset < header->lengths_offset + header->chunk_count * sizeof(uint32_t) || header->strings_offset < header->terms_offset + header->term_count * sizeof(LexicalTermEntry) ||
+            header->postings_offset < header->strings_offset || header->postings_offset > header->file_bytes) return false;
+        const auto* payload = static_cast<const uint8_t*>(mapping->address) + sizeof(LexicalHeader);
+        if (HashBytes(payload, mapping->bytes - sizeof(LexicalHeader)) != header->checksum) return false;
+        const auto* bytes = static_cast<const uint8_t*>(mapping->address);
+        const auto* terms = reinterpret_cast<const LexicalTermEntry*>(bytes + header->terms_offset);
+        const auto* strings = reinterpret_cast<const char*>(bytes + header->strings_offset);
+        const uint64_t string_capacity = header->postings_offset - header->strings_offset;
+        const uint64_t posting_capacity = (header->file_bytes - header->postings_offset) / sizeof(LexicalPosting);
+        std::string_view previous;
+        for (uint64_t i = 0; i < header->term_count; ++i) { const auto& entry = terms[i];
+            if (uint64_t(entry.string_offset) + entry.string_bytes > string_capacity || entry.postings_offset + entry.postings_count > posting_capacity) return false;
+            const std::string_view current(strings + entry.string_offset, entry.string_bytes); if (i && current <= previous) return false; previous = current;
         }
-        if (cursor != raw.size()) return false;
-        lexical_lengths = std::move(lengths); lexical_postings = std::move(postings); return true;
+        lexical_mapping = std::move(mapping); mapped_lexical_header = header;
+        mapped_lexical_lengths = reinterpret_cast<const uint32_t*>(bytes + header->lengths_offset);
+        mapped_lexical_terms = terms; mapped_lexical_strings = strings;
+        mapped_lexical_postings = reinterpret_cast<const LexicalPosting*>(bytes + header->postings_offset);
+        mapped_lexical_chunks = header->chunk_count;
+        return true;
+#endif
     }
 
     void FinalizeVectorIndexes() {
@@ -407,20 +448,49 @@ struct RagEngine::Impl {
     std::vector<std::pair<size_t, double>> Lexical(const std::string& query, const std::vector<size_t>& visible, size_t limit) const {
         auto query_terms = Tokenize(query);
         std::unordered_set<std::string> unique(query_terms.begin(), query_terms.end());
-        const std::unordered_set<size_t> allowed(visible.begin(), visible.end());
-        double average = 0; for (size_t index : visible) average += lexical_lengths[index];
+        std::vector<uint8_t> allowed(chunks.size(), 0); for (size_t index : visible) allowed[index] = 1;
+        auto length_at = [&](size_t index) -> size_t {
+#if defined(__linux__)
+            if (mapped_lexical_lengths && index < mapped_lexical_chunks) return mapped_lexical_lengths[index];
+            if (mapped_lexical_lengths) return lexical_lengths[index - mapped_lexical_chunks];
+#endif
+            return lexical_lengths[index];
+        };
+        double average = 0; for (size_t index : visible) average += length_at(index);
         average /= std::max<size_t>(1, visible.size());
         std::unordered_map<size_t, double> scores;
         for (const auto& term : unique) {
-            const auto posting = lexical_postings.find(term); if (posting == lexical_postings.end()) continue;
-            size_t df = 0; for (const auto& item : posting->second) df += allowed.count(item.first);
+            size_t df = 0;
+#if defined(__linux__)
+            const LexicalTermEntry* mapped_entry = nullptr;
+            if (mapped_lexical_header) {
+                size_t first = 0, last = mapped_lexical_header->term_count;
+                while (first < last) { const size_t middle = first + (last - first) / 2; const auto& entry = mapped_lexical_terms[middle];
+                    const std::string_view candidate(mapped_lexical_strings + entry.string_offset, entry.string_bytes);
+                    if (candidate < term) first = middle + 1; else last = middle; }
+                if (first != mapped_lexical_header->term_count) { const auto& entry = mapped_lexical_terms[first];
+                    if (std::string_view(mapped_lexical_strings + entry.string_offset, entry.string_bytes) == term) mapped_entry = &entry; }
+                if (mapped_entry) { const auto* rows = mapped_lexical_postings + mapped_entry->postings_offset;
+                    for (uint32_t i = 0; i < mapped_entry->postings_count; ++i) df += allowed[rows[i].row]; }
+            }
+#endif
+            const auto delta = lexical_postings.find(term);
+            if (delta != lexical_postings.end()) for (const auto& item : delta->second) df += allowed[item.first];
             if (!df) continue;
             const double idf = std::log(1.0 + (visible.size() - df + 0.5) / (df + 0.5));
-            for (const auto& [index, frequency] : posting->second) {
-                if (!allowed.count(index)) continue;
+#if defined(__linux__)
+            if (mapped_entry) { const auto* rows = mapped_lexical_postings + mapped_entry->postings_offset;
+                for (uint32_t i = 0; i < mapped_entry->postings_count; ++i) { const size_t index = rows[i].row; if (!allowed[index]) continue;
+                    const double tf = rows[i].frequency, k1 = 1.2, b = 0.75;
+                    scores[index] += idf * tf * (k1 + 1.0) / (tf + k1 * (1.0 - b + b * length_at(index) / std::max(1.0, average))); }
+            }
+#endif
+            if (delta == lexical_postings.end()) continue;
+            for (const auto& [index, frequency] : delta->second) {
+                if (!allowed[index]) continue;
                 const double tf = frequency, k1 = 1.2, b = 0.75;
                 scores[index] += idf * tf * (k1 + 1.0) /
-                    (tf + k1 * (1.0 - b + b * lexical_lengths[index] / std::max(1.0, average)));
+                    (tf + k1 * (1.0 - b + b * length_at(index) / std::max(1.0, average)));
             }
         }
         std::vector<std::pair<size_t, double>> result(scores.begin(), scores.end());
@@ -820,6 +890,11 @@ json RagEngine::Health() const {
         {"catalog_format", binary ? "mrg1_zstd_float32" : "legacy_jsonl"}, {"catalog_bytes", catalog_bytes},
         {"content_storage", "disk_offsets"}, {"content_bytes", std::filesystem::exists(content) ? std::filesystem::file_size(content) : 0},
         {"lexical_index_persisted", std::filesystem::exists(lexical)}, {"lexical_index_bytes", std::filesystem::exists(lexical) ? std::filesystem::file_size(lexical) : 0},
+#if defined(__linux__)
+        {"lexical_index_storage", impl_->mapped_lexical_header ? "mmap_compact" : "heap_build"},
+#else
+        {"lexical_index_storage", "heap_build"},
+#endif
         {"sealed_vectors_resident", impl_->local_space.dataset.SealedFieldValuesResident(0)},
         {"remote_vector_rows", impl_->remote.dataset.RowCount()}, {"local_vector_rows", impl_->local_space.dataset.RowCount()}};
 }

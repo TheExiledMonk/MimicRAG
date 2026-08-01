@@ -71,6 +71,23 @@ Warm startup measured 4.63 seconds. Retrieval also improved to 36.77 QPS sequent
 (23.39 ms average, 22.42 ms p50, 28.50 ms p95) and 212.39 QPS at eight-way
 concurrency (31.15 ms average, 29.95 ms p50, 40.54 ms p95).
 
+### Memory-mapped BM25
+
+The BM25 snapshot now uses a sorted fixed-width term table, contiguous strings,
+fixed-width postings, and document lengths that are queried directly through `mmap`.
+Newly ingested terms remain in a small heap delta and are scored together with the
+mapped base. This replaces the large resident `unordered_map` while retaining normal
+online ingestion and catalog-mismatch rebuilding.
+
+The directly searchable lexical file is 184 MiB versus the former 54 MiB compressed
+snapshot, but steady RSS fell to 1,248 MiB and private/anonymous memory to 570 MiB;
+approximately 661 MiB is now clean, reclaimable file-backed data. Warm startup was
+4.31 seconds. Replacing the per-query hash set of visible rows with a dense byte mask
+then improved posting intersections substantially. Sequential retrieval measured
+44.46 QPS (18.63 ms average, 18.43 ms p50, 20.39 ms p95). Three eight-way runs
+measured 249.22–255.85 QPS, with 24.86–25.99 ms average latency and 31.09–36.06 ms
+p95. Thus the mapped layout reduced private memory and increased throughput.
+
 The legacy JSONL file was removed only after binary-only restart, health counters,
 retrieval rankings, checksums, and concurrency tests passed. The original Wikimedia
 dump and the binary catalog remain available for regeneration and further testing.
