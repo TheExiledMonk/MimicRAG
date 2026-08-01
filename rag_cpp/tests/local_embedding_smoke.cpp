@@ -18,8 +18,11 @@ int main(int argc, char** argv) {
     config.document_prefix = "search_document: "; config.query_prefix = "search_query: ";
     mimicrag::LocalEmbedder embedder(config);
     auto docs = embedder.Embed({"A database supports vector similarity search.", "Marine biology studies whales and coral reefs."});
+    std::string long_document;
+    for (int i = 0; i < 700; ++i) long_document += "database vector ";
+    auto long_vector = embedder.Embed({long_document}).at(0);
     auto query = embedder.Embed({"find similar database vectors"}, true).at(0);
     const float database = Cosine(query, docs[0]), ocean = Cosine(query, docs[1]);
     std::cout << "database=" << database << " ocean=" << ocean << '\n';
-    return database > ocean ? 0 : 1;
+    return database > ocean && long_vector.size() == query.size() ? 0 : 1;
 }

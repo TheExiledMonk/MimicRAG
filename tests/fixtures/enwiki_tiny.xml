@@ -1,0 +1,20 @@
+<mediawiki>
+  <page>
+    <title>Alpha &amp; Beta</title><ns>0</ns><id>10</id>
+    <revision><id>100</id><text xml:space="preserve">A natural article lead.
+== History ==
+Related to [[Gamma|the gamma article]]. &lt;ref&gt;citation noise&lt;/ref&gt;</text></revision>
+  </page>
+  <page>
+    <title>Redirected</title><ns>0</ns><id>11</id><redirect title="Alpha &amp; Beta"/>
+    <revision><text xml:space="preserve">#REDIRECT [[Alpha &amp; Beta]]</text></revision>
+  </page>
+  <page>
+    <title>Talk:Ignored</title><ns>1</ns><id>12</id>
+    <revision><text xml:space="preserve">Not an article.</text></revision>
+  </page>
+  <page>
+    <title>Gamma</title><ns>0</ns><id>13</id>
+    <revision><text xml:space="preserve">A second real article.</text></revision>
+  </page>
+</mediawiki>

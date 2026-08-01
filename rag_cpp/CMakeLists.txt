@@ -1,4 +1,5 @@
 find_package(CURL REQUIRED)
+find_package(BZip2 REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(Threads REQUIRED)
 
@@ -49,10 +50,11 @@ add_executable(mimicrag_server
     src/provider.cpp
     src/local_embeddings.cpp
     src/rag_engine.cpp
+    src/wiki_importer.cpp
     src/http_server.cpp)
 target_include_directories(mimicrag_server PRIVATE include)
 target_link_libraries(mimicrag_server PRIVATE
-    mimicdb_engine mimicdb_build_flags CURL::libcurl nlohmann_json::nlohmann_json Threads::Threads)
+    mimicdb_engine mimicdb_build_flags CURL::libcurl BZip2::BZip2 nlohmann_json::nlohmann_json Threads::Threads)
 if(MIMICRAG_ENABLE_LLAMA)
     target_compile_definitions(mimicrag_server PRIVATE MIMICRAG_HAVE_LLAMA=1)
     target_link_libraries(mimicrag_server PRIVATE llama)
@@ -76,6 +78,10 @@ if(MIMICDB_BUILD_BENCHMARKS AND MIMICRAG_ENABLE_LLAMA)
 endif()
 
 if(MIMICDB_BUILD_TESTS)
+    add_test(NAME mimicrag_wikipedia_importer
+        COMMAND $<TARGET_FILE:mimicrag_server> wiki-ingest ${PROJECT_SOURCE_DIR}/tests/fixtures/enwiki_tiny.xml
+                --config ${PROJECT_SOURCE_DIR}/tests/mimicrag_cpp_test.json --dry-run --no-resume --progress 0)
+    set_tests_properties(mimicrag_wikipedia_importer PROPERTIES PASS_REGULAR_EXPRESSION "\"imported\": 2")
     add_test(NAME mimicrag_cpp_smoke
         COMMAND ${PROJECT_SOURCE_DIR}/scripts/mimicrag_cpp_smoke_test.sh
                 $<TARGET_FILE:mimicrag_server> ${PROJECT_SOURCE_DIR}/tests/mimicrag_cpp_test.json)

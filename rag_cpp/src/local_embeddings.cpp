@@ -42,6 +42,7 @@ LocalEmbedder::LocalEmbedder(const LocalEmbeddingConfig& config) : impl_(std::ma
     auto context_params = llama_context_default_params();
     context_params.n_ctx = static_cast<uint32_t>(config.context_size);
     context_params.n_batch = static_cast<uint32_t>(config.context_size);
+    context_params.n_ubatch = static_cast<uint32_t>(config.context_size);
     context_params.n_threads = config.threads > 0 ? config.threads : static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
     context_params.n_threads_batch = context_params.n_threads;
     context_params.embeddings = true;
@@ -98,8 +99,10 @@ std::vector<std::vector<float>> LocalEmbedder::Embed(const std::vector<std::stri
         std::vector<llama_token> tokens(static_cast<size_t>(count));
         count = llama_tokenize(impl_->vocab, text.data(), static_cast<int32_t>(text.size()), tokens.data(), count, true, false);
         if (count <= 0) throw std::runtime_error("local embedding tokenization failed");
+        if (count > impl_->config.context_size) throw std::runtime_error("local embedding input exceeds configured context size");
         tokens.resize(static_cast<size_t>(count));
-        llama_memory_clear(llama_get_memory(impl_->context), true);
+        auto* memory = llama_get_memory(impl_->context);
+        if (memory) llama_memory_clear(memory, true);
         auto batch = llama_batch_init(count, 0, 1);
         batch.n_tokens = count;
         for (int32_t i = 0; i < count; ++i) {
@@ -109,7 +112,9 @@ std::vector<std::vector<float>> LocalEmbedder::Embed(const std::vector<std::stri
             batch.seq_id[i][0] = 0;
             batch.logits[i] = true;
         }
-        const int status = llama_decode(impl_->context, batch);
+        const int status = llama_model_has_encoder(impl_->model) || !memory
+            ? llama_encode(impl_->context, batch)
+            : llama_decode(impl_->context, batch);
         if (status != 0) throw std::runtime_error("local embedding inference failed");
         float* values = llama_get_embeddings_seq(impl_->context, 0);
         if (!values) { llama_batch_free(batch); throw std::runtime_error("local model produced no pooled embedding"); }

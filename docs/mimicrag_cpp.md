@@ -81,3 +81,28 @@ mimicrag_server query "What does the document say?" --config mimicrag.json --ten
 mimicrag_server evaluate golden-set.json --config mimicrag.json
 mimicrag_server --config mimicrag.json serve
 ```
+
+## Wikipedia ingestion
+
+The native importer streams either plain XML or Wikimedia's concatenated multistream
+BZip2 archive without materializing the decompressed dump. It keeps main-namespace
+articles, skips redirects, preserves headings for structural graph construction, and
+stores stable `enwiki:<page-id>` document IDs plus canonical source URLs and licence
+metadata.
+
+Start with a parser-only validation, then a bounded embedded pilot:
+
+```bash
+mimicrag_server wiki-ingest /data/enwiki-latest-pages-articles-multistream.xml.bz2 \
+  --config mimicrag.json --limit 10000 --dry-run --no-resume
+
+mimicrag_server wiki-ingest /data/enwiki-latest-pages-articles-multistream.xml.bz2 \
+  --config mimicrag.json --limit 10000 --tenant wikipedia \
+  --checkpoint /data/mimicrag/enwiki.checkpoint.json
+```
+
+`--progress N` controls progress reports, `--skip N` supports bounded sampling, and
+`--no-resume` ignores an existing checkpoint. Checkpoints are atomically replaced
+after every progress interval and on clean completion. Restarting with the same
+checkpoint scans forward to the last committed page and relies on stable page IDs and
+idempotent document versions to avoid duplicate publication.
