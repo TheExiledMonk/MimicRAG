@@ -1501,6 +1501,21 @@ CompressionStats ApiClientCore::CompressionStatsFor(const std::string& db,
     return stats;
 }
 
+bool ApiClientCore::VectorSearch(
+    const std::string& db, const std::string& name, size_t field_index,
+    const std::vector<float>& query, size_t top_k, mimicdb::VectorMetric metric,
+    const std::vector<mimicdb::VectorSearchPredicate>& predicates,
+    std::vector<mimicdb::VectorSearchHit>* out, std::string* error) const {
+    const auto* state = GetDataset(db, name);
+    if (!state) { if (error) *error = "unknown dataset"; return false; }
+    if (!mimicdb::VectorSearch(state->dataset, field_index, query.data(), query.size(),
+                               top_k, metric, out, predicates)) {
+        if (error) *error = "invalid vector search";
+        return false;
+    }
+    return true;
+}
+
 const ApiClientCore::DatasetState* ApiClientCore::GetDataset(const std::string& db,
                                                              const std::string& name) const {
     auto db_it = databases_.find(db);

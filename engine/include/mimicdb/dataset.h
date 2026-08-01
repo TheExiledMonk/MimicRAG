@@ -75,6 +75,7 @@ public:
     uint64_t SchemaFingerprint() const;
     Schema SchemaView() const;
     DatasetCompressionStats CompressionStats() const;
+    size_t VectorDimension(size_t field_index) const;
 
 private:
     std::string name_;
@@ -83,6 +84,7 @@ private:
     std::vector<FieldVector> active_fields_;
     std::vector<Segment> segments_;
     size_t segment_capacity_ = 0;
+    std::vector<size_t> vector_dimensions_;
 };
 
 }  // namespace mimicdb

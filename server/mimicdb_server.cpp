@@ -2869,15 +2869,33 @@ private:
         uint8_t metric_id = 0;
         uint32_t dimension = 0;
         uint32_t top_k = 0;
+        uint16_t predicate_count = 0;
         if (!ReadName(payload, &cursor, &db_name) || !ReadName(payload, &cursor, &name) ||
             !ReadScalar(payload, &cursor, &field_index) ||
             !ReadScalar(payload, &cursor, &metric_id) ||
             !ReadScalar(payload, &cursor, &dimension) || !ReadScalar(payload, &cursor, &top_k) ||
+            !ReadScalar(payload, &cursor, &predicate_count) ||
             dimension == 0 || top_k == 0 || metric_id > 2 ||
-            dimension > (payload.size() - cursor) / sizeof(float) ||
-            cursor + static_cast<size_t>(dimension) * sizeof(float) != payload.size()) {
+            predicate_count > 1024) {
             SendStatus(client, header, Status::kBadRequest, {});
             return;
+        }
+        std::vector<VectorSearchPredicate> predicates;
+        predicates.reserve(predicate_count);
+        for (uint16_t i = 0; i < predicate_count; ++i) {
+            uint16_t pred_field = 0;
+            uint8_t pred_op = 0;
+            double pred_value = 0.0;
+            if (!ReadScalar(payload, &cursor, &pred_field) ||
+                !ReadScalar(payload, &cursor, &pred_op) || pred_op > 5 ||
+                !ReadScalar(payload, &cursor, &pred_value)) {
+                SendStatus(client, header, Status::kBadRequest, {}); return;
+            }
+            predicates.push_back({pred_field, DecodeCompareOp(pred_op), pred_value});
+        }
+        if (dimension > (payload.size() - cursor) / sizeof(float) ||
+            cursor + static_cast<size_t>(dimension) * sizeof(float) != payload.size()) {
+            SendStatus(client, header, Status::kBadRequest, {}); return;
         }
         auto db_it = databases_.find(db_name);
         if (db_it == databases_.end()) { SendStatus(client, header, Status::kNotFound, {}); return; }
@@ -2887,7 +2905,7 @@ private:
         std::memcpy(query.data(), payload.data() + cursor, query.size() * sizeof(float));
         std::vector<VectorSearchHit> hits;
         if (!VectorSearch(*it->second.dataset, field_index, query.data(), query.size(), top_k,
-                          static_cast<VectorMetric>(metric_id), &hits)) {
+                          static_cast<VectorMetric>(metric_id), &hits, predicates)) {
             SendStatus(client, header, Status::kBadRequest, {});
             return;
         }
@@ -5699,6 +5717,7 @@ private:
             "dataset.schema.modify",
             "query.scan",
             "query.aggregate",
+            "query.vector",
             "query.export",
             "query.explain",
         };
@@ -5726,6 +5745,7 @@ private:
             "dataset.write",
             "query.scan",
             "query.aggregate",
+            "query.vector",
         };
         for (const auto& cap : writer_caps) {
             append_grant("writer", cap, "*");
@@ -5737,6 +5757,7 @@ private:
             "dataset.read",
             "query.scan",
             "query.aggregate",
+            "query.vector",
         };
         for (const auto& cap : reader_caps) {
             append_grant("reader", cap, "*");
@@ -5747,6 +5768,7 @@ private:
             "dataset.read",
             "query.scan",
             "query.aggregate",
+            "query.vector",
         };
         for (const auto& cap : restricted_caps) {
             append_grant("restricted-reader", cap, "*");

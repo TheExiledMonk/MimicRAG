@@ -4,6 +4,18 @@ from mimicapi import Dataset
 
 
 class TestPythonAPI(unittest.TestCase):
+    def test_vector_search_embedded(self):
+        vectors = Dataset("vectors", {"embedding": "vector_float32", "tenant": "int32"})
+        vectors.append_batch({
+            "embedding": [[1.0, 0.0], [0.0, 1.0], [0.9, 0.1]],
+            "tenant": [1, 2, 1],
+        })
+        hits = vectors.vector_search("embedding", [1.0, 0.0], top_k=2,
+                                     predicates=[(1, 0, 1.0)])
+        self.assertEqual([hit["row_id"] for hit in hits], [0, 2])
+        with self.assertRaises((ValueError, RuntimeError)):
+            vectors.vector_search("embedding", [1.0, 0.0, 0.0])
+
     def test_filter_and_aggregate(self):
         users = Dataset(
             name="users",

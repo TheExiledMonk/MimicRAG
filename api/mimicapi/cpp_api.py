@@ -103,5 +103,11 @@ class CppApiClient:
     def compression_stats(self, db: str, name: str) -> dict:
         return self._core.compression_stats(db, name)
 
+    def vector_search(self, db: str, name: str, field_index: int, query: list[float],
+                      top_k: int = 10, metric: str = "cosine",
+                      predicates: list[tuple[int, str, float]] | None = None) -> list[dict]:
+        return self._core.vector_search(db, name, field_index, query, top_k, metric,
+                                        predicates or None)
+
     def set_compression_enabled(self, enabled: bool) -> None:
         _mimicapi_core.set_compression_enabled(bool(enabled))

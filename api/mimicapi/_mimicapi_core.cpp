@@ -2,12 +2,14 @@
 #include <Python.h>
 
 #include <string>
+#include <cstring>
 #include <unordered_map>
 #include <vector>
 
 #include "mimicapi/core.h"
 #include "mimicdb/types.h"
 #include "mimicdb/compression.h"
+#include "mimicdb/vector_search.h"
 
 namespace {
 
@@ -38,6 +40,9 @@ mimicdb::FieldType ParseFieldType(const std::string& type_name, bool* ok) {
     }
     if (type_name == "array") {
         return mimicdb::FieldType::kArray;
+    }
+    if (type_name == "vector_float32") {
+        return mimicdb::FieldType::kVectorFloat32;
     }
     if (type_name == "dict_int32") {
         return mimicdb::FieldType::kDictInt32;
@@ -337,7 +342,8 @@ PyObject* ApiClientCoreAppendBatch(ApiClientCoreObject* self, PyObject* args) {
             }
             bool_values.push_back(std::move(values));
             batch.data = bool_values.back().data();
-        } else if (batch.type == mimicdb::FieldType::kString || batch.type == mimicdb::FieldType::kBytes) {
+        } else if (batch.type == mimicdb::FieldType::kString || batch.type == mimicdb::FieldType::kBytes ||
+                   batch.type == mimicdb::FieldType::kVectorFloat32) {
             std::vector<uint32_t> lengths;
             std::vector<uint8_t> bytes;
             lengths.reserve(count);
@@ -346,6 +352,28 @@ PyObject* ApiClientCoreAppendBatch(ApiClientCoreObject* self, PyObject* args) {
                 if (item == Py_None) {
                     lengths.push_back(0);
                     validity.push_back(0);
+                    continue;
+                }
+                if (batch.type == mimicdb::FieldType::kVectorFloat32) {
+                    PyObject* vector = PySequence_Fast(item, "vector_float32 value must be a sequence");
+                    if (!vector) { Py_DECREF(seq); return nullptr; }
+                    const Py_ssize_t dimension = PySequence_Fast_GET_SIZE(vector);
+                    if (dimension <= 0 || static_cast<size_t>(dimension) > UINT32_MAX / sizeof(float)) {
+                        Py_DECREF(vector); Py_DECREF(seq);
+                        PyErr_SetString(PyExc_ValueError, "vector_float32 value must be non-empty");
+                        return nullptr;
+                    }
+                    lengths.push_back(static_cast<uint32_t>(dimension * sizeof(float)));
+                    const size_t old_size = bytes.size();
+                    bytes.resize(old_size + static_cast<size_t>(dimension) * sizeof(float));
+                    for (Py_ssize_t k = 0; k < dimension; ++k) {
+                        const float value = static_cast<float>(PyFloat_AsDouble(PySequence_Fast_GET_ITEM(vector, k)));
+                        if (PyErr_Occurred()) { Py_DECREF(vector); Py_DECREF(seq); return nullptr; }
+                        std::memcpy(bytes.data() + old_size + static_cast<size_t>(k) * sizeof(float),
+                                    &value, sizeof(value));
+                    }
+                    Py_DECREF(vector);
+                    validity.push_back(1);
                     continue;
                 }
                 PyObject* as_bytes = nullptr;
@@ -854,6 +882,56 @@ PyObject* ApiClientCoreAggregate(ApiClientCoreObject* self, PyObject* args, PyOb
     return dict;
 }
 
+PyObject* ApiClientCoreVectorSearch(ApiClientCoreObject* self, PyObject* args, PyObject* kwargs) {
+    const char* db = nullptr;
+    const char* name = nullptr;
+    size_t field_index = 0;
+    PyObject* query_obj = nullptr;
+    size_t top_k = 10;
+    const char* metric_name = "cosine";
+    PyObject* predicates_obj = Py_None;
+    static const char* kwlist[] = {"db", "name", "field_index", "query", "top_k", "metric", "predicates", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ssnO|nsO", const_cast<char**>(kwlist),
+                                     &db, &name, &field_index, &query_obj, &top_k,
+                                     &metric_name, &predicates_obj)) return nullptr;
+    PyObject* query_seq = PySequence_Fast(query_obj, "query must be a sequence");
+    if (!query_seq) return nullptr;
+    std::vector<float> query(static_cast<size_t>(PySequence_Fast_GET_SIZE(query_seq)));
+    for (size_t i = 0; i < query.size(); ++i) {
+        query[i] = static_cast<float>(PyFloat_AsDouble(PySequence_Fast_GET_ITEM(query_seq, i)));
+        if (PyErr_Occurred()) { Py_DECREF(query_seq); return nullptr; }
+    }
+    Py_DECREF(query_seq);
+    mimicdb::VectorMetric metric;
+    const std::string metric_string(metric_name);
+    if (metric_string == "cosine") metric = mimicdb::VectorMetric::kCosine;
+    else if (metric_string == "dot") metric = mimicdb::VectorMetric::kDot;
+    else if (metric_string == "l2" || metric_string == "l2_squared") metric = mimicdb::VectorMetric::kL2Squared;
+    else { PyErr_SetString(PyExc_ValueError, "invalid vector metric"); return nullptr; }
+    std::vector<mimicapi::Predicate> parsed;
+    if (!ParsePredicates(predicates_obj, &parsed)) return nullptr;
+    std::vector<mimicdb::VectorSearchPredicate> predicates;
+    for (const auto& predicate : parsed) {
+        if (predicate.is_null_check || !predicate.bytes.empty()) {
+            PyErr_SetString(PyExc_TypeError, "vector search supports numeric predicates"); return nullptr;
+        }
+        predicates.push_back({predicate.field_index, predicate.op, predicate.value});
+    }
+    std::vector<mimicdb::VectorSearchHit> hits;
+    std::string error;
+    if (!self->core->VectorSearch(db, name, field_index, query, top_k, metric,
+                                  predicates, &hits, &error)) {
+        PyErr_SetString(PyExc_RuntimeError, error.c_str()); return nullptr;
+    }
+    PyObject* result = PyList_New(static_cast<Py_ssize_t>(hits.size()));
+    for (size_t i = 0; i < hits.size(); ++i) {
+        PyObject* hit = Py_BuildValue("{s:K,s:f}", "row_id", hits[i].row_id,
+                                      "distance", hits[i].distance);
+        PyList_SET_ITEM(result, static_cast<Py_ssize_t>(i), hit);
+    }
+    return result;
+}
+
 PyObject* ApiClientCoreAggregateMulti(ApiClientCoreObject* self, PyObject* args, PyObject* kwargs) {
     const char* db = nullptr;
     const char* name = nullptr;
@@ -997,6 +1075,8 @@ PyMethodDef ApiClientCoreMethods[] = {
     {"scan", (PyCFunction)ApiClientCoreScan, METH_VARARGS | METH_KEYWORDS, nullptr},
     {"scan_debug", (PyCFunction)ApiClientCoreScanDebug, METH_VARARGS | METH_KEYWORDS, nullptr},
     {"aggregate", (PyCFunction)ApiClientCoreAggregate, METH_VARARGS | METH_KEYWORDS, nullptr},
+    {"vector_search", (PyCFunction)ApiClientCoreVectorSearch,
+     METH_VARARGS | METH_KEYWORDS, nullptr},
     {"aggregate_multi", (PyCFunction)ApiClientCoreAggregateMulti,
      METH_VARARGS | METH_KEYWORDS, nullptr},
     {"compression_stats", (PyCFunction)ApiClientCoreCompressionStats, METH_VARARGS, nullptr},

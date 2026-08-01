@@ -15,6 +15,7 @@
 #include "mimicdb/segment.h"
 #include "mimicdb/types.h"
 #include "mimicdb/compression.h"
+#include "mimicdb/vector_search.h"
 
 namespace {
 
@@ -220,6 +221,9 @@ mimicdb::FieldType ParseFieldType(const std::string& type_name, bool* ok) {
     }
     if (type_name == "array") {
         return mimicdb::FieldType::kArray;
+    }
+    if (type_name == "vector_float32") {
+        return mimicdb::FieldType::kVectorFloat32;
     }
     if (type_name == "int16") {
         return mimicdb::FieldType::kInt32;
@@ -531,7 +535,8 @@ PyObject* DatasetAppendBatch(DatasetObject* self, PyObject* args) {
             bool_values.push_back(std::move(values));
             batch.data = bool_values.back().data();
         } else if (batch.type == mimicdb::FieldType::kString ||
-                   batch.type == mimicdb::FieldType::kBytes) {
+                   batch.type == mimicdb::FieldType::kBytes ||
+                   batch.type == mimicdb::FieldType::kVectorFloat32) {
             std::vector<uint32_t> lengths;
             std::vector<uint8_t> bytes;
             lengths.reserve(count);
@@ -540,6 +545,26 @@ PyObject* DatasetAppendBatch(DatasetObject* self, PyObject* args) {
                 if (item == Py_None) {
                     lengths.push_back(0);
                     validity.push_back(0);
+                    continue;
+                }
+                if (batch.type == mimicdb::FieldType::kVectorFloat32) {
+                    PyObject* vector = PySequence_Fast(item, "vector_float32 value must be a sequence");
+                    if (!vector) { Py_DECREF(seq); return nullptr; }
+                    const Py_ssize_t dimension = PySequence_Fast_GET_SIZE(vector);
+                    if (dimension <= 0 || static_cast<size_t>(dimension) > UINT32_MAX / sizeof(float)) {
+                        Py_DECREF(vector); Py_DECREF(seq);
+                        PyErr_SetString(PyExc_ValueError, "vector_float32 value must be non-empty");
+                        return nullptr;
+                    }
+                    lengths.push_back(static_cast<uint32_t>(dimension * sizeof(float)));
+                    for (Py_ssize_t k = 0; k < dimension; ++k) {
+                        const float value = static_cast<float>(PyFloat_AsDouble(PySequence_Fast_GET_ITEM(vector, k)));
+                        if (PyErr_Occurred()) { Py_DECREF(vector); Py_DECREF(seq); return nullptr; }
+                        const auto* ptr = reinterpret_cast<const uint8_t*>(&value);
+                        bytes.insert(bytes.end(), ptr, ptr + sizeof(value));
+                    }
+                    Py_DECREF(vector);
+                    validity.push_back(1);
                     continue;
                 }
                 if (batch.type == mimicdb::FieldType::kString) {
@@ -1151,6 +1176,55 @@ PyObject* DatasetAggregateDebug(DatasetObject* self, PyObject* args) {
     return DatasetAggregateInternal(self, predicates_obj, agg_obj, true);
 }
 
+PyObject* DatasetVectorSearch(DatasetObject* self, PyObject* args) {
+    Py_ssize_t field_index = 0;
+    PyObject* query_obj = nullptr;
+    Py_ssize_t top_k = 10;
+    const char* metric_name = nullptr;
+    PyObject* predicates_obj = nullptr;
+    if (!PyArg_ParseTuple(args, "nOnsO", &field_index, &query_obj, &top_k,
+                          &metric_name, &predicates_obj)) return nullptr;
+    PyObject* query_seq = PySequence_Fast(query_obj, "query must be a sequence");
+    if (!query_seq) return nullptr;
+    std::vector<float> query(static_cast<size_t>(PySequence_Fast_GET_SIZE(query_seq)));
+    for (size_t i = 0; i < query.size(); ++i) {
+        query[i] = static_cast<float>(PyFloat_AsDouble(PySequence_Fast_GET_ITEM(query_seq, i)));
+        if (PyErr_Occurred()) { Py_DECREF(query_seq); return nullptr; }
+    }
+    Py_DECREF(query_seq);
+    mimicdb::VectorMetric metric;
+    const std::string metric_string(metric_name);
+    if (metric_string == "cosine") metric = mimicdb::VectorMetric::kCosine;
+    else if (metric_string == "dot") metric = mimicdb::VectorMetric::kDot;
+    else if (metric_string == "l2" || metric_string == "l2_squared") metric = mimicdb::VectorMetric::kL2Squared;
+    else { PyErr_SetString(PyExc_ValueError, "invalid vector metric"); return nullptr; }
+    if (!PyList_Check(predicates_obj)) { PyErr_SetString(PyExc_TypeError, "predicates must be a list"); return nullptr; }
+    std::vector<mimicdb::VectorSearchPredicate> predicates;
+    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(predicates_obj); ++i) {
+        PyObject* item = PyList_GET_ITEM(predicates_obj, i);
+        Py_ssize_t pred_field = 0;
+        const char* op_name = nullptr;
+        double value = 0.0;
+        if (!PyArg_ParseTuple(item, "nsd", &pred_field, &op_name, &value)) return nullptr;
+        mimicdb::CompareOp op;
+        if (!ParseCompareOp(op_name, &op)) { PyErr_SetString(PyExc_ValueError, "invalid predicate op"); return nullptr; }
+        predicates.push_back({static_cast<size_t>(pred_field), op, value});
+    }
+    std::vector<mimicdb::VectorSearchHit> hits;
+    if (field_index < 0 || top_k <= 0 ||
+        !mimicdb::VectorSearch(*self->dataset, static_cast<size_t>(field_index), query.data(),
+                               query.size(), static_cast<size_t>(top_k), metric, &hits, predicates)) {
+        PyErr_SetString(PyExc_ValueError, "invalid vector search"); return nullptr;
+    }
+    PyObject* result = PyList_New(static_cast<Py_ssize_t>(hits.size()));
+    for (size_t i = 0; i < hits.size(); ++i) {
+        PyObject* hit = Py_BuildValue("{s:K,s:f}", "row_id", hits[i].row_id,
+                                      "distance", hits[i].distance);
+        PyList_SET_ITEM(result, static_cast<Py_ssize_t>(i), hit);
+    }
+    return result;
+}
+
 PyObject* DatasetScan(DatasetObject* self, PyObject* args) {
     PyObject* predicates_obj = nullptr;
     PyObject* columns_obj = nullptr;
@@ -1676,6 +1750,7 @@ PyMethodDef DatasetMethods[] = {
     {"append_batch", (PyCFunction)DatasetAppendBatch, METH_VARARGS, nullptr},
     {"aggregate", (PyCFunction)DatasetAggregate, METH_VARARGS, nullptr},
     {"aggregate_debug", (PyCFunction)DatasetAggregateDebug, METH_VARARGS, nullptr},
+    {"vector_search", (PyCFunction)DatasetVectorSearch, METH_VARARGS, nullptr},
     {"scan", (PyCFunction)DatasetScan, METH_VARARGS, nullptr},
     {"compression_stats", (PyCFunction)DatasetCompressionStats, METH_NOARGS, nullptr},
     {nullptr, nullptr, 0, nullptr},

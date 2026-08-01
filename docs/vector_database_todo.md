@@ -4,20 +4,20 @@
 
 - [x] Add a stable `vector_float32` field type without renumbering existing types.
 - [x] Store each vector as packed IEEE-754 float32 values with a per-row byte length.
-- [ ] Validate non-empty, finite query vectors and consistent stored dimensions.
+- [x] Validate non-empty, finite query vectors and consistent stored dimensions.
 - [x] Persist and recover vector columns through sealed segment files (kept uncompressed for direct search).
 - [x] Add scalar distance kernels and AVX2/FMA dot-product and cosine kernels.
 - [x] Runtime-dispatch AVX2/FMA kernels with safe scalar fallback.
-- [ ] Implement parallel segment search with worker-local bounded top-k heaps.
+- [x] Implement parallel segment search with worker-local bounded top-k heaps.
 - [x] Return stable dataset row IDs and distances.
 - [x] Support null vectors and reject malformed vector payloads safely.
-- [ ] Add numeric metadata predicates before distance evaluation.
+- [x] Add numeric metadata predicates before distance evaluation.
 
 ## API and protocol
 
 - [x] Add an append-only vector-search opcode; keep all existing opcode values stable.
 - [x] Mirror request/response packing in the C++ server and Python client.
-- [ ] Expose `vector_search` in the embedded C++ extension and high-level Python API.
+- [x] Expose `vector_search` in both embedded C++ extensions and the high-level Python API.
 - [x] Add capability authorization for `query.vector` using dataset scope.
 - [ ] Document metrics, ordering, error behavior, and wire layouts.
 
@@ -25,7 +25,7 @@
 
 - [x] Unit-test core metric calculation and top-k ordering.
 - [ ] Test nulls, dimension mismatch, ties, `k=0`, and invalid metric IDs.
-- [ ] Test sealed segments, compressed persistence/restart, and network round trips.
+- [x] Test sealed segments, persistence/recovery, embedded calls, and network round trips.
 - [x] Add a configurable exact-search benchmark covering row count, dimension, and top-k.
 - [x] Report vectors/sec, effective bandwidth, and latency.
 - [ ] Add configurable performance thresholds without hardware-specific defaults.

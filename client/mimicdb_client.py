@@ -531,6 +531,7 @@ class MimicDBClient:
     def vector_search(
         self, dataset: str, field_index: int, query: Iterable[float], top_k: int = 10,
         metric: str = "cosine", database: str | None = None,
+        predicates: list[tuple[int, int, float]] | None = None,
     ) -> list[dict[str, int | float]]:
         metrics = {"cosine": 0, "dot": 1, "l2": 2, "l2_squared": 2}
         if metric not in metrics:
@@ -543,6 +544,10 @@ class MimicDBClient:
         payload += struct.pack("<H", len(db_name)) + db_name.encode("utf-8")
         payload += struct.pack("<H", len(dataset)) + dataset.encode("utf-8")
         payload += struct.pack("<HBII", field_index, metrics[metric], len(values), top_k)
+        pred_list = predicates or []
+        payload += struct.pack("<H", len(pred_list))
+        for pred_field, pred_op, pred_value in pred_list:
+            payload += struct.pack("<HBd", pred_field, pred_op, float(pred_value))
         payload += struct.pack(f"<{len(values)}f", *values)
         response = self._request(OP_VECTOR_SEARCH, bytes(payload))
         if len(response) < 4:

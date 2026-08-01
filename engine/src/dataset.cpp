@@ -24,6 +24,7 @@ size_t Dataset::SegmentCapacity() const {
 void Dataset::AddField(FieldVector field) {
     const size_t existing_rows = ActiveRowCount();
     fields_.push_back(std::move(field));
+    vector_dimensions_.push_back(0);
     active_fields_.push_back(fields_.back());
     if (existing_rows > 0) {
         auto& added = active_fields_.back();
@@ -134,6 +135,12 @@ bool Dataset::Append(const std::vector<FieldValue>& values) {
         if (values[i].type != active_fields_[i].Type()) {
             return false;
         }
+        if (!values[i].is_null && values[i].type == FieldType::kVectorFloat32) {
+            const size_t dimension = values[i].vector_f32.size();
+            if (dimension == 0 || (vector_dimensions_[i] != 0 && vector_dimensions_[i] != dimension)) {
+                return false;
+            }
+        }
     }
     for (size_t i = 0; i < fields_.size(); ++i) {
         auto& field = active_fields_[i];
@@ -180,6 +187,9 @@ bool Dataset::Append(const std::vector<FieldValue>& values) {
         if (!ok) {
             return false;
         }
+        if (!value.is_null && value.type == FieldType::kVectorFloat32 && vector_dimensions_[i] == 0) {
+            vector_dimensions_[i] = value.vector_f32.size();
+        }
     }
     rows_ += 1;
     if (ActiveRowCount() >= segment_capacity_) {
@@ -212,6 +222,16 @@ bool Dataset::AppendBatch(const std::vector<FieldBatch>& batches) {
         }
         if (batches[i].count != count) {
             return false;
+        }
+        if (batches[i].type == FieldType::kVectorFloat32) {
+            if (!batches[i].lengths || !batches[i].bytes) return false;
+            for (size_t row = 0; row < count; ++row) {
+                if (batches[i].validity && !batches[i].validity[row]) continue;
+                if (batches[i].lengths[row] == 0 || batches[i].lengths[row] % sizeof(float) != 0) return false;
+                const size_t dimension = batches[i].lengths[row] / sizeof(float);
+                if (vector_dimensions_[i] != 0 && vector_dimensions_[i] != dimension) return false;
+                if (vector_dimensions_[i] == 0) vector_dimensions_[i] = dimension;
+            }
         }
     }
     size_t offset = 0;
@@ -302,10 +322,24 @@ bool Dataset::AddRecoveredSegment(Segment segment) {
         if (segment.Fields()[i].Type() != fields_[i].Type()) {
             return false;
         }
+        if (fields_[i].Type() == FieldType::kVectorFloat32) {
+            for (size_t row = 0; row < segment.Fields()[i].Size(); ++row) {
+                size_t dimension = 0;
+                if (segment.Fields()[i].VectorFloat32(row, &dimension)) {
+                    if (vector_dimensions_[i] != 0 && vector_dimensions_[i] != dimension) return false;
+                    vector_dimensions_[i] = dimension;
+                    break;
+                }
+            }
+        }
     }
     rows_ += segment.RowCount();
     segments_.push_back(std::move(segment));
     return true;
+}
+
+size_t Dataset::VectorDimension(size_t field_index) const {
+    return field_index < vector_dimensions_.size() ? vector_dimensions_[field_index] : 0;
 }
 
 void Dataset::DropSegments(size_t count) {

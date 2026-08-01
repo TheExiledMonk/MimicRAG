@@ -9,6 +9,7 @@
 
 #include "mimicdb/dataset.h"
 #include "mimicdb/predicate.h"
+#include "mimicdb/vector_search.h"
 
 namespace mimicapi {
 
@@ -100,6 +101,11 @@ public:
                                         std::string* error) const;
     CompressionStats CompressionStatsFor(const std::string& db, const std::string& name,
                                          std::string* error) const;
+    bool VectorSearch(const std::string& db, const std::string& name, size_t field_index,
+                      const std::vector<float>& query, size_t top_k,
+                      mimicdb::VectorMetric metric,
+                      const std::vector<mimicdb::VectorSearchPredicate>& predicates,
+                      std::vector<mimicdb::VectorSearchHit>* out, std::string* error) const;
 
 private:
     struct DatasetState {

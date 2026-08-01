@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include "mimicdb/predicate.h"
 
 namespace mimicdb {
 
@@ -16,11 +17,18 @@ struct VectorSearchHit {
     float distance = 0.0F;
 };
 
+struct VectorSearchPredicate {
+    size_t field_index = 0;
+    CompareOp op = CompareOp::kEq;
+    double value = 0.0;
+};
+
 float VectorDistance(const float* left, const float* right, size_t dimension,
                      VectorMetric metric);
 bool VectorSearch(const Dataset& dataset, size_t field_index, const float* query,
                   size_t dimension, size_t top_k, VectorMetric metric,
-                  std::vector<VectorSearchHit>* out);
+                  std::vector<VectorSearchHit>* out,
+                  const std::vector<VectorSearchPredicate>& predicates = {});
 
 }  // namespace mimicdb
 
