@@ -335,6 +335,10 @@ float VectorDistance(const float* left, const float* right, size_t dimension,
     return PreparedDistance(left, right, dimension, metric, query_norm_squared);
 }
 
+float VectorDotProduct(const float* left, const float* right, size_t dimension) {
+    return FastDot(left, right, dimension);
+}
+
 namespace {
 void CalibrateGpuCrossover(const Dataset& dataset, size_t field_index,
                            const float* query, size_t dimension, VectorMetric metric,

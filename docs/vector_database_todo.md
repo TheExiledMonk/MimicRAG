@@ -46,6 +46,10 @@
 - [x] Add compact list-ordered int8 sketches and exact shortlist reranking for broad probes.
 - [x] Reuse the persistent vector worker pool for query-time index work.
 - [x] Parallelize full-dataset centroid assignment and expose per-stage timing counters.
+- [x] Cache vector norms and fuse list-ordered SIMD scoring with worker-local top-k.
+- [x] Maintain an append-sensitive micro-index for the mutable active segment.
+- [x] Benchmark recall across a query suite instead of relying on a single query.
+- [x] Reduce learned routing to 32 dimensions after a recall-gated projection sweep.
 - [ ] Persist a versioned per-segment IVF sidecar and load it during recovery.
 - [ ] Rebuild changed sealed indexes in the background rather than on the first ANN query.
 - [ ] Add representative-dataset recall calibration for automatic default probe selection.

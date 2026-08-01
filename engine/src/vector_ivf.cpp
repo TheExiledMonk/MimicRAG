@@ -48,10 +48,16 @@ struct Index {
     std::vector<uint32_t> routing_columns, offsets, row_ids;
     std::vector<float> centers, sketch_scales;
     std::vector<float> packed_vectors;
+    std::vector<float> inverse_norms, norm_squared;
     std::vector<int8_t> sketches;  // list-ordered, row-major routing projection
     std::vector<Bounds> bounds;
     uint64_t builds = 0;
     double build_seconds = 0.0;
+};
+struct ActiveIndex {
+    size_t rows=0, dimension=0;
+    std::vector<uint32_t> offsets, positions;
+    std::vector<float> vectors, inverse_norms, norm_squared;
 };
 
 size_t ThreadCount() {
@@ -137,7 +143,7 @@ public:
         auto index = std::make_shared<Index>();
         index->source_rows = source_rows; index->segments = dataset.Segments().size();
         index->dimension = dimension; index->builds = builds + 1;
-        size_t routing_dimensions = std::min<size_t>(dimension, 96);
+        size_t routing_dimensions = std::min<size_t>(dimension, 32);
         if (const char* value = std::getenv("MIMICDB_IVF_ROUTING_DIMS")) {
             const size_t parsed = std::strtoull(value, nullptr, 10);
             if (parsed) routing_dimensions = std::min(parsed, dimension);
@@ -240,8 +246,12 @@ public:
             sketch_maximum > 0 ? 127.0F / sketch_maximum : 1.0F);
         index->sketches.resize(vectors.size() * routing_dimensions);
         index->packed_vectors.resize(vectors.size() * dimension);
+        index->inverse_norms.resize(vectors.size()); index->norm_squared.resize(vectors.size());
         Parallel(vectors.size(), [&](size_t row) {
             std::copy_n(ordered[row], dimension, index->packed_vectors.data()+row*dimension);
+            const float norm=VectorDotProduct(ordered[row],ordered[row],dimension);
+            index->norm_squared[row]=norm;
+            index->inverse_norms[row]=norm>0?1.0F/std::sqrt(norm):0.0F;
             for (size_t d = 0; d < routing_dimensions; ++d)
                 index->sketches[row*routing_dimensions+d] = int8_t(std::clamp(
                     std::lrint(ordered[row][index->routing_columns[d]] * index->sketch_scales[d]), -127L, 127L));
@@ -279,6 +289,38 @@ public:
         std::lock_guard lock(mutex_); auto found = indexes_.find({&dataset,field,metric});
         return found == indexes_.end() ? nullptr : found->second;
     }
+    std::shared_ptr<const ActiveIndex> GetActive(const Dataset& dataset,size_t field,
+                                                 VectorMetric metric,const Index& index) {
+        const Key key{&dataset,field,metric}; const size_t rows=dataset.ActiveRowCount();
+        {
+            std::lock_guard lock(mutex_); auto found=active_.find(key);
+            if(found!=active_.end()&&found->second->rows==rows&&found->second->dimension==index.dimension)
+                return found->second;
+        }
+        auto next=std::make_shared<ActiveIndex>(); next->rows=rows; next->dimension=index.dimension;
+        next->offsets.assign(index.centroids+1,0);
+        std::vector<uint32_t> assignments(rows);
+        for(size_t row=0;row<rows;++row){
+            size_t stored=0; const float* vector=dataset.ActiveFields()[field].VectorFloat32(row,&stored);
+            if(!vector||stored!=index.dimension){assignments[row]=UINT32_MAX;continue;}
+            float best=std::numeric_limits<float>::infinity();uint32_t selected=0;
+            for(uint32_t c=0;c<index.centroids;++c){const float distance=Distance(vector,index.centers.data()+c*index.routing_dimensions,index.routing_columns,metric);
+                if(distance<best){best=distance;selected=c;}}
+            assignments[row]=selected;++next->offsets[selected+1];
+        }
+        std::partial_sum(next->offsets.begin(),next->offsets.end(),next->offsets.begin());
+        next->positions.resize(next->offsets.back()); next->vectors.resize(next->positions.size()*index.dimension);
+        next->inverse_norms.resize(next->positions.size());next->norm_squared.resize(next->positions.size());
+        std::vector<uint32_t> write=next->offsets;
+        for(uint32_t row=0;row<rows;++row)if(assignments[row]!=UINT32_MAX){
+            const uint32_t position=write[assignments[row]]++;next->positions[position]=row;
+            size_t stored=0;const float* vector=dataset.ActiveFields()[field].VectorFloat32(row,&stored);
+            std::copy_n(vector,index.dimension,next->vectors.data()+size_t(position)*index.dimension);
+            const float norm=VectorDotProduct(vector,vector,index.dimension);next->norm_squared[position]=norm;
+            next->inverse_norms[position]=norm>0?1.0F/std::sqrt(norm):0.0F;
+        }
+        {std::lock_guard lock(mutex_);active_[key]=next;} return next;
+    }
     IvfSearchStats Stats(const Dataset& dataset, size_t field, VectorMetric metric) {
         std::lock_guard lock(mutex_); auto found = indexes_.find({&dataset,field,metric});
         if (found == indexes_.end()) return {};
@@ -289,10 +331,12 @@ public:
     void Release(const Dataset& dataset) {
         std::lock_guard lock(mutex_);
         for (auto it=indexes_.begin(); it!=indexes_.end();) it = it->first.dataset==&dataset ? indexes_.erase(it) : std::next(it);
+        for (auto it=active_.begin(); it!=active_.end();) it = it->first.dataset==&dataset ? active_.erase(it) : std::next(it);
     }
 private:
     std::mutex mutex_;
     std::unordered_map<Key,std::shared_ptr<const Index>,KeyHash> indexes_;
+    std::unordered_map<Key,std::shared_ptr<const ActiveIndex>,KeyHash> active_;
 };
 
 bool ListMayMatch(const Index& index, uint32_t center,
@@ -311,7 +355,11 @@ Key last_key{};
 } // namespace
 
 bool BuildVectorIvf(const Dataset& dataset, size_t field, VectorMetric metric) {
-    return Store::Instance().Build(dataset,field,metric);
+    auto& store=Store::Instance();
+    if(!store.Build(dataset,field,metric)) return false;
+    const auto index=store.Get(dataset,field,metric);
+    if(index&&dataset.ActiveRowCount()) store.GetActive(dataset,field,metric,*index);
+    return true;
 }
 
 bool VectorSearchIvf(const Dataset& dataset, size_t field, const float* query,
@@ -347,6 +395,15 @@ bool VectorSearchIvf(const Dataset& dataset, size_t field, const float* query,
     for(size_t p=0;p<probes;++p) candidates+=index->offsets[ranked[p].second+1]-index->offsets[ranked[p].second];
     positions.reserve(candidates);
     for(size_t p=0;p<probes;++p) for(uint32_t pos=index->offsets[ranked[p].second];pos<index->offsets[ranked[p].second+1];++pos) positions.push_back(pos);
+    std::shared_ptr<const ActiveIndex> active;
+    std::vector<uint32_t> active_positions;
+    if(predicates.empty()&&dataset.ActiveRowCount()){
+        active=Store::Instance().GetActive(dataset,field,metric,*index);
+        for(size_t p=0;p<probes;++p){const uint32_t center=ranked[p].second;
+            for(uint32_t pos=active->offsets[center];pos<active->offsets[center+1];++pos)
+                active_positions.push_back(pos);
+        }
+    }
 
     const auto shortlist_start=Clock::now();
     size_t shortlist_limit=std::max<size_t>(top_k*32,1024);
@@ -386,22 +443,42 @@ bool VectorSearchIvf(const Dataset& dataset, size_t field, const float* query,
     const double shortlist_seconds=std::chrono::duration<double>(Clock::now()-shortlist_start).count();
     const auto rerank_start=Clock::now();
     bool ok=false;
-    if(use_shortlist) {
+    if(predicates.empty()) {
         struct Worse { bool operator()(const VectorSearchHit& a,const VectorSearchHit& b) const {
             return a.distance!=b.distance?a.distance<b.distance:a.row_id<b.row_id; } };
         std::priority_queue<VectorSearchHit,std::vector<VectorSearchHit>,Worse> heap;
-        for(uint32_t position:positions) {
-            const VectorSearchHit hit{index->row_ids[position],VectorDistance(
-                index->packed_vectors.data()+size_t(position)*dimension,query,dimension,metric)};
-            if(heap.size()<top_k) heap.push(hit);
-            else if(hit.distance<heap.top().distance || (hit.distance==heap.top().distance&&hit.row_id<heap.top().row_id)) { heap.pop();heap.push(hit); }
+        const float query_norm_squared=VectorDotProduct(query,query,dimension);
+        const float query_inverse_norm=query_norm_squared>0?1.0F/std::sqrt(query_norm_squared):0.0F;
+        const size_t total_positions=positions.size()+active_positions.size();
+        const size_t workers=std::min(total_positions,GetVectorSearchRuntimeStats().cpu_threads);
+        std::vector<std::vector<VectorSearchHit>> partial(workers);
+        RunVectorParallel(workers,[&](size_t worker){
+            std::priority_queue<VectorSearchHit,std::vector<VectorSearchHit>,Worse> local;
+            const size_t first=worker*total_positions/workers,last=(worker+1)*total_positions/workers;
+            for(size_t i=first;i<last;++i){
+                const bool sealed=i<positions.size();
+                const uint32_t position=sealed?positions[i]:active_positions[i-positions.size()];
+                const float* vector=sealed?index->packed_vectors.data()+size_t(position)*dimension:
+                    active->vectors.data()+size_t(position)*dimension;
+                const float inverse_norm=sealed?index->inverse_norms[position]:active->inverse_norms[position];
+                const float stored_norm=sealed?index->norm_squared[position]:active->norm_squared[position];
+                const float dot=VectorDotProduct(vector,query,dimension);
+                float distance=-dot;
+                if(metric==VectorMetric::kCosine) distance=inverse_norm<=0||query_inverse_norm<=0?1.0F:
+                    1.0F-dot*inverse_norm*query_inverse_norm;
+                else if(metric==VectorMetric::kL2Squared) distance=stored_norm+query_norm_squared-2.0F*dot;
+                const uint64_t row_id=sealed?index->row_ids[position]:index->source_rows+active->positions[position];
+                const VectorSearchHit hit{row_id,distance};
+                if(local.size()<top_k)local.push(hit);
+                else if(hit.distance<local.top().distance||(hit.distance==local.top().distance&&hit.row_id<local.top().row_id)){local.pop();local.push(hit);}
+            }
+            while(!local.empty()){partial[worker].push_back(local.top());local.pop();}
+        });
+        for(const auto& part:partial) for(const auto& hit:part){
+            if(heap.size()<top_k)heap.push(hit);
+            else if(hit.distance<heap.top().distance||(hit.distance==heap.top().distance&&hit.row_id<heap.top().row_id)){heap.pop();heap.push(hit);}
         }
-        std::vector<VectorSearchHit> active;
-        ok=VectorSearchCandidates(dataset,field,query,dimension,top_k,metric,{},&active,{});
-        for(const auto& hit:active) {
-            if(heap.size()<top_k) heap.push(hit);
-            else if(hit.distance<heap.top().distance || (hit.distance==heap.top().distance&&hit.row_id<heap.top().row_id)) { heap.pop();heap.push(hit); }
-        }
+        ok=true;
         out->resize(heap.size()); for(size_t i=heap.size();i>0;--i){(*out)[i-1]=heap.top();heap.pop();}
         std::sort(out->begin(),out->end(),[](auto a,auto b){return a.distance!=b.distance?a.distance<b.distance:a.row_id<b.row_id;});
     } else ok=VectorSearchCandidates(dataset,field,query,dimension,top_k,metric,rows,out,predicates);

@@ -93,6 +93,25 @@ int main() {
     assert(exact_all.size() == ivf_all.size());
     for (size_t i = 0; i < exact_all.size(); ++i)
         assert(exact_all[i].row_id == ivf_all[i].row_id);
+    assert(filtered.Append({mimicdb::FieldValue::VectorFloat32({0.8F, 0.2F}),
+                            mimicdb::FieldValue::Int32(7)}));
+    const float appended_query[] = {0.8F, 0.2F};
+    assert(mimicdb::VectorSearchIvf(filtered, 0, appended_query, 2, 1,
+                                    mimicdb::VectorMetric::kCosine,
+                                    ivf_stats.centroid_count, &hits));
+    assert(hits.size() == 1 && hits[0].row_id == 4100);
+    for (const auto metric : {mimicdb::VectorMetric::kDot,
+                              mimicdb::VectorMetric::kL2Squared}) {
+        assert(mimicdb::BuildVectorIvf(filtered, 0, metric));
+        const auto metric_stats = mimicdb::GetVectorIvfStats(filtered, 0, metric);
+        assert(mimicdb::VectorSearch(filtered, 0, appended_query, 2, 10,
+                                     metric, &exact_all));
+        assert(mimicdb::VectorSearchIvf(filtered, 0, appended_query, 2, 10,
+                                        metric, metric_stats.centroid_count, &ivf_all));
+        assert(exact_all.size() == ivf_all.size());
+        for (size_t i = 0; i < exact_all.size(); ++i)
+            assert(exact_all[i].row_id == ivf_all[i].row_id);
+    }
 
     const auto path = std::filesystem::temp_directory_path() / "mimicdb_vector_segment_test.bin";
     std::filesystem::remove(path);

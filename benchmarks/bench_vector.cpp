@@ -19,6 +19,7 @@ int main(int argc, char** argv) {
         1, argc > 4 ? std::strtoull(argv[4], nullptr, 10) : 5);
     const size_t ivf_probes = argc > 5 ? std::strtoull(argv[5], nullptr, 10) : 0;
     const size_t cluster_count = argc > 6 ? std::strtoull(argv[6], nullptr, 10) : 0;
+    const size_t recall_queries = argc > 7 ? std::strtoull(argv[7], nullptr, 10) : 20;
     mimicdb::Dataset dataset("vector_bench");
     dataset.AddField(mimicdb::FieldVector("embedding", mimicdb::FieldType::kVectorFloat32));
     dataset.AddField(mimicdb::FieldVector("tenant", mimicdb::FieldType::kInt32));
@@ -78,14 +79,15 @@ int main(int argc, char** argv) {
                   static_cast<size_t>(exact_timings.size() * 0.95))]
               << " vectors_per_sec=" << vectors_per_sec
               << " effective_bytes_per_sec=" << bandwidth << " hits=" << hits.size() << "\n";
-    const auto exact_hits = hits;
-
     const auto ivf_build_start = std::chrono::steady_clock::now();
     if (!mimicdb::BuildVectorIvf(dataset, 0, mimicdb::VectorMetric::kCosine)) return 1;
     const double ivf_build_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - ivf_build_start).count();
     std::vector<double> ivf_timings;
     std::vector<mimicdb::VectorSearchHit> ivf_hits;
+    if (!mimicdb::VectorSearchIvf(dataset, 0, values.data(), dimension, top_k,
+                                  mimicdb::VectorMetric::kCosine, ivf_probes,
+                                  &ivf_hits)) return 1;
     for (size_t iteration = 0; iteration < iterations; ++iteration) {
         const auto start = std::chrono::steady_clock::now();
         if (!mimicdb::VectorSearchIvf(dataset, 0, values.data(), dimension, top_k,
@@ -95,11 +97,26 @@ int main(int argc, char** argv) {
             std::chrono::steady_clock::now() - start).count());
     }
     std::sort(ivf_timings.begin(), ivf_timings.end());
-    size_t overlap = 0;
-    for (const auto& expected : exact_hits)
-        for (const auto& actual : ivf_hits)
-            if (expected.row_id == actual.row_id) { ++overlap; break; }
     const auto ivf = mimicdb::GetVectorIvfStats(dataset, 0, mimicdb::VectorMetric::kCosine);
+    size_t overlap = 0, recall_total = 0;
+    std::vector<float> recall_query(dimension);
+    for (size_t query_index = 0; query_index < recall_queries; ++query_index) {
+        if (cluster_count == 0) {
+            for (auto& value : recall_query) value = dist(rng);
+        } else {
+            const float* center = cluster_centers.data() + (query_index % cluster_count) * dimension;
+            for (size_t d = 0; d < dimension; ++d) recall_query[d] = center[d] + noise(rng);
+        }
+        std::vector<mimicdb::VectorSearchHit> expected, actual;
+        if (!mimicdb::VectorSearch(dataset, 0, recall_query.data(), dimension, top_k,
+                                   mimicdb::VectorMetric::kCosine, &expected) ||
+            !mimicdb::VectorSearchIvf(dataset, 0, recall_query.data(), dimension, top_k,
+                                      mimicdb::VectorMetric::kCosine, ivf_probes, &actual)) return 1;
+        recall_total += expected.size();
+        for (const auto& expected_hit : expected)
+            for (const auto& actual_hit : actual)
+                if (expected_hit.row_id == actual_hit.row_id) { ++overlap; break; }
+    }
     std::cout << "benchmark=vector_ivf metric=cosine rows=" << rows
               << " dimension=" << dimension << " top_k=" << top_k
               << " data_clusters=" << cluster_count
@@ -117,7 +134,8 @@ int main(int argc, char** argv) {
               << " min_seconds=" << ivf_timings.front()
               << " p95_seconds=" << ivf_timings[std::min(ivf_timings.size() - 1,
                   static_cast<size_t>(ivf_timings.size() * 0.95))]
-              << " recall_at_k=" << static_cast<double>(overlap) / exact_hits.size()
+              << " recall_at_k=" << static_cast<double>(overlap) / recall_total
+              << " recall_queries=" << recall_queries
               << " build_seconds=" << ivf_build_seconds << " hits=" << ivf_hits.size() << "\n";
 
     const std::vector<mimicdb::VectorSearchPredicate> predicates = {
