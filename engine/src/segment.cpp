@@ -345,6 +345,14 @@ const std::vector<FieldVector>& Segment::Fields() const {
     return fields_;
 }
 
+void Segment::ReleaseFieldValues(size_t field_index) {
+    if (field_index < fields_.size()) fields_[field_index].ReleaseValuesStorage();
+}
+
+bool Segment::FieldValuesResident(size_t field_index) const {
+    return field_index < fields_.size() && fields_[field_index].ValuesResident();
+}
+
 bool Segment::IsSealed() const {
     return sealed_;
 }

@@ -365,6 +365,22 @@ void FieldVector::ReleaseStorage() {
     std::vector<uint32_t>().swap(data_offsets_);
 }
 
+void FieldVector::ReleaseValuesStorage() {
+    if (type_ == FieldType::kVectorFloat32 || type_ == FieldType::kString ||
+        type_ == FieldType::kBytes || type_ == FieldType::kArray) {
+        std::vector<uint8_t>().swap(data_bytes_);
+        std::vector<uint32_t>().swap(data_offsets_);
+        offsets_valid_ = false;
+    }
+}
+
+bool FieldVector::ValuesResident() const {
+    if (type_ != FieldType::kVectorFloat32 && type_ != FieldType::kString &&
+        type_ != FieldType::kBytes && type_ != FieldType::kArray) return true;
+    size_t expected = 0; for (uint32_t length : data_lengths_) expected += length;
+    return expected == data_bytes_.size();
+}
+
 void FieldVector::AppendValidity(const uint8_t* validity, size_t count) {
     if (validity_.Size() == 0) {
         validity_.Resize(size_);

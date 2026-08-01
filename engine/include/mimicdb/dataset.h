@@ -77,6 +77,8 @@ public:
     Schema SchemaView() const;
     DatasetCompressionStats CompressionStats() const;
     size_t VectorDimension(size_t field_index) const;
+    void ReleaseSealedFieldValues(size_t field_index);
+    bool SealedFieldValuesResident(size_t field_index) const;
 
 private:
     std::string name_;

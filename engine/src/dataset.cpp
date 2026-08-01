@@ -349,6 +349,15 @@ size_t Dataset::VectorDimension(size_t field_index) const {
     return field_index < vector_dimensions_.size() ? vector_dimensions_[field_index] : 0;
 }
 
+void Dataset::ReleaseSealedFieldValues(size_t field_index) {
+    for (auto& segment : segments_) segment.ReleaseFieldValues(field_index);
+}
+
+bool Dataset::SealedFieldValuesResident(size_t field_index) const {
+    for (const auto& segment : segments_) if (!segment.FieldValuesResident(field_index)) return false;
+    return true;
+}
+
 void Dataset::DropSegments(size_t count) {
     if (count == 0 || segments_.empty()) {
         return;

@@ -4,11 +4,13 @@
 #include "mimicdb/dataset.h"
 #include "mimicdb/vector_ivf.h"
 #include "mimicdb/vector_search.h"
+#include <zstd.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -58,6 +60,8 @@ struct Chunk {
     size_t ordinal = 0, start = 0, end = 0;
     json metadata = json::object();
     size_t section = SIZE_MAX;
+    uint64_t content_offset = 0;
+    uint32_t content_bytes = 0;
 };
 
 enum class GraphEdgeType : uint8_t { kParent = 1, kChild = 2, kPrevious = 3, kNext = 4 };
@@ -94,12 +98,12 @@ struct VectorSpace {
         dataset.AddField(mimicdb::FieldVector("tenant_tag", mimicdb::FieldType::kInt64));
         dataset.AddField(mimicdb::FieldVector("access_tag", mimicdb::FieldType::kInt64));
     }
-    bool Add(const std::vector<float>& vector, const Chunk& chunk, size_t chunk_index) {
+    bool Add(const std::vector<float>& vector, const Chunk& chunk, size_t chunk_index, bool maintain_ivf = true) {
         if (vector.empty() || (dimension && vector.size() != dimension)) return false;
         if (!dimension) dimension = vector.size();
         if (!dataset.Append({mimicdb::FieldValue::VectorFloat32(vector), mimicdb::FieldValue::Int64(static_cast<int64_t>(StableTag(chunk.tenant))), mimicdb::FieldValue::Int64(static_cast<int64_t>(StableTag(chunk.scope)))})) return false;
         chunk_indices.push_back(chunk_index);
-        if (dataset.ActiveRowCount() == 0) mimicdb::BuildVectorIvf(dataset, 0, mimicdb::VectorMetric::kCosine);
+        if (maintain_ivf && dataset.ActiveRowCount() == 0) mimicdb::BuildVectorIvf(dataset, 0, mimicdb::VectorMetric::kCosine);
         return true;
     }
 };
@@ -115,6 +119,23 @@ std::vector<std::string> InjectionPatterns(const std::string& text) {
 }
 
 int64_t NowMs() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }
+
+struct LexicalHeader {
+    uint64_t magic = 0x3158454c4741524dULL;  // MRAGLEX1
+    uint64_t catalog_bytes = 0, chunk_count = 0, raw_bytes = 0, compressed_bytes = 0, checksum = 0;
+};
+uint64_t HashBytes(const void* data, size_t size) {
+    uint64_t hash = 1469598103934665603ULL; const auto* bytes = static_cast<const uint8_t*>(data);
+    for (size_t i = 0; i < size; ++i) { hash ^= bytes[i]; hash *= 1099511628211ULL; } return hash;
+}
+template <typename T> void AppendPod(std::vector<uint8_t>* out, T value) {
+    static_assert(std::is_trivially_copyable_v<T>); const auto* bytes = reinterpret_cast<const uint8_t*>(&value);
+    out->insert(out->end(), bytes, bytes + sizeof(value));
+}
+template <typename T> bool ConsumePod(const std::vector<uint8_t>& input, size_t* cursor, T* value) {
+    if (*cursor > input.size() || sizeof(T) > input.size() - *cursor) return false;
+    std::memcpy(value, input.data() + *cursor, sizeof(T)); *cursor += sizeof(T); return true;
+}
 
 DocumentGraph BuildGraph(const std::vector<Chunk>& chunks, const std::vector<Heading>& headings, size_t base) {
     DocumentGraph graph; graph.chunk_nodes = chunks.size(); graph.global_chunks.reserve(chunks.size());
@@ -160,7 +181,11 @@ struct RagEngine::Impl {
         const size_t workers = std::max<size_t>(1, config.server.job_workers);
         for (size_t i = 0; i < workers; ++i) job_threads.emplace_back([this] { Work(); });
     }
-    ~Impl() { { std::lock_guard lock(mutex); stopping = true; } job_ready.notify_all(); for (auto& thread : job_threads) if (thread.joinable()) thread.join(); }
+    ~Impl() {
+        { std::lock_guard lock(mutex); stopping = true; } job_ready.notify_all(); for (auto& thread : job_threads) if (thread.joinable()) thread.join();
+        SaveLexicalIndex();
+        SaveVectorIndexes();
+    }
     RemoteProvider remote_embedding;
     RemoteProvider chat;
     LocalEmbedder local;
@@ -186,12 +211,139 @@ struct RagEngine::Impl {
     std::condition_variable job_ready;
     std::vector<std::thread> job_threads;
     bool stopping = false;
+    bool replay_skip_lexical = false;
     std::unordered_map<std::string, json> traces;
     std::deque<std::string> trace_order;
     size_t trace_memory;
     std::filesystem::path trace_path;
     std::mutex trace_file_mutex;
     std::ofstream trace_output;
+    std::filesystem::path content_path;
+    std::ofstream content_output;
+    uint64_t content_cursor = 0;
+    bool content_replay_reuse = false;
+
+    struct ContentManifest { uint64_t magic = 0x315458544741524dULL; uint64_t catalog_bytes = 0; uint64_t content_bytes = 0; };
+
+    void BeginContentReplay(uint64_t catalog_bytes) {
+        content_path = data_path / "content.dat";
+        ContentManifest manifest{};
+        std::ifstream input(data_path / "content.manifest", std::ios::binary);
+        input.read(reinterpret_cast<char*>(&manifest), sizeof(manifest));
+        content_replay_reuse = input.good() && manifest.magic == ContentManifest{}.magic &&
+            manifest.catalog_bytes == catalog_bytes && std::filesystem::exists(content_path) &&
+            std::filesystem::file_size(content_path) == manifest.content_bytes;
+        content_cursor = 0;
+        if (!content_replay_reuse) {
+            content_output.open(content_path.string() + ".tmp", std::ios::binary | std::ios::trunc);
+            if (!content_output) throw std::runtime_error("cannot create disk-backed RAG content store");
+        }
+    }
+    void StoreContent(Chunk* chunk, bool replay) {
+        if (!chunk || chunk->text.size() > UINT32_MAX) throw std::runtime_error("chunk is too large for content store");
+        chunk->content_offset = content_cursor; chunk->content_bytes = static_cast<uint32_t>(chunk->text.size());
+        if (replay) {
+            if (!content_replay_reuse) content_output.write(chunk->text.data(), static_cast<std::streamsize>(chunk->text.size()));
+        } else {
+            std::ofstream output(content_path, std::ios::binary | std::ios::app);
+            if (!output) throw std::runtime_error("cannot append disk-backed RAG content");
+            output.write(chunk->text.data(), static_cast<std::streamsize>(chunk->text.size()));
+            if (!output) throw std::runtime_error("failed to append disk-backed RAG content");
+        }
+        content_cursor += chunk->text.size();
+    }
+    void WriteContentManifest(uint64_t catalog_bytes) {
+        ContentManifest manifest; manifest.catalog_bytes = catalog_bytes; manifest.content_bytes = content_cursor;
+        const auto temporary = (data_path / "content.manifest").string() + ".tmp";
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        output.write(reinterpret_cast<const char*>(&manifest), sizeof(manifest)); output.close();
+        if (!output.good()) throw std::runtime_error("failed to persist RAG content manifest");
+        std::filesystem::rename(temporary, data_path / "content.manifest");
+    }
+    void FinalizeContentReplay(uint64_t catalog_bytes) {
+        if (content_replay_reuse) {
+            if (content_cursor != std::filesystem::file_size(content_path)) throw std::runtime_error("disk-backed RAG content size mismatch");
+            return;
+        }
+        content_output.close(); if (!content_output.good()) throw std::runtime_error("failed to flush disk-backed RAG content");
+        std::filesystem::rename(content_path.string() + ".tmp", content_path);
+        WriteContentManifest(catalog_bytes);
+    }
+    std::string LoadContent(const Chunk& chunk) const {
+        std::string text(chunk.content_bytes, '\0');
+        std::ifstream input(content_path, std::ios::binary);
+        input.seekg(static_cast<std::streamoff>(chunk.content_offset));
+        if (!input.read(text.data(), static_cast<std::streamsize>(text.size()))) throw std::runtime_error("failed to read disk-backed RAG content");
+        return text;
+    }
+
+    bool LexicalSnapshotMatches(uint64_t catalog_bytes) const {
+        LexicalHeader header{}; std::ifstream input(data_path / "lexical.idx", std::ios::binary);
+        return static_cast<bool>(input.read(reinterpret_cast<char*>(&header), sizeof(header))) &&
+            header.magic == LexicalHeader{}.magic && header.catalog_bytes == catalog_bytes;
+    }
+    void SaveLexicalIndex() const {
+        const auto catalog = data_path / "catalog.mrg"; if (!std::filesystem::exists(catalog) || lexical_lengths.size() != chunks.size()) return;
+        std::vector<uint8_t> raw; raw.reserve(lexical_lengths.size() * sizeof(uint32_t) + lexical_postings.size() * 24);
+        AppendPod(&raw, static_cast<uint64_t>(lexical_lengths.size()));
+        for (size_t length : lexical_lengths) AppendPod(&raw, static_cast<uint32_t>(std::min<size_t>(length, UINT32_MAX)));
+        std::vector<std::string> terms; terms.reserve(lexical_postings.size()); for (const auto& item : lexical_postings) terms.push_back(item.first);
+        std::sort(terms.begin(), terms.end()); AppendPod(&raw, static_cast<uint64_t>(terms.size()));
+        for (const auto& term : terms) {
+            const auto& postings = lexical_postings.at(term); AppendPod(&raw, static_cast<uint32_t>(term.size())); raw.insert(raw.end(), term.begin(), term.end());
+            AppendPod(&raw, static_cast<uint64_t>(postings.size()));
+            for (const auto& [row, frequency] : postings) { AppendPod(&raw, static_cast<uint32_t>(row)); AppendPod(&raw, frequency); }
+        }
+        std::vector<uint8_t> compressed(ZSTD_compressBound(raw.size()));
+        const size_t bytes = ZSTD_compress(compressed.data(), compressed.size(), raw.data(), raw.size(), 3);
+        if (ZSTD_isError(bytes)) return;
+        compressed.resize(bytes);
+        LexicalHeader header; header.catalog_bytes = std::filesystem::file_size(catalog); header.chunk_count = chunks.size();
+        header.raw_bytes = raw.size(); header.compressed_bytes = compressed.size(); header.checksum = HashBytes(compressed.data(), compressed.size());
+        const auto target = data_path / "lexical.idx";
+        const auto temporary = target.string() + ".tmp";
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc); output.write(reinterpret_cast<const char*>(&header), sizeof(header));
+        output.write(reinterpret_cast<const char*>(compressed.data()), static_cast<std::streamsize>(compressed.size())); output.close();
+        if (output.good()) { std::error_code error; std::filesystem::rename(temporary, target, error); if (error) std::filesystem::remove(temporary); }
+    }
+    bool LoadLexicalIndex(uint64_t catalog_bytes) {
+        LexicalHeader header{}; std::ifstream input(data_path / "lexical.idx", std::ios::binary);
+        if (!input.read(reinterpret_cast<char*>(&header), sizeof(header)) || header.magic != LexicalHeader{}.magic ||
+            header.catalog_bytes != catalog_bytes || header.chunk_count != chunks.size() || header.raw_bytes > (1ULL << 34) || header.compressed_bytes > (1ULL << 34)) return false;
+        std::vector<uint8_t> compressed(header.compressed_bytes), raw(header.raw_bytes);
+        if (!input.read(reinterpret_cast<char*>(compressed.data()), static_cast<std::streamsize>(compressed.size())) || HashBytes(compressed.data(), compressed.size()) != header.checksum) return false;
+        if (ZSTD_decompress(raw.data(), raw.size(), compressed.data(), compressed.size()) != raw.size()) return false;
+        size_t cursor = 0; uint64_t length_count = 0; if (!ConsumePod(raw, &cursor, &length_count) || length_count != chunks.size()) return false;
+        std::vector<size_t> lengths(length_count); for (auto& length : lengths) { uint32_t value = 0; if (!ConsumePod(raw, &cursor, &value)) return false; length = value; }
+        uint64_t term_count = 0; if (!ConsumePod(raw, &cursor, &term_count) || term_count > raw.size()) return false;
+        std::unordered_map<std::string, std::vector<std::pair<size_t, uint16_t>>> postings; postings.reserve(term_count);
+        for (uint64_t i = 0; i < term_count; ++i) {
+            uint32_t term_bytes = 0; uint64_t count = 0; if (!ConsumePod(raw, &cursor, &term_bytes) || term_bytes > raw.size() - cursor) return false;
+            std::string term(reinterpret_cast<const char*>(raw.data() + cursor), term_bytes); cursor += term_bytes;
+            if (!ConsumePod(raw, &cursor, &count) || count > (raw.size() - cursor) / (sizeof(uint32_t) + sizeof(uint16_t))) return false;
+            auto& list = postings[std::move(term)]; list.reserve(count);
+            for (uint64_t p = 0; p < count; ++p) { uint32_t row = 0; uint16_t frequency = 0; if (!ConsumePod(raw, &cursor, &row) || !ConsumePod(raw, &cursor, &frequency) || row >= chunks.size()) return false; list.emplace_back(row, frequency); }
+        }
+        if (cursor != raw.size()) return false;
+        lexical_lengths = std::move(lengths); lexical_postings = std::move(postings); return true;
+    }
+
+    void FinalizeVectorIndexes() {
+        auto load_or_build = [&](VectorSpace& space, const char* name) {
+            if (!space.dimension || !space.dataset.RowCount()) return;
+            const auto path = data_path / name;
+            if (!mimicdb::LoadVectorIvf(space.dataset, 0, mimicdb::VectorMetric::kCosine, path.c_str())) {
+                mimicdb::BuildVectorIvf(space.dataset, 0, mimicdb::VectorMetric::kCosine);
+                mimicdb::SaveVectorIvf(space.dataset, 0, mimicdb::VectorMetric::kCosine, path.c_str());
+            }
+            space.dataset.ReleaseSealedFieldValues(0);
+        };
+        load_or_build(remote, "remote.ivf"); load_or_build(local_space, "local.ivf");
+    }
+    void SaveVectorIndexes() {
+        if (remote.dimension) mimicdb::SaveVectorIvf(remote.dataset, 0, mimicdb::VectorMetric::kCosine, (data_path / "remote.ivf").c_str());
+        if (local_space.dimension) mimicdb::SaveVectorIvf(local_space.dataset, 0, mimicdb::VectorMetric::kCosine, (data_path / "local.ivf").c_str());
+    }
 
     void AddTrace(json trace) {
         const std::string id = trace.at("trace_id");
@@ -341,16 +493,27 @@ RagEngine::RagEngine(Config config) : config_(std::move(config)), impl_(std::mak
     const auto binary_path = impl_->data_path / "catalog.mrg";
     BinaryCatalog binary(binary_path);
     if (binary.Exists()) {
+        const uint64_t catalog_bytes = std::filesystem::file_size(binary_path);
+        impl_->replay_skip_lexical = impl_->LexicalSnapshotMatches(catalog_bytes);
+        impl_->BeginContentReplay(catalog_bytes);
         binary.Replay([&](CatalogRecord&& record) {
             if (!record.remote_embeddings.empty()) record.document["remote_embeddings"] = std::move(record.remote_embeddings);
             if (!record.local_embeddings.empty()) record.document["local_embeddings"] = std::move(record.local_embeddings);
             record.document["_replay"] = true; Ingest(record.document);
         });
+        impl_->FinalizeContentReplay(catalog_bytes);
+        if (impl_->replay_skip_lexical && !impl_->LoadLexicalIndex(catalog_bytes)) throw std::runtime_error("persisted lexical index is corrupt");
+        if (!impl_->replay_skip_lexical) impl_->SaveLexicalIndex();
+        impl_->replay_skip_lexical = false;
+        impl_->FinalizeVectorIndexes();
         return;
     }
     const auto legacy_path = impl_->data_path / "catalog.jsonl";
-    std::ifstream input(legacy_path); if (!input) return;
+    std::ifstream input(legacy_path); if (!input) {
+        impl_->BeginContentReplay(0); impl_->FinalizeContentReplay(0); return;
+    }
     const auto migration_path = impl_->data_path / "catalog.mrg.migrating";
+    impl_->BeginContentReplay(0);
     if (std::filesystem::exists(migration_path)) std::filesystem::remove(migration_path);
     BinaryCatalog migration(migration_path); std::string line; size_t migrated = 0;
     while (std::getline(input, line)) {
@@ -360,6 +523,8 @@ RagEngine::RagEngine(Config config) : config_(std::move(config)), impl_(std::mak
         row["_replay"] = true; Ingest(row); migration.Append(record); ++migrated;
     }
     input.close(); if (migrated) std::filesystem::rename(migration_path, binary_path);
+    impl_->FinalizeContentReplay(std::filesystem::exists(binary_path) ? std::filesystem::file_size(binary_path) : 0);
+    impl_->FinalizeVectorIndexes();
 }
 RagEngine::~RagEngine() = default;
 
@@ -393,9 +558,11 @@ json RagEngine::Ingest(const json& request) {
         if (end < text.size()) { const size_t boundary = text.rfind(' ', end); if (boundary != std::string::npos && boundary > start + 80) end = boundary; }
         created.push_back({StableId(version_id + std::to_string(ordinal)), document_id, version_id, tenant, scope, text.substr(start, end - start), source, title, ordinal, start, end, metadata});
         for (size_t heading = 0; heading < headings.size() && headings[heading].position < end; ++heading) created.back().section = heading;
-        std::unordered_map<std::string, uint16_t> counts;
-        for (const auto& term : Tokenize(created.back().text)) { auto& count = counts[term]; if (count != UINT16_MAX) ++count; }
-        created_terms.push_back(std::move(counts));
+        if (!impl_->replay_skip_lexical) {
+            std::unordered_map<std::string, uint16_t> counts;
+            for (const auto& term : Tokenize(created.back().text)) { auto& count = counts[term]; if (count != UINT16_MAX) ++count; }
+            created_terms.push_back(std::move(counts));
+        }
         if (end == text.size()) break;
         start = end > overlap ? end - overlap : end;
     }
@@ -420,6 +587,8 @@ json RagEngine::Ingest(const json& request) {
         std::unique_lock lock(impl_->state_mutex);
         auto found = impl_->current_versions.find(document_id);
         if (found != impl_->current_versions.end() && found->second == version_id) return {{"document_id", document_id}, {"version_id", version_id}, {"generation", impl_->current_generations[document_id]}, {"chunk_count", impl_->current_chunk_counts[document_id]}, {"unchanged", true}};
+        const bool replay = request.value("_replay", false);
+        for (auto& chunk : created) impl_->StoreContent(&chunk, replay);
         const size_t base = impl_->chunks.size();
         impl_->chunks.insert(impl_->chunks.end(), created.begin(), created.end());
         const uint32_t graph_index = static_cast<uint32_t>(impl_->graphs.size());
@@ -434,8 +603,9 @@ json RagEngine::Ingest(const json& request) {
             for (const auto& [term, count] : created_terms[i]) { length += count; impl_->lexical_postings[term].emplace_back(base + i, count); }
             impl_->lexical_lengths.push_back(length);
         }
-        if (remote_indexed) for (size_t i = 0; i < remote_vectors.size(); ++i) impl_->remote.Add(remote_vectors[i], created[i], base + i);
-        if (local_indexed) for (size_t i = 0; i < local_vectors.size(); ++i) impl_->local_space.Add(local_vectors[i], created[i], base + i);
+        const bool maintain_ivf = !replay;
+        if (remote_indexed) for (size_t i = 0; i < remote_vectors.size(); ++i) impl_->remote.Add(remote_vectors[i], created[i], base + i, maintain_ivf);
+        if (local_indexed) for (size_t i = 0; i < local_vectors.size(); ++i) impl_->local_space.Add(local_vectors[i], created[i], base + i, maintain_ivf);
         impl_->current_versions[document_id] = version_id;
         impl_->current_generations[document_id] = generation;
         impl_->current_chunk_counts[document_id] = created.size();
@@ -446,7 +616,9 @@ json RagEngine::Ingest(const json& request) {
             if (remote_indexed) persisted["remote_model_identity"] = impl_->remote.identity;
             if (local_indexed) persisted["local_model_identity"] = impl_->local_space.identity;
             BinaryCatalog(impl_->data_path / "catalog.mrg").Append({std::move(persisted), remote_indexed ? remote_vectors : std::vector<std::vector<float>>{}, local_indexed ? local_vectors : std::vector<std::vector<float>>{}});
+            impl_->WriteContentManifest(std::filesystem::file_size(impl_->data_path / "catalog.mrg"));
         }
+        for (size_t i = base; i < impl_->chunks.size(); ++i) std::string().swap(impl_->chunks[i].text);
     }
     return {{"document_id", document_id}, {"version_id", version_id}, {"generation", generation}, {"chunk_count", created.size()}, {"remote_indexed", remote_indexed}, {"local_indexed", local_indexed}, {"unchanged", false}};
 }
@@ -479,7 +651,7 @@ json RagEngine::Retrieve(const json& request) {
               config_.server.graph_min_seed_score);
           graph_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - graph_started).count(); graph_examined = stats.first; graph_hits = stats.second;
       }
-      for (const auto& item : ranked) { const auto& chunk = impl_->chunks[item.chunk]; hits.push_back({{"node_id", chunk.id}, {"chunk_id", chunk.id}, {"document_id", chunk.document_id}, {"version_id", chunk.version_id}, {"tenant_id", chunk.tenant}, {"access_scope", chunk.scope}, {"text", chunk.text}, {"source_uri", chunk.source_uri}, {"title", chunk.title}, {"metadata", chunk.metadata}, {"ordinal", chunk.ordinal}, {"token_estimate", (chunk.text.size() + 3) / 4}, {"start_char", chunk.start}, {"end_char", chunk.end}, {"score", item.score}, {"vector_rank", item.vector_rank}, {"lexical_rank", item.lexical_rank}, {"graph_hops", item.graph_hops}, {"graph_relation", item.graph_relation}}); }
+      for (const auto& item : ranked) { const auto& chunk = impl_->chunks[item.chunk]; const auto text = impl_->LoadContent(chunk); hits.push_back({{"node_id", chunk.id}, {"chunk_id", chunk.id}, {"document_id", chunk.document_id}, {"version_id", chunk.version_id}, {"tenant_id", chunk.tenant}, {"access_scope", chunk.scope}, {"text", text}, {"source_uri", chunk.source_uri}, {"title", chunk.title}, {"metadata", chunk.metadata}, {"ordinal", chunk.ordinal}, {"token_estimate", (text.size() + 3) / 4}, {"start_char", chunk.start}, {"end_char", chunk.end}, {"score", item.score}, {"vector_rank", item.vector_rank}, {"lexical_rank", item.lexical_rank}, {"graph_hops", item.graph_hops}, {"graph_relation", item.graph_relation}}); }
     }
     const std::string trace_id = HexId(query);
     json ids = json::array(); for (const auto& hit : hits) ids.push_back(hit["chunk_id"]);
@@ -567,7 +739,7 @@ json RagEngine::GraphExpand(const json& request) const {
         if (edge.target < graph.chunk_nodes) {
             const size_t chunk_index = graph.global_chunks[edge.target]; if (!allowed.count(chunk_index)) continue; const auto& chunk = impl_->chunks[chunk_index];
             node.update({{"chunk_id", chunk.id}, {"document_id", chunk.document_id}, {"version_id", chunk.version_id}, {"tenant_id", chunk.tenant},
-                {"access_scope", chunk.scope}, {"text", chunk.text}, {"source_uri", chunk.source_uri}, {"title", chunk.title},
+                {"access_scope", chunk.scope}, {"text", impl_->LoadContent(chunk)}, {"source_uri", chunk.source_uri}, {"title", chunk.title},
                 {"ordinal", chunk.ordinal}, {"start_char", chunk.start}, {"end_char", chunk.end}});
         }
         nodes.push_back(std::move(node));
@@ -602,11 +774,15 @@ json RagEngine::Health() const {
     const bool binary = std::filesystem::exists(binary_catalog);
     const uint64_t catalog_bytes = binary ? std::filesystem::file_size(binary_catalog)
         : (std::filesystem::exists(legacy_catalog) ? std::filesystem::file_size(legacy_catalog) : 0);
+    const auto content = impl_->data_path / "content.dat", lexical = impl_->data_path / "lexical.idx";
     return {{"status", "ok"}, {"ready", true}, {"implementation", "c++"}, {"chunks", impl_->chunks.size()}, {"pending_jobs", impl_->job_queue.size()},
         {"embedding_model_key", impl_->remote.identity}, {"remote_embedding_healthy", impl_->remote_healthy.load()},
         {"graph_documents", impl_->graphs.size()}, {"graph_edges", impl_->graph_edges},
         {"local_embedding_available", impl_->local.Available()}, {"local_embedding_device", impl_->local.UsingGpu() ? "gpu" : "cpu"},
         {"catalog_format", binary ? "mrg1_zstd_float32" : "legacy_jsonl"}, {"catalog_bytes", catalog_bytes},
+        {"content_storage", "disk_offsets"}, {"content_bytes", std::filesystem::exists(content) ? std::filesystem::file_size(content) : 0},
+        {"lexical_index_persisted", std::filesystem::exists(lexical)}, {"lexical_index_bytes", std::filesystem::exists(lexical) ? std::filesystem::file_size(lexical) : 0},
+        {"sealed_vectors_resident", impl_->local_space.dataset.SealedFieldValuesResident(0)},
         {"remote_vector_rows", impl_->remote.dataset.RowCount()}, {"local_vector_rows", impl_->local_space.dataset.RowCount()}};
 }
 }  // namespace mimicrag

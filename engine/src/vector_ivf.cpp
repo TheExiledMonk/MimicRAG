@@ -15,6 +15,12 @@
 #include <queue>
 #include <thread>
 #include <unordered_map>
+#if defined(__linux__)
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #include "mimicdb/dataset.h"
 #include "mimicdb/compression.h"
@@ -24,6 +30,8 @@ bool VectorSearchCandidates(const Dataset&, size_t, const float*, size_t, size_t
                             VectorMetric, const std::vector<uint32_t>&,
                             std::vector<VectorSearchHit>*,
                             const std::vector<VectorSearchPredicate>&);
+bool VectorRowMatchesPredicates(const Dataset&, uint64_t,
+                                const std::vector<VectorSearchPredicate>&);
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -46,18 +54,41 @@ struct Bounds {
     std::vector<double> minimum;
     std::vector<double> maximum;
 };
+#if defined(__linux__)
+struct MappedRegion {
+    void* address = MAP_FAILED; size_t size = 0;
+    ~MappedRegion() { if (address != MAP_FAILED) munmap(address, size); }
+};
+#endif
 struct Index {
     size_t rows = 0, source_rows = 0, segments = 0, dimension = 0;
     size_t routing_dimensions = 0, centroids = 0;
     std::vector<uint32_t> routing_columns, offsets, row_ids;
     std::vector<float> centers, sketch_scales;
     std::vector<float> packed_vectors;
+#if defined(__linux__)
+    std::shared_ptr<MappedRegion> mapped_region;
+    const float* mapped_vectors = nullptr;
+    size_t mapped_vector_count = 0;
+#endif
     std::vector<float> inverse_norms, norm_squared;
     std::vector<int8_t> sketches;  // list-ordered, row-major routing projection
     std::vector<Bounds> bounds;
     uint64_t builds = 0;
     double build_seconds = 0.0;
     double mean_assignment_distance = 0.0;
+    const float* PackedVectors() const {
+#if defined(__linux__)
+        if (mapped_vectors) return mapped_vectors;
+#endif
+        return packed_vectors.data();
+    }
+    size_t PackedVectorCount() const {
+#if defined(__linux__)
+        if (mapped_vectors) return mapped_vector_count;
+#endif
+        return packed_vectors.size();
+    }
 };
 struct ActiveIndex {
     size_t rows=0, dimension=0;
@@ -313,7 +344,8 @@ public:
         pod(index->routing_dimensions);pod(index->centroids);pod(index->builds);
         pod(index->build_seconds);pod(index->mean_assignment_distance);
         vector(index->routing_columns);vector(index->offsets);vector(index->row_ids);
-        vector(index->centers);vector(index->sketch_scales);vector(index->packed_vectors);
+        vector(index->centers);vector(index->sketch_scales);
+        { uint64_t count=index->PackedVectorCount();pod(count);const auto* p=reinterpret_cast<const uint8_t*>(index->PackedVectors());payload.insert(payload.end(),p,p+count*sizeof(float)); }
         vector(index->inverse_norms);vector(index->norm_squared);vector(index->sketches);
         uint64_t bounds=index->bounds.size();pod(bounds);
         for(const auto& bound:index->bounds){uint8_t numeric=bound.numeric;pod(numeric);vector(bound.minimum);vector(bound.maximum);}
@@ -332,28 +364,48 @@ public:
     }
     bool Load(const Dataset& dataset,size_t field,VectorMetric metric,const char* path) {
         struct Header{uint32_t magic,version;uint64_t schema,rows,payload_bytes,checksum;uint32_t field,metric;} header{};
-        std::ifstream in(path,std::ios::binary);in.read(reinterpret_cast<char*>(&header),sizeof(header));
         size_t rows=0;for(const auto& segment:dataset.Segments())rows+=segment.RowCount();
-        if(!in.good()||header.magic!=0x4D495646U||header.version!=1||header.schema!=dataset.SchemaFingerprint()||
+#if defined(__linux__)
+        const int fd=open(path,O_RDONLY);if(fd<0)return false;struct stat status{};
+        if(fstat(fd,&status)!=0||status.st_size<static_cast<off_t>(sizeof(header))){close(fd);return false;}
+        auto mapping=std::make_shared<MappedRegion>();mapping->size=static_cast<size_t>(status.st_size);
+        mapping->address=mmap(nullptr,mapping->size,PROT_READ,MAP_SHARED,fd,0);close(fd);
+        if(mapping->address==MAP_FAILED)return false;
+        std::memcpy(&header,mapping->address,sizeof(header));
+        if(header.payload_bytes>mapping->size-sizeof(header))return false;
+        const uint8_t* payload=reinterpret_cast<const uint8_t*>(mapping->address)+sizeof(header);
+#else
+        std::ifstream in(path,std::ios::binary);in.read(reinterpret_cast<char*>(&header),sizeof(header));
+        if(!in.good())return false;std::vector<uint8_t> payload_storage(header.payload_bytes);
+        in.read(reinterpret_cast<char*>(payload_storage.data()),payload_storage.size());if(!in.good())return false;
+        const uint8_t* payload=payload_storage.data();
+#endif
+        if(header.magic!=0x4D495646U||header.version!=1||header.schema!=dataset.SchemaFingerprint()||
            header.rows!=rows||header.field!=field||header.metric!=static_cast<uint32_t>(metric)||header.payload_bytes>(1ULL<<40))return false;
-        std::vector<uint8_t> payload(header.payload_bytes);in.read(reinterpret_cast<char*>(payload.data()),payload.size());
-        if(!in.good())return false;
         uint64_t checksum=1469598103934665603ULL;
-        for(uint8_t byte:payload){checksum^=byte;checksum*=1099511628211ULL;}if(checksum!=header.checksum)return false;
-        size_t cursor=0;auto pod=[&](auto* value){if(cursor>payload.size()||sizeof(*value)>payload.size()-cursor)return false;std::memcpy(value,payload.data()+cursor,sizeof(*value));cursor+=sizeof(*value);return true;};
-        auto vector=[&](auto* values){uint64_t count=0;if(!pod(&count)||count>SIZE_MAX/sizeof((*values)[0])||count*sizeof((*values)[0])>payload.size()-cursor)return false;values->resize(count);std::memcpy(values->data(),payload.data()+cursor,count*sizeof((*values)[0]));cursor+=count*sizeof((*values)[0]);return true;};
+        for(size_t i=0;i<header.payload_bytes;++i){checksum^=payload[i];checksum*=1099511628211ULL;}if(checksum!=header.checksum)return false;
+        size_t cursor=0;auto pod=[&](auto* value){if(cursor>header.payload_bytes||sizeof(*value)>header.payload_bytes-cursor)return false;std::memcpy(value,payload+cursor,sizeof(*value));cursor+=sizeof(*value);return true;};
+        auto vector=[&](auto* values){uint64_t count=0;if(!pod(&count)||count>SIZE_MAX/sizeof((*values)[0])||count*sizeof((*values)[0])>header.payload_bytes-cursor)return false;values->resize(count);std::memcpy(values->data(),payload+cursor,count*sizeof((*values)[0]));cursor+=count*sizeof((*values)[0]);return true;};
         auto index=std::make_shared<Index>();
         if(!pod(&index->rows)||!pod(&index->source_rows)||!pod(&index->segments)||!pod(&index->dimension)||
            !pod(&index->routing_dimensions)||!pod(&index->centroids)||!pod(&index->builds)||
            !pod(&index->build_seconds)||!pod(&index->mean_assignment_distance)||
            !vector(&index->routing_columns)||!vector(&index->offsets)||!vector(&index->row_ids)||
-           !vector(&index->centers)||!vector(&index->sketch_scales)||!vector(&index->packed_vectors)||
-           !vector(&index->inverse_norms)||!vector(&index->norm_squared)||!vector(&index->sketches))return false;
+           !vector(&index->centers)||!vector(&index->sketch_scales))return false;
+        uint64_t packed_count=0;if(!pod(&packed_count)||packed_count>SIZE_MAX/sizeof(float)||packed_count*sizeof(float)>header.payload_bytes-cursor)return false;
+#if defined(__linux__)
+        if(reinterpret_cast<uintptr_t>(payload+cursor)%alignof(float)!=0)return false;
+        index->mapped_region=mapping;index->mapped_vectors=reinterpret_cast<const float*>(payload+cursor);index->mapped_vector_count=packed_count;
+#else
+        index->packed_vectors.resize(packed_count);std::memcpy(index->packed_vectors.data(),payload+cursor,packed_count*sizeof(float));
+#endif
+        cursor+=packed_count*sizeof(float);
+        if(!vector(&index->inverse_norms)||!vector(&index->norm_squared)||!vector(&index->sketches))return false;
         uint64_t bounds=0;if(!pod(&bounds)||bounds>dataset.Fields().size())return false;index->bounds.resize(bounds);
         for(auto& bound:index->bounds){uint8_t numeric=0;if(!pod(&numeric)||!vector(&bound.minimum)||!vector(&bound.maximum))return false;bound.numeric=numeric!=0;}
-        if(cursor!=payload.size()||index->source_rows!=rows||index->dimension!=dataset.VectorDimension(field)||
+        if(cursor!=header.payload_bytes||index->source_rows!=rows||index->dimension!=dataset.VectorDimension(field)||
            index->offsets.size()!=index->centroids+1||index->row_ids.size()!=index->rows||
-           index->packed_vectors.size()!=index->rows*index->dimension)return false;
+           index->PackedVectorCount()!=index->rows*index->dimension)return false;
         {std::lock_guard lock(mutex_);indexes_[{&dataset,field,metric}]=std::move(index);}return true;
     }
     std::shared_ptr<const ActiveIndex> GetActive(const Dataset& dataset,size_t field,
@@ -454,8 +506,9 @@ bool VectorSearchIvf(const Dataset& dataset, size_t field, const float* query,
     if(const char* value=std::getenv("MIMICDB_IVF_MAX_ASSIGNMENT_DISTANCE")){
         const double parsed=std::strtod(value,nullptr);if(parsed>0)maximum_assignment_distance=parsed;
     }
-    if(probes==0 && metric==VectorMetric::kCosine &&
-       index->mean_assignment_distance>maximum_assignment_distance) {
+    const bool automatic_exact_fallback=probes==0 && metric==VectorMetric::kCosine &&
+        index->mean_assignment_distance>maximum_assignment_distance;
+    if(automatic_exact_fallback && dataset.SealedFieldValuesResident(field)) {
         const auto started=Clock::now();
         const bool ok=VectorSearch(dataset,field,query,dimension,top_k,metric,out,predicates);
         std::lock_guard lock(last_stats_mutex); last_stats={};
@@ -475,7 +528,11 @@ bool VectorSearchIvf(const Dataset& dataset, size_t field, const float* query,
                                    index->routing_columns,metric),c});
     }
     std::sort(ranked.begin(),ranked.end());
-    if (probes==0) {
+    if (automatic_exact_fallback) {
+        // The IVF file is list ordered but still contains every original float32
+        // vector, so an all-list scan is exact without restoring evicted columns.
+        probes=ranked.size();
+    } else if (probes==0) {
         probes=std::max<size_t>(4,size_t(std::sqrt(double(index->centroids))));
         // Easy queries have a pronounced routing gap and need fewer lists.
         if (ranked.size()>4 && ranked[4].first > ranked[0].first*1.8F) probes=4;
@@ -490,7 +547,7 @@ bool VectorSearchIvf(const Dataset& dataset, size_t field, const float* query,
     for(size_t p=0;p<probes;++p) for(uint32_t pos=index->offsets[ranked[p].second];pos<index->offsets[ranked[p].second+1];++pos) positions.push_back(pos);
     std::shared_ptr<const ActiveIndex> active;
     std::vector<uint32_t> active_positions;
-    if(predicates.empty()&&dataset.ActiveRowCount()){
+    if(dataset.ActiveRowCount()){
         active=Store::Instance().GetActive(dataset,field,metric,*index);
         for(size_t p=0;p<probes;++p){const uint32_t center=ranked[p].second;
             for(uint32_t pos=active->offsets[center];pos<active->offsets[center+1];++pos)
@@ -510,7 +567,7 @@ bool VectorSearchIvf(const Dataset& dataset, size_t field, const float* query,
     if (const char* value=std::getenv("MIMICDB_IVF_SHORTLIST")) { const size_t parsed=std::strtoull(value,nullptr,10); if(parsed) shortlist_limit=std::max(parsed,top_k); }
     shortlist_limit=std::min(shortlist_limit,positions.size());
     // Predicate paths retain all row IDs: the existing scorer intersects predicates before full vectors.
-    const bool use_shortlist=predicates.empty() && positions.size()>16384 &&
+    const bool use_shortlist=!automatic_exact_fallback && predicates.empty() && positions.size()>16384 &&
                              positions.size()>shortlist_limit;
     if (use_shortlist) {
         std::vector<int16_t> quantized(index->routing_dimensions);
@@ -544,7 +601,7 @@ bool VectorSearchIvf(const Dataset& dataset, size_t field, const float* query,
     const double shortlist_seconds=std::chrono::duration<double>(Clock::now()-shortlist_start).count();
     const auto rerank_start=Clock::now();
     bool ok=false;
-    if(predicates.empty()) {
+    {
         struct Worse { bool operator()(const VectorSearchHit& a,const VectorSearchHit& b) const {
             return a.distance!=b.distance?a.distance<b.distance:a.row_id<b.row_id; } };
         std::priority_queue<VectorSearchHit,std::vector<VectorSearchHit>,Worse> heap;
@@ -559,7 +616,11 @@ bool VectorSearchIvf(const Dataset& dataset, size_t field, const float* query,
             for(size_t i=first;i<last;++i){
                 const bool sealed=i<positions.size();
                 const uint32_t position=sealed?positions[i]:active_positions[i-positions.size()];
-                const float* vector=sealed?index->packed_vectors.data()+size_t(position)*dimension:
+                const uint64_t row_id=sealed?index->row_ids[position]:index->source_rows+active->positions[position];
+                // Preserve the predicate-before-vector-load invariant even when sealed
+                // source vectors have been evicted in favor of the mapped IVF layout.
+                if(!predicates.empty()&&!VectorRowMatchesPredicates(dataset,row_id,predicates))continue;
+                const float* vector=sealed?index->PackedVectors()+size_t(position)*dimension:
                     active->vectors.data()+size_t(position)*dimension;
                 const float inverse_norm=sealed?index->inverse_norms[position]:active->inverse_norms[position];
                 const float stored_norm=sealed?index->norm_squared[position]:active->norm_squared[position];
@@ -568,7 +629,6 @@ bool VectorSearchIvf(const Dataset& dataset, size_t field, const float* query,
                 if(metric==VectorMetric::kCosine) distance=inverse_norm<=0||query_inverse_norm<=0?1.0F:
                     1.0F-dot*inverse_norm*query_inverse_norm;
                 else if(metric==VectorMetric::kL2Squared) distance=stored_norm+query_norm_squared-2.0F*dot;
-                const uint64_t row_id=sealed?index->row_ids[position]:index->source_rows+active->positions[position];
                 const VectorSearchHit hit{row_id,distance};
                 if(local.size()<top_k)local.push(hit);
                 else if(hit.distance<local.top().distance||(hit.distance==local.top().distance&&hit.row_id<local.top().row_id)){local.pop();local.push(hit);}
@@ -582,7 +642,7 @@ bool VectorSearchIvf(const Dataset& dataset, size_t field, const float* query,
         ok=true;
         out->resize(heap.size()); for(size_t i=heap.size();i>0;--i){(*out)[i-1]=heap.top();heap.pop();}
         std::sort(out->begin(),out->end(),[](auto a,auto b){return a.distance!=b.distance?a.distance<b.distance:a.row_id<b.row_id;});
-    } else ok=VectorSearchCandidates(dataset,field,query,dimension,top_k,metric,rows,out,predicates);
+    }
     const double rerank_seconds=std::chrono::duration<double>(Clock::now()-rerank_start).count();
     {
         std::lock_guard lock(last_stats_mutex);
@@ -593,6 +653,7 @@ bool VectorSearchIvf(const Dataset& dataset, size_t field, const float* query,
         last_stats.routing_seconds=routing_seconds; last_stats.shortlist_seconds=shortlist_seconds;
         last_stats.rerank_seconds=rerank_seconds; last_stats.build_seconds=index->build_seconds;
         last_stats.mean_assignment_distance=index->mean_assignment_distance;
+        last_stats.exact_fallback=automatic_exact_fallback;
         last_key={&dataset,field,metric};
     }
     return ok;

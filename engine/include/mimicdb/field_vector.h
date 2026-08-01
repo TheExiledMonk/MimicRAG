@@ -68,6 +68,8 @@ public:
     bool LoadVarlen(const uint32_t* lengths, size_t count, const uint8_t* bytes, size_t bytes_size);
     void Reserve(size_t size);
     void ReleaseStorage();
+    void ReleaseValuesStorage();
+    bool ValuesResident() const;
 
 private:
     std::string name_;

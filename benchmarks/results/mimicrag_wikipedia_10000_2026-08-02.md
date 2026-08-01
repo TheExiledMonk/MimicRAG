@@ -20,8 +20,20 @@ Ingestion completed in 919.74 seconds: 10.87 articles/s. The streaming parser re
 | MRG1 Zstd metadata + float32 vectors | 542,590,732 | 20.72% | ~24 s |
 
 The binary catalog is 4.83x smaller (79.28% reduction) and reduced measured restart
-time by about 48%. Runtime memory remains approximately 2.3 GiB because the current
-engine expands text, lexical postings, graphs, and float32 vectors into memory.
+time by about 48%.
+
+### Disk-backed runtime indexes
+
+The follow-up storage pass persists a 54 MiB compressed lexical snapshot, a 220 MiB
+offset-addressed content store, and a 439 MiB IVF snapshot. Article/chunk text is no
+longer retained in RAM: retrieval and graph expansion read only selected passages.
+The IVF float32 block is memory-mapped, and duplicate sealed source-vector columns
+are evicted while the active append segment remains writable. When the IVF noise guard
+requests exact search, it scans all mapped vectors rather than restoring the heap copy.
+
+Warm steady-state RSS fell from 2,308–2,425 MiB to 1,913 MiB; 477 MiB of that is
+clean, reclaimable file-backed mapping, leaving 1,417 MiB private/anonymous memory.
+A warm persisted-index restart became ready in 4.76 seconds.
 
 ## Retrieval
 
@@ -39,6 +51,11 @@ validated as HTTP 200.
 |---|---:|---:|---:|---:|---:|---:|
 | Sequential | 50 | 22.05 | 45.35 ms | 43.50 ms | 53.18 ms | 0 |
 | 8 concurrent | 200 | 129.82 | 55.76 ms | 54.68 ms | 67.56 ms | 0 |
+
+After disk-backed content, mapped exact-vector fallback, and persisted lexical/IVF
+loading, the same five-query loop measured 32.52 QPS sequential (26.83 ms average,
+26.11 ms p50, 32.06 ms p95) and 188.21 QPS at eight-way concurrency (36.02 ms
+average, 34.20 ms p50, 45.70 ms p95), with no HTTP errors.
 
 The legacy JSONL file was removed only after binary-only restart, health counters,
 retrieval rankings, checksums, and concurrency tests passed. The original Wikimedia

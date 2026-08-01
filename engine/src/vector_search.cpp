@@ -351,6 +351,20 @@ float VectorDotProduct(const float* left, const float* right, size_t dimension) 
     return FastDot(left, right, dimension);
 }
 
+bool VectorRowMatchesPredicates(const Dataset& dataset, uint64_t row_id,
+                                const std::vector<VectorSearchPredicate>& predicates) {
+    uint64_t base = 0;
+    for (const auto& segment : dataset.Segments()) {
+        if (row_id < base + segment.RowCount())
+            return Matches(segment.Fields(), static_cast<size_t>(row_id - base),
+                           &segment.CompressedColumns(), predicates);
+        base += segment.RowCount();
+    }
+    if (row_id < base + dataset.ActiveRowCount())
+        return Matches(dataset.ActiveFields(), static_cast<size_t>(row_id - base), nullptr, predicates);
+    return false;
+}
+
 namespace {
 void CalibrateGpuCrossover(const Dataset& dataset, size_t field_index,
                            const float* query, size_t dimension, VectorMetric metric,

@@ -43,6 +43,8 @@ public:
     const std::vector<ColumnCompressionKind>& CompressionKinds() const;
     void SetCompressionKinds(std::vector<ColumnCompressionKind> kinds);
     const std::vector<CompressedColumnView>& CompressedColumns() const;
+    void ReleaseFieldValues(size_t field_index);
+    bool FieldValuesResident(size_t field_index) const;
 
 private:
     size_t row_capacity_ = 0;

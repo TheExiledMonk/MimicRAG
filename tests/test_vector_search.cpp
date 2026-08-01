@@ -172,6 +172,14 @@ int main() {
     assert(mimicdb::VectorIvfReady(restored, 0, mimicdb::VectorMetric::kCosine));
     assert(mimicdb::VectorSearch(restored, 0, filtered_query, 2, 1,
                                  mimicdb::VectorMetric::kCosine, &hits));
+    restored.ReleaseSealedFieldValues(0);
+    assert(!restored.SealedFieldValuesResident(0));
+    const std::vector<mimicdb::VectorSearchPredicate> restored_filter = {
+        {1, mimicdb::CompareOp::kEq, 7.0}};
+    assert(mimicdb::VectorSearchIvf(restored, 0, filtered_query, 2, 1,
+                                    mimicdb::VectorMetric::kCosine, 0, &hits,
+                                    restored_filter));
+    assert(!hits.empty());
     {
         std::fstream corrupt(ivf_path, std::ios::binary | std::ios::in | std::ios::out);
         corrupt.seekg(-1, std::ios::end);
