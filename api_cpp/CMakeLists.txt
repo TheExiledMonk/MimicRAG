@@ -11,4 +11,5 @@ target_include_directories(mimicapi_core
 target_link_libraries(mimicapi_core
     PUBLIC
         mimicdb_engine
+        mimicdb_build_flags
 )

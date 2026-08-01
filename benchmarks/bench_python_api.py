@@ -4,8 +4,11 @@ import subprocess
 import time
 from pathlib import Path
 import sys
+import os
 
 from mimicapi import Dataset
+from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives import serialization
 
 
 _LOCK_MODES = ("append-only", "update-only", "full-crud")
@@ -120,6 +123,7 @@ def run_network_bench(
     port: int,
     server_bin: str | None,
     database: str,
+    identity_key_path: str | None,
 ) -> dict[str, float]:
     repo_root = Path(__file__).resolve().parents[1]
     if str(repo_root) not in sys.path:
@@ -132,8 +136,14 @@ def run_network_bench(
         resolved = resolve_server_bin(server_bin, repo_root)
         server_proc = subprocess.Popen([resolved, str(port)])
         time.sleep(0.2)
+        _bootstrap_auth(host, port, identity_key_path)
     try:
-        client = MimicDBClient(host=host, port=port, default_db=database)
+        client = MimicDBClient(
+            host=host,
+            port=port,
+            default_db=database,
+            identity_key_path=identity_key_path,
+        )
         client.ping()
     except Exception:
         if server_proc is not None:
@@ -244,6 +254,49 @@ def resolve_server_bin(server_bin: str, repo_root: Path) -> str:
     )
 
 
+def _load_or_create_identity_key(path: Path) -> bytes:
+    if path.exists():
+        data = path.read_bytes()
+        key = ed25519.Ed25519PrivateKey.from_private_bytes(data)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        key = ed25519.Ed25519PrivateKey.generate()
+        path.write_bytes(
+            key.private_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PrivateFormat.Raw,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        )
+    return key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+
+
+def _bootstrap_auth(host: str, port: int, identity_key_path: str | None) -> None:
+    if not identity_key_path:
+        return
+    repo_root = Path(__file__).resolve().parents[1]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    from client.mimicdb_client import MimicDBClient, ProtocolError
+
+    key_path = Path(identity_key_path).expanduser()
+    public_key = _load_or_create_identity_key(key_path)
+    client = MimicDBClient(
+        host=host,
+        port=port,
+        identity_key_path=str(key_path),
+    )
+    try:
+        client.auth_init_root(public_key, comment="bench-root")
+    except ProtocolError:
+        pass
+    finally:
+        client.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="MimicDB Python API benchmark")
     parser.add_argument("--rows", type=int, default=200_000)
@@ -256,6 +309,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=9000)
     parser.add_argument("--server-bin", default=None)
     parser.add_argument("--database", default="default")
+    parser.add_argument("--identity-key", default=None)
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--lock-mode", choices=_LOCK_MODES, default="append-only")
     parser.add_argument("--all-lock-modes", action="store_true")
@@ -280,6 +334,9 @@ def main() -> None:
         if args.transport == "both":
             print("===")
     if args.transport in ("network", "both"):
+        identity_key_path = args.identity_key or os.getenv("MIMICDB_BENCH_IDENTITY_KEY")
+        if not identity_key_path:
+            identity_key_path = str(Path.home() / ".mimicdb" / "bench_identity")
         network_results = run_network_bench(
             args.rows,
             args.seed,
@@ -289,6 +346,7 @@ def main() -> None:
             args.port,
             args.server_bin,
             args.database,
+            identity_key_path,
         )
     if args.transport == "both" and local_results and network_results:
         print("comparison=local_vs_network")

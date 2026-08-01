@@ -41,6 +41,9 @@ std::vector<std::vector<size_t>> ScheduleSegments(size_t segment_count, size_t t
 void ScanSegmentsParallel(const std::vector<Segment>& segments, size_t thread_count,
                           PredicateFn predicate, void* predicate_ctx, ConsumeFn consume,
                           const std::vector<void*>& consume_ctxs);
+void ScanSegmentsParallelMaskFirst(const std::vector<Segment>& segments, size_t thread_count,
+                                   PredicateFn predicate, void* predicate_ctx, ConsumeFn consume,
+                                   const std::vector<void*>& consume_ctxs);
 void CollectRowIdsPacked(const PackedMask& mask, size_t count, std::vector<size_t>* out);
 std::vector<size_t> PruneSegmentsByPredicate(const std::vector<Segment>& segments,
                                              size_t field_index, CompareOp op, double value);

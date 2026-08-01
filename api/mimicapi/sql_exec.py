@@ -155,6 +155,40 @@ def _execute_aggregates(
     predicates = _compile_predicates(fields, flat_filters) if flat_filters else None
     out: dict[str, float] = {}
     stats: dict[str, float] = {}
+    if hasattr(client, "query_agg_multi_routed"):
+        requests: list[dict] = []
+        for agg in query.aggregates:
+            if agg.kind == "COUNT" and agg.column is None:
+                field_index = 0
+            else:
+                if agg.column is None or agg.column not in field_names:
+                    raise ValueError("aggregate column must be present in schema")
+                field_index = field_names.index(agg.column)
+            if agg.kind == "COUNT":
+                alias = agg.alias or "count"
+            else:
+                alias = agg.alias or f"{agg.kind.lower()}_{agg.column}"
+            requests.append(
+                {
+                    "kind": agg.kind,
+                    "field_index": field_index,
+                    "alias": alias,
+                }
+            )
+        result, stats = client.query_agg_multi_routed(
+            db,
+            query.dataset,
+            requests,
+            predicates=predicates,
+        )
+        for agg in query.aggregates:
+            if agg.kind == "COUNT":
+                key = agg.alias or "count"
+            else:
+                key = agg.alias or f"{agg.kind.lower()}_{agg.column}"
+            if key in result:
+                out[key] = result[key]
+        return [out], stats
     for agg in query.aggregates:
         if agg.kind in ("COUNT",):
             result, stats = client.query_agg_routed(

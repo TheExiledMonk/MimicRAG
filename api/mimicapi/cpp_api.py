@@ -39,14 +39,48 @@ class CppApiClient:
         limit: int = 0,
         offset: int = 0,
     ) -> list[dict]:
-        return self._core.scan(
-            db,
-            name,
-            columns or None,
-            predicates or None,
-            limit,
-            offset,
-        )
+        try:
+            return self._core.scan(
+                db,
+                name,
+                columns or None,
+                predicates or None,
+                limit,
+                offset,
+            )
+        except KeyError as exc:
+            raise RuntimeError(str(exc)) from exc
+        except RuntimeError as exc:
+            message = str(exc)
+            if "invalid predicate" in message:
+                raise TypeError(message) from exc
+            raise
+
+    def scan_debug(
+        self,
+        db: str,
+        name: str,
+        columns: list[str] | None = None,
+        predicates: list[tuple[int, str, float]] | None = None,
+        limit: int = 0,
+        offset: int = 0,
+    ) -> tuple[list[dict], dict]:
+        try:
+            return self._core.scan_debug(
+                db,
+                name,
+                columns or None,
+                predicates or None,
+                limit,
+                offset,
+            )
+        except KeyError as exc:
+            raise RuntimeError(str(exc)) from exc
+        except RuntimeError as exc:
+            message = str(exc)
+            if "invalid predicate" in message:
+                raise TypeError(message) from exc
+            raise
 
     def aggregate(
         self,
@@ -56,6 +90,15 @@ class CppApiClient:
         predicates: list[tuple[int, str, float]] | None = None,
     ) -> dict:
         return self._core.aggregate(db, name, field_index, predicates or None)
+
+    def aggregate_multi(
+        self,
+        db: str,
+        name: str,
+        requests: list[dict],
+        predicates: list[tuple[int, str, float]] | None = None,
+    ) -> dict:
+        return self._core.aggregate_multi(db, name, requests, predicates or None)
 
     def compression_stats(self, db: str, name: str) -> dict:
         return self._core.compression_stats(db, name)

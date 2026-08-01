@@ -282,6 +282,14 @@ class MySQLCursor:
         if missing:
             raise SQLExecutionError(f"unknown columns: {sorted(missing)}")
         existing = {row.get("_id") for row in _latest_rows(self._conn._client, self._conn._db, table, fields)}
+        existing_ids = None
+        seen_ids: set[int] = set()
+        if "id" in field_names:
+            existing_ids = {
+                row.get("id")
+                for row in _latest_rows(self._conn._client, self._conn._db, table, fields)
+                if row.get("id") is not None
+            }
         columns_data = {name: [] for name in field_names}
         last_id = None
         inserted = 0
@@ -289,6 +297,18 @@ class MySQLCursor:
             if len(row) != len(columns):
                 raise SQLExecutionError("column/value count mismatch")
             record = dict(zip(columns, row))
+            if existing_ids is not None and "id" in record and record["id"] is not None:
+                try:
+                    user_id = int(record["id"])
+                except (TypeError, ValueError):
+                    raise SQLIntegrityError("invalid id value")
+                if user_id in existing_ids or user_id in seen_ids:
+                    if ignore:
+                        self._warnings.append(f"duplicate id {user_id} ignored")
+                        continue
+                    raise SQLIntegrityError(f"duplicate id {user_id}")
+                seen_ids.add(user_id)
+                existing_ids.add(user_id)
             if "_id" in record and record["_id"] is not None:
                 doc_id = int(record["_id"])
             else:

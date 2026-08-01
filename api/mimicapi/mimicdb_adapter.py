@@ -10,6 +10,7 @@ class MimicDBAdapter(BackendAdapter):
         host: str | None = None,
         port: int | None = None,
         default_db: str = "default",
+        identity_key_path: str | None = None,
     ) -> None:
         if host is None and port is None:
             self._transport: BackendAdapter = LocalTransport()
@@ -18,6 +19,7 @@ class MimicDBAdapter(BackendAdapter):
                 host=host or "127.0.0.1",
                 port=port or 9000,
                 default_db=default_db,
+                identity_key_path=identity_key_path,
             )
 
     def create_database(self, name: str) -> None:

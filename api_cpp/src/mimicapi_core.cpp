@@ -1,10 +1,13 @@
 #include "mimicapi/core.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <thread>
 
 #include "mimicdb/aggregate.h"
 #include "mimicdb/array_codec.h"
 #include "mimicdb/compression.h"
+#include "mimicdb/scan.h"
 namespace mimicapi {
 namespace {
 
@@ -82,6 +85,97 @@ bool IsNumeric(mimicdb::FieldType type) {
 bool IsComparable(mimicdb::FieldType type) {
     return IsNumeric(type) || type == mimicdb::FieldType::kString ||
            type == mimicdb::FieldType::kBytes;
+}
+
+size_t ApiThreadCount() {
+    const char* env = std::getenv("MIMICDB_API_THREADS");
+    if (!env || env[0] == '\0') {
+        return 1;
+    }
+    char* end = nullptr;
+    const unsigned long value = std::strtoul(env, &end, 10);
+    if (!end || *end != '\0' || value == 0) {
+        return 1;
+    }
+    return static_cast<size_t>(value);
+}
+
+struct PreparedPredicate {
+    Predicate pred;
+    mimicdb::FieldType field_type = mimicdb::FieldType::kInt32;
+    bool is_numeric = false;
+    bool is_string = false;
+    bool is_bytes = false;
+};
+
+bool PreparePredicates(const std::vector<mimicdb::FieldVector>& fields,
+                       const std::vector<Predicate>& predicates,
+                       std::vector<PreparedPredicate>* out) {
+    if (!out) {
+        return false;
+    }
+    out->clear();
+    out->reserve(predicates.size());
+    for (const auto& pred : predicates) {
+        if (pred.field_index >= fields.size()) {
+            return false;
+        }
+        const auto type = fields[pred.field_index].Type();
+        PreparedPredicate prepared;
+        prepared.pred = pred;
+        prepared.field_type = type;
+        prepared.is_numeric = IsNumeric(type);
+        prepared.is_string = type == mimicdb::FieldType::kString;
+        prepared.is_bytes = type == mimicdb::FieldType::kBytes;
+        out->push_back(prepared);
+    }
+    return true;
+}
+
+void AccumulateAggregate(mimicapi::AggregateResult* dest,
+                         const mimicapi::AggregateResult& src) {
+    if (!dest) {
+        return;
+    }
+    dest->count += src.count;
+    dest->sum += src.sum;
+    if (src.has_value) {
+        if (!dest->has_value) {
+            dest->min = src.min;
+            dest->max = src.max;
+            dest->has_value = true;
+        } else {
+            if (src.min < dest->min) {
+                dest->min = src.min;
+            }
+            if (src.max > dest->max) {
+                dest->max = src.max;
+            }
+        }
+    }
+}
+
+void AccumulateAggregate(mimicapi::AggregateResult* dest,
+                         const mimicdb::AggregateResult& src) {
+    if (!dest) {
+        return;
+    }
+    dest->count += src.count;
+    dest->sum += src.sum;
+    if (src.has_value) {
+        if (!dest->has_value) {
+            dest->min = src.min;
+            dest->max = src.max;
+            dest->has_value = true;
+        } else {
+            if (src.min < dest->min) {
+                dest->min = src.min;
+            }
+            if (src.max > dest->max) {
+                dest->max = src.max;
+            }
+        }
+    }
 }
 
 bool SegmentCanMatchPredicates(const mimicdb::Segment& segment,
@@ -312,66 +406,94 @@ bool ValidatePredicates(const std::vector<mimicdb::FieldVector>& fields,
     return true;
 }
 
-bool MatchPredicates(const std::vector<mimicdb::FieldVector>& fields, size_t index,
-                     const std::vector<Predicate>& predicates) {
-    for (const auto& pred : predicates) {
-        if (pred.field_index >= fields.size()) {
+bool MatchSingleEqPrepared(const std::vector<mimicdb::FieldVector>& fields, size_t index,
+                           const PreparedPredicate& pred) {
+    const auto& field = fields[pred.pred.field_index];
+    if (pred.pred.is_null_check) {
+        const bool is_null = !field.IsValid(index);
+        return pred.pred.null_is == is_null;
+    }
+    if (pred.is_string || pred.is_bytes) {
+        if (!field.IsValid(index)) {
             return false;
         }
-        const auto& field = fields[pred.field_index];
-        if (pred.is_null_check) {
+        const std::string value = ReadVarlen(field, index);
+        if (pred.pred.op == mimicdb::CompareOp::kEq) {
+            return value == pred.pred.bytes;
+        }
+        return pred.pred.op == mimicdb::CompareOp::kNe && value != pred.pred.bytes;
+    }
+    double value = 0.0;
+    if (!pred.is_numeric || !ReadNumeric(field, index, &value)) {
+        return false;
+    }
+    return value == pred.pred.value;
+}
+
+bool MatchPredicatesPrepared(const std::vector<mimicdb::FieldVector>& fields, size_t index,
+                             const std::vector<PreparedPredicate>& predicates) {
+    if (predicates.size() == 1 &&
+        predicates[0].pred.op == mimicdb::CompareOp::kEq &&
+        !predicates[0].pred.is_null_check) {
+        return MatchSingleEqPrepared(fields, index, predicates[0]);
+    }
+    for (const auto& pred : predicates) {
+        if (pred.pred.field_index >= fields.size()) {
+            return false;
+        }
+        const auto& field = fields[pred.pred.field_index];
+        if (pred.pred.is_null_check) {
             const bool is_null = !field.IsValid(index);
-            if (pred.null_is != is_null) {
+            if (pred.pred.null_is != is_null) {
                 return false;
             }
             continue;
         }
-        if (field.Type() == mimicdb::FieldType::kString ||
-            field.Type() == mimicdb::FieldType::kBytes) {
+        if (pred.is_string || pred.is_bytes) {
             if (!field.IsValid(index)) {
                 return false;
             }
             const std::string value = ReadVarlen(field, index);
-            if (pred.op == mimicdb::CompareOp::kEq && value != pred.bytes) {
+            if (pred.pred.op == mimicdb::CompareOp::kEq && value != pred.pred.bytes) {
                 return false;
             }
-            if (pred.op == mimicdb::CompareOp::kNe && value == pred.bytes) {
+            if (pred.pred.op == mimicdb::CompareOp::kNe && value == pred.pred.bytes) {
                 return false;
             }
             continue;
         }
         double value = 0.0;
-        if (!IsNumeric(field.Type()) || !ReadNumeric(field, index, &value)) {
+        if (!pred.is_numeric || !ReadNumeric(field, index, &value)) {
             return false;
         }
-        switch (pred.op) {
+        switch (pred.pred.op) {
             case mimicdb::CompareOp::kEq:
-                if (!(value == pred.value)) {
+                if (!(value == pred.pred.value)) {
                     return false;
                 }
                 break;
             case mimicdb::CompareOp::kNe:
-                if (!(value != pred.value)) {
+                if (!(value != pred.pred.value)) {
                     return false;
                 }
                 break;
             case mimicdb::CompareOp::kLt:
-                if (!(value < pred.value)) {
+                if (!(value < pred.pred.value)) {
                     return false;
                 }
                 break;
             case mimicdb::CompareOp::kLe:
-                if (!(value <= pred.value)) {
+                if (!(value <= pred.pred.value)) {
                     return false;
                 }
                 break;
             case mimicdb::CompareOp::kGt:
-                if (!(value > pred.value)) {
+                if (!(value > pred.pred.value)) {
                     return false;
                 }
                 break;
             case mimicdb::CompareOp::kGe:
-                if (!(value >= pred.value)) {
+                if (!(value >= pred.pred.value)) {
                     return false;
                 }
                 break;
@@ -474,26 +596,34 @@ bool BuildPredicateMaskCompressed(const std::vector<mimicdb::CompressedColumnVie
 
 void AppendScanRows(const std::vector<mimicdb::FieldVector>& fields,
                     const std::vector<size_t>& column_indices, size_t row_count,
-                    const std::vector<Predicate>& predicates, size_t* seen,
+                    const std::vector<PreparedPredicate>& predicates, size_t* seen,
                     size_t offset, size_t limit, ScanResult* out) {
+    std::vector<size_t> row_ids;
+    row_ids.reserve(row_count);
     for (size_t i = 0; i < row_count; ++i) {
-        if (!predicates.empty() && !MatchPredicates(fields, i, predicates)) {
+        if (!predicates.empty() && !MatchPredicatesPrepared(fields, i, predicates)) {
             continue;
         }
         if (*seen < offset) {
             (*seen)++;
             continue;
         }
+        row_ids.push_back(i);
+        (*seen)++;
+        if (limit != 0 && out->rows.size() + row_ids.size() >= limit) {
+            break;
+        }
+    }
+    for (const auto row_id : row_ids) {
         if (limit != 0 && out->rows.size() >= limit) {
             return;
         }
         std::vector<mimicdb::FieldValue> row;
         row.reserve(column_indices.size());
         for (const auto index : column_indices) {
-            row.push_back(ReadValue(fields[index], i));
+            row.push_back(ReadValue(fields[index], row_id));
         }
         out->rows.push_back(std::move(row));
-        (*seen)++;
     }
 }
 
@@ -501,29 +631,63 @@ void AppendScanRowsCompressed(const std::vector<mimicdb::CompressedColumnView>& 
                               const std::vector<size_t>& column_indices, size_t row_count,
                               const std::vector<Predicate>& predicates, size_t* seen,
                               size_t offset, size_t limit, ScanResult* out) {
+    bool has_mask = false;
     mimicdb::Mask mask;
-    const bool has_mask = BuildPredicateMaskCompressed(columns, predicates, &mask);
+    const bool single_eq =
+        predicates.size() == 1 && predicates[0].op == mimicdb::CompareOp::kEq &&
+        !predicates[0].is_null_check;
+    if (!single_eq) {
+        has_mask = BuildPredicateMaskCompressed(columns, predicates, &mask);
+    }
+    std::vector<size_t> row_ids;
+    row_ids.reserve(row_count);
     for (size_t i = 0; i < row_count; ++i) {
-        if (has_mask && !mask.Get(i)) {
-            continue;
-        }
-        if (!has_mask && !predicates.empty()) {
-            continue;
+        if (single_eq) {
+            const auto& pred = predicates[0];
+            if (pred.field_index >= columns.size()) {
+                continue;
+            }
+            const auto& col = columns[pred.field_index];
+            if (col.type == mimicdb::FieldType::kString ||
+                col.type == mimicdb::FieldType::kBytes) {
+                const std::string value = ReadVarlenCompressed(col, i);
+                if (value != pred.bytes) {
+                    continue;
+                }
+            } else {
+                double value = 0.0;
+                if (!ReadNumericCompressed(col, i, &value) || value != pred.value) {
+                    continue;
+                }
+            }
+        } else {
+            if (has_mask && !mask.Get(i)) {
+                continue;
+            }
+            if (!has_mask && !predicates.empty()) {
+                continue;
+            }
         }
         if (*seen < offset) {
             (*seen)++;
             continue;
         }
+        row_ids.push_back(i);
+        (*seen)++;
+        if (limit != 0 && out->rows.size() + row_ids.size() >= limit) {
+            break;
+        }
+    }
+    for (const auto row_id : row_ids) {
         if (limit != 0 && out->rows.size() >= limit) {
             return;
         }
         std::vector<mimicdb::FieldValue> row;
         row.reserve(column_indices.size());
         for (const auto index : column_indices) {
-            row.push_back(ReadValueCompressed(columns[index], i));
+            row.push_back(ReadValueCompressed(columns[index], row_id));
         }
         out->rows.push_back(std::move(row));
-        (*seen)++;
     }
 }
 
@@ -549,6 +713,28 @@ bool ApiClientCore::CreateDataset(const std::string& db, const std::string& name
         state.dataset.AddField(mimicdb::FieldVector(field.name, field.type));
     }
     db_state.emplace(name, std::move(state));
+    return true;
+}
+
+bool ApiClientCore::AddFields(const std::string& db, const std::string& name,
+                              const std::vector<FieldDef>& fields,
+                              std::string* error) {
+    auto* state = GetDataset(db, name);
+    if (!state) {
+        if (error) {
+            *error = "unknown dataset";
+        }
+        return false;
+    }
+    for (const auto& field : fields) {
+        auto it = state->field_index.find(field.name);
+        if (it != state->field_index.end()) {
+            continue;
+        }
+        state->field_index[field.name] = state->fields.size();
+        state->fields.push_back(field);
+        state->dataset.AddField(mimicdb::FieldVector(field.name, field.type));
+    }
     return true;
 }
 
@@ -610,6 +796,13 @@ ScanResult ApiClientCore::Scan(const std::string& db, const std::string& name,
         }
         return result;
     }
+    std::vector<PreparedPredicate> prepared_predicates;
+    if (!PreparePredicates(state->dataset.Fields(), predicates, &prepared_predicates)) {
+        if (error) {
+            *error = "invalid predicate";
+        }
+        return result;
+    }
     std::vector<size_t> column_indices;
     if (columns.empty()) {
         result.columns.reserve(state->fields.size());
@@ -629,40 +822,122 @@ ScanResult ApiClientCore::Scan(const std::string& db, const std::string& name,
             }
         }
     }
-    size_t seen = 0;
-    for (const auto& segment : state->dataset.Segments()) {
-        if (!SegmentCanMatchPredicates(segment, predicates)) {
-            continue;
-        }
-        if (segment.IsSealed() && !segment.CompressedColumns().empty()) {
-            const auto& columns = segment.CompressedColumns();
-            if (NeedsLz4Decode(columns)) {
-                static thread_local DecodedColumns decoded;
-                if (!BuildReadableColumns(columns, &decoded)) {
-                    if (error) {
-                        *error = "lz4 decode failed";
-                    }
-                    return ScanResult{};
-                }
-                AppendScanRowsCompressed(decoded.views, column_indices,
-                                         segment.RowCount(), predicates, &seen,
-                                         offset, limit, &result);
-            } else {
-                AppendScanRowsCompressed(columns, column_indices,
-                                         segment.RowCount(), predicates, &seen,
-                                         offset, limit, &result);
+    std::vector<const mimicdb::Segment*> segments;
+    segments.reserve(state->dataset.Segments().size() + 1);
+    for (const auto& seg : state->dataset.Segments()) {
+        segments.push_back(&seg);
+    }
+    mimicdb::Segment active_segment(0, 0, {});
+    if (state->dataset.ActiveRowCount() > 0) {
+        active_segment = mimicdb::Segment(state->dataset.SegmentCapacity(),
+                                          state->dataset.ActiveRowCount(),
+                                          state->dataset.ActiveFields());
+        segments.push_back(&active_segment);
+    }
+
+    const size_t thread_count =
+        std::min(ApiThreadCount(), segments.empty() ? size_t{1} : segments.size());
+    if (thread_count <= 1 || segments.size() <= 1) {
+        size_t seen = 0;
+        for (const auto* segment : segments) {
+            if (!SegmentCanMatchPredicates(*segment, predicates)) {
+                result.rows_pruned += segment->RowCount();
+                continue;
             }
-        } else {
-            AppendScanRows(segment.Fields(), column_indices, segment.RowCount(),
-                           predicates, &seen, offset, limit, &result);
+            result.rows_scanned += segment->RowCount();
+            if (segment->IsSealed() && !segment->CompressedColumns().empty()) {
+                const auto& columns = segment->CompressedColumns();
+                if (NeedsLz4Decode(columns)) {
+                    static thread_local DecodedColumns decoded;
+                    if (!BuildReadableColumns(columns, &decoded)) {
+                        if (error) {
+                            *error = "lz4 decode failed";
+                        }
+                        return ScanResult{};
+                    }
+                    AppendScanRowsCompressed(decoded.views, column_indices,
+                                             segment->RowCount(), predicates, &seen,
+                                             offset, limit, &result);
+                } else {
+                    AppendScanRowsCompressed(columns, column_indices,
+                                             segment->RowCount(), predicates, &seen,
+                                             offset, limit, &result);
+                }
+            } else {
+                AppendScanRows(segment->Fields(), column_indices, segment->RowCount(),
+                               prepared_predicates, &seen, offset, limit, &result);
+            }
+            if (limit != 0 && result.rows.size() >= limit) {
+                return result;
+            }
         }
-        if (limit != 0 && result.rows.size() >= limit) {
-            return result;
+        return result;
+    }
+
+    std::vector<std::vector<std::vector<mimicdb::FieldValue>>> segment_rows(segments.size());
+    std::vector<uint8_t> should_scan(segments.size(), 0);
+    for (size_t i = 0; i < segments.size(); ++i) {
+        if (SegmentCanMatchPredicates(*segments[i], predicates)) {
+            should_scan[i] = 1;
+            result.rows_scanned += segments[i]->RowCount();
+        } else {
+            result.rows_pruned += segments[i]->RowCount();
         }
     }
-    const auto& active = state->dataset.ActiveFields();
-    AppendScanRows(active, column_indices, state->dataset.ActiveRowCount(),
-                   predicates, &seen, offset, limit, &result);
+    const auto schedule = mimicdb::ScheduleSegments(segments.size(), thread_count);
+    std::vector<std::thread> threads;
+    threads.reserve(thread_count);
+    for (size_t t = 0; t < thread_count; ++t) {
+        threads.emplace_back([&, t]() {
+            for (const auto seg_index : schedule[t]) {
+                if (!should_scan[seg_index]) {
+                    continue;
+                }
+                const auto* segment = segments[seg_index];
+                ScanResult local_result;
+                size_t local_seen = 0;
+                if (segment->IsSealed() && !segment->CompressedColumns().empty()) {
+                    const auto& columns = segment->CompressedColumns();
+                    if (NeedsLz4Decode(columns)) {
+                        static thread_local DecodedColumns decoded;
+                        if (!BuildReadableColumns(columns, &decoded)) {
+                            continue;
+                        }
+                        AppendScanRowsCompressed(decoded.views, column_indices,
+                                                 segment->RowCount(), predicates, &local_seen,
+                                                 0, 0, &local_result);
+                    } else {
+                        AppendScanRowsCompressed(columns, column_indices,
+                                                 segment->RowCount(), predicates, &local_seen,
+                                                 0, 0, &local_result);
+                    }
+                } else {
+                    AppendScanRows(segment->Fields(), column_indices, segment->RowCount(),
+                                   prepared_predicates, &local_seen, 0, 0, &local_result);
+                }
+                segment_rows[seg_index] = std::move(local_result.rows);
+            }
+        });
+    }
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    size_t seen = 0;
+    for (size_t seg_index = 0; seg_index < segment_rows.size(); ++seg_index) {
+        auto& rows = segment_rows[seg_index];
+        for (auto& row : rows) {
+            if (seen < offset) {
+                seen += 1;
+                continue;
+            }
+            if (limit != 0 && result.rows.size() >= limit) {
+                return result;
+            }
+            result.rows.push_back(std::move(row));
+            seen += 1;
+        }
+    }
     return result;
 }
 
@@ -684,6 +959,13 @@ AggregateResult ApiClientCore::Aggregate(const std::string& db, const std::strin
         }
         return result;
     }
+    std::vector<PreparedPredicate> prepared_predicates;
+    if (!PreparePredicates(state->dataset.Fields(), predicates, &prepared_predicates)) {
+        if (error) {
+            *error = "invalid predicate";
+        }
+        return result;
+    }
     if (field_index >= state->dataset.Fields().size()) {
         if (error) {
             *error = "field_index out of range";
@@ -697,81 +979,504 @@ AggregateResult ApiClientCore::Aggregate(const std::string& db, const std::strin
         }
         return result;
     }
-    auto process_fields = [&](const std::vector<mimicdb::FieldVector>& fields, size_t row_count) {
+    auto process_fields = [&](const std::vector<mimicdb::FieldVector>& fields, size_t row_count,
+                              AggregateResult* out) {
         if (field_index >= fields.size()) {
             return;
         }
         const auto& field = fields[field_index];
         for (size_t i = 0; i < row_count; ++i) {
-            result.rows_scanned += 1;
-            if (!predicates.empty() && !MatchPredicates(fields, i, predicates)) {
+            out->rows_scanned += 1;
+            if (!prepared_predicates.empty() &&
+                !MatchPredicatesPrepared(fields, i, prepared_predicates)) {
                 continue;
             }
             double value = 0.0;
             if (!IsNumeric(field.Type()) || !ReadNumeric(field, i, &value)) {
                 continue;
             }
-            result.count += 1;
-            result.sum += value;
-            if (!result.has_value) {
-                result.min = value;
-                result.max = value;
-                result.has_value = true;
+            out->count += 1;
+            out->sum += value;
+            if (!out->has_value) {
+                out->min = value;
+                out->max = value;
+                out->has_value = true;
             } else {
-                result.min = std::min(result.min, value);
-                result.max = std::max(result.max, value);
+                out->min = std::min(out->min, value);
+                out->max = std::max(out->max, value);
             }
         }
     };
-    for (const auto& segment : state->dataset.Segments()) {
-        if (!SegmentCanMatchPredicates(segment, predicates)) {
-            continue;
-        }
-        if (segment.IsSealed() && !segment.CompressedColumns().empty()) {
-            result.rows_scanned += segment.RowCount();
-            const auto& columns = segment.CompressedColumns();
-            static thread_local DecodedColumns decoded;
-            const auto* working_columns = &columns;
-            if (NeedsLz4Decode(columns)) {
-                if (!BuildReadableColumns(columns, &decoded)) {
-                    if (error) {
-                        *error = "lz4 decode failed";
-                    }
-                    return result;
-                }
-                working_columns = &decoded.views;
-            }
-            if (field_index >= working_columns->size()) {
+    const auto& segments = state->dataset.Segments();
+    const size_t thread_count =
+        std::min(ApiThreadCount(), segments.empty() ? size_t{1} : segments.size());
+    if (thread_count <= 1 || segments.size() <= 1) {
+        for (const auto& segment : segments) {
+            if (!SegmentCanMatchPredicates(segment, predicates)) {
+                result.rows_pruned += segment.RowCount();
                 continue;
             }
-            mimicdb::Mask mask;
-            const mimicdb::Mask* mask_ptr = nullptr;
-            if (!predicates.empty()) {
-                if (!BuildPredicateMaskCompressed(*working_columns, predicates, &mask)) {
+            if (segment.IsSealed() && !segment.CompressedColumns().empty()) {
+                result.rows_scanned += segment.RowCount();
+                const auto& columns = segment.CompressedColumns();
+                static thread_local DecodedColumns decoded;
+                const auto* working_columns = &columns;
+                if (NeedsLz4Decode(columns)) {
+                    if (!BuildReadableColumns(columns, &decoded)) {
+                        if (error) {
+                            *error = "lz4 decode failed";
+                        }
+                        return result;
+                    }
+                    working_columns = &decoded.views;
+                }
+                if (field_index >= working_columns->size()) {
                     continue;
                 }
-                mask_ptr = &mask;
+                const bool single_eq =
+                    predicates.size() == 1 && predicates[0].op == mimicdb::CompareOp::kEq &&
+                    !predicates[0].is_null_check;
+                mimicdb::AggregateResult local;
+                if (single_eq) {
+                    const auto& pred = predicates[0];
+                    if (pred.field_index >= working_columns->size() ||
+                        field_index >= working_columns->size()) {
+                        continue;
+                    }
+                    const auto& pred_col = (*working_columns)[pred.field_index];
+                    const auto& agg_col = (*working_columns)[field_index];
+                    for (size_t i = 0; i < segment.RowCount(); ++i) {
+                        bool keep = false;
+                        if (pred_col.type == mimicdb::FieldType::kString ||
+                            pred_col.type == mimicdb::FieldType::kBytes) {
+                            keep = ReadVarlenCompressed(pred_col, i) == pred.bytes;
+                        } else {
+                            double value = 0.0;
+                            keep = ReadNumericCompressed(pred_col, i, &value) &&
+                                   value == pred.value;
+                        }
+                        if (!keep) {
+                            continue;
+                        }
+                        double agg_value = 0.0;
+                        if (!ReadNumericCompressed(agg_col, i, &agg_value)) {
+                            continue;
+                        }
+                        local.count += 1;
+                        local.sum += agg_value;
+                        if (!local.has_value) {
+                            local.min = agg_value;
+                            local.max = agg_value;
+                            local.has_value = true;
+                        } else {
+                            local.min = std::min(local.min, agg_value);
+                            local.max = std::max(local.max, agg_value);
+                        }
+                    }
+                } else {
+                    mimicdb::Mask mask;
+                    const mimicdb::Mask* mask_ptr = nullptr;
+                    if (!predicates.empty()) {
+                        if (!BuildPredicateMaskCompressed(*working_columns, predicates, &mask)) {
+                            continue;
+                        }
+                        mask_ptr = &mask;
+                    }
+                    mimicdb::AggregateCompressed((*working_columns)[field_index], mask_ptr, &local);
+                }
+                if (local.count == 0) {
+                    continue;
+                }
+                result.count += local.count;
+                result.sum += local.sum;
+                if (!result.has_value && local.has_value) {
+                    result.min = local.min;
+                    result.max = local.max;
+                    result.has_value = true;
+                } else if (local.has_value) {
+                    result.min = std::min(result.min, local.min);
+                    result.max = std::max(result.max, local.max);
+                }
+            } else {
+                process_fields(segment.Fields(), segment.RowCount(), &result);
             }
-            mimicdb::AggregateResult local;
-            mimicdb::AggregateCompressed((*working_columns)[field_index], mask_ptr, &local);
-            if (local.count == 0) {
-                continue;
-            }
-            result.count += local.count;
-            result.sum += local.sum;
-            if (!result.has_value && local.has_value) {
-                result.min = local.min;
-                result.max = local.max;
-                result.has_value = true;
-            } else if (local.has_value) {
-                result.min = std::min(result.min, local.min);
-                result.max = std::max(result.max, local.max);
-            }
-        } else {
-            process_fields(segment.Fields(), segment.RowCount());
+        }
+    } else {
+        const auto schedule = mimicdb::ScheduleSegments(segments.size(), thread_count);
+        std::vector<AggregateResult> partial(thread_count);
+        std::vector<std::thread> threads;
+        threads.reserve(thread_count);
+        for (size_t t = 0; t < thread_count; ++t) {
+            threads.emplace_back([&, t]() {
+                for (const auto seg_index : schedule[t]) {
+                    const auto& segment = segments[seg_index];
+                    if (!SegmentCanMatchPredicates(segment, predicates)) {
+                        partial[t].rows_pruned += segment.RowCount();
+                        continue;
+                    }
+                    if (segment.IsSealed() && !segment.CompressedColumns().empty()) {
+                        partial[t].rows_scanned += segment.RowCount();
+                        const auto& columns = segment.CompressedColumns();
+                        static thread_local DecodedColumns decoded;
+                        const auto* working_columns = &columns;
+                        if (NeedsLz4Decode(columns)) {
+                            if (!BuildReadableColumns(columns, &decoded)) {
+                                continue;
+                            }
+                            working_columns = &decoded.views;
+                        }
+                        if (field_index >= working_columns->size()) {
+                            continue;
+                        }
+                        const bool single_eq =
+                            predicates.size() == 1 && predicates[0].op == mimicdb::CompareOp::kEq &&
+                            !predicates[0].is_null_check;
+                        mimicdb::AggregateResult local;
+                        if (single_eq) {
+                            const auto& pred = predicates[0];
+                            if (pred.field_index >= working_columns->size() ||
+                                field_index >= working_columns->size()) {
+                                continue;
+                            }
+                            const auto& pred_col = (*working_columns)[pred.field_index];
+                            const auto& agg_col = (*working_columns)[field_index];
+                            for (size_t i = 0; i < segment.RowCount(); ++i) {
+                                bool keep = false;
+                                if (pred_col.type == mimicdb::FieldType::kString ||
+                                    pred_col.type == mimicdb::FieldType::kBytes) {
+                                    keep = ReadVarlenCompressed(pred_col, i) == pred.bytes;
+                                } else {
+                                    double value = 0.0;
+                                    keep = ReadNumericCompressed(pred_col, i, &value) &&
+                                           value == pred.value;
+                                }
+                                if (!keep) {
+                                    continue;
+                                }
+                                double agg_value = 0.0;
+                                if (!ReadNumericCompressed(agg_col, i, &agg_value)) {
+                                    continue;
+                                }
+                                local.count += 1;
+                                local.sum += agg_value;
+                                if (!local.has_value) {
+                                    local.min = agg_value;
+                                    local.max = agg_value;
+                                    local.has_value = true;
+                                } else {
+                                    local.min = std::min(local.min, agg_value);
+                                    local.max = std::max(local.max, agg_value);
+                                }
+                            }
+                        } else {
+                            mimicdb::Mask mask;
+                            const mimicdb::Mask* mask_ptr = nullptr;
+                            if (!predicates.empty()) {
+                                if (!BuildPredicateMaskCompressed(*working_columns, predicates,
+                                                                  &mask)) {
+                                    continue;
+                                }
+                                mask_ptr = &mask;
+                            }
+                            mimicdb::AggregateCompressed((*working_columns)[field_index], mask_ptr,
+                                                         &local);
+                        }
+                        if (local.count == 0) {
+                            continue;
+                        }
+                        AccumulateAggregate(&partial[t], local);
+                    } else {
+                        process_fields(segment.Fields(), segment.RowCount(), &partial[t]);
+                    }
+                }
+            });
+        }
+        for (auto& thread : threads) {
+            thread.join();
+        }
+        for (const auto& part : partial) {
+            result.rows_scanned += part.rows_scanned;
+            result.rows_pruned += part.rows_pruned;
+            AccumulateAggregate(&result, part);
         }
     }
-    process_fields(state->dataset.ActiveFields(), state->dataset.ActiveRowCount());
+    process_fields(state->dataset.ActiveFields(), state->dataset.ActiveRowCount(), &result);
+    return result;
+}
+
+AggregateMultiResult ApiClientCore::AggregateMulti(const std::string& db,
+                                                   const std::string& name,
+                                                   const std::vector<AggregateRequest>& requests,
+                                                   const std::vector<Predicate>& predicates,
+                                                   std::string* error) const {
+    AggregateMultiResult result;
+    result.requests = requests;
+    result.results.resize(requests.size());
+    const auto* state = GetDataset(db, name);
+    if (!state) {
+        if (error) {
+            *error = "unknown dataset";
+        }
+        return result;
+    }
+    if (!ValidatePredicates(state->dataset.Fields(), predicates)) {
+        if (error) {
+            *error = "invalid predicate";
+        }
+        return result;
+    }
+    std::vector<PreparedPredicate> prepared_predicates;
+    if (!PreparePredicates(state->dataset.Fields(), predicates, &prepared_predicates)) {
+        if (error) {
+            *error = "invalid predicate";
+        }
+        return result;
+    }
+    for (const auto& req : requests) {
+        if (req.field_index >= state->dataset.Fields().size()) {
+            if (error) {
+                *error = "field_index out of range";
+            }
+            return result;
+        }
+        const auto type = state->dataset.Fields()[req.field_index].Type();
+        if (!IsNumeric(type)) {
+            if (error) {
+                *error = "aggregate requires numeric field";
+            }
+            return result;
+        }
+    }
+    auto process_fields = [&](const std::vector<mimicdb::FieldVector>& fields, size_t row_count,
+                              std::vector<AggregateResult>* out, uint64_t* rows_scanned) {
+        for (size_t i = 0; i < row_count; ++i) {
+            *rows_scanned += 1;
+            if (!prepared_predicates.empty() &&
+                !MatchPredicatesPrepared(fields, i, prepared_predicates)) {
+                continue;
+            }
+            for (size_t r = 0; r < requests.size(); ++r) {
+                const auto& req = requests[r];
+                const auto& field = fields[req.field_index];
+                double value = 0.0;
+                if (!IsNumeric(field.Type()) || !ReadNumeric(field, i, &value)) {
+                    continue;
+                }
+                auto& agg = (*out)[r];
+                agg.count += 1;
+                agg.sum += value;
+                if (!agg.has_value) {
+                    agg.min = value;
+                    agg.max = value;
+                    agg.has_value = true;
+                } else {
+                    agg.min = std::min(agg.min, value);
+                    agg.max = std::max(agg.max, value);
+                }
+            }
+        }
+    };
+
+    const auto& segments = state->dataset.Segments();
+    const size_t thread_count =
+        std::min(ApiThreadCount(), segments.empty() ? size_t{1} : segments.size());
+    if (thread_count <= 1 || segments.size() <= 1) {
+        for (const auto& segment : segments) {
+            if (!SegmentCanMatchPredicates(segment, predicates)) {
+                result.rows_pruned += segment.RowCount();
+                continue;
+            }
+            if (segment.IsSealed() && !segment.CompressedColumns().empty()) {
+                result.rows_scanned += segment.RowCount();
+                const auto& columns = segment.CompressedColumns();
+                static thread_local DecodedColumns decoded;
+                const auto* working_columns = &columns;
+                if (NeedsLz4Decode(columns)) {
+                    if (!BuildReadableColumns(columns, &decoded)) {
+                        if (error) {
+                            *error = "lz4 decode failed";
+                        }
+                        return result;
+                    }
+                    working_columns = &decoded.views;
+                }
+                const bool single_eq =
+                    predicates.size() == 1 && predicates[0].op == mimicdb::CompareOp::kEq &&
+                    !predicates[0].is_null_check;
+                if (single_eq && predicates[0].field_index < working_columns->size()) {
+                    const auto& pred = predicates[0];
+                    const auto& pred_col = (*working_columns)[pred.field_index];
+                    for (size_t row = 0; row < segment.RowCount(); ++row) {
+                        bool keep = false;
+                        if (pred_col.type == mimicdb::FieldType::kString ||
+                            pred_col.type == mimicdb::FieldType::kBytes) {
+                            keep = ReadVarlenCompressed(pred_col, row) == pred.bytes;
+                        } else {
+                            double value = 0.0;
+                            keep = ReadNumericCompressed(pred_col, row, &value) &&
+                                   value == pred.value;
+                        }
+                        if (!keep) {
+                            continue;
+                        }
+                        for (size_t r = 0; r < requests.size(); ++r) {
+                            const auto& req = requests[r];
+                            if (req.field_index >= working_columns->size()) {
+                                continue;
+                            }
+                            double value = 0.0;
+                            if (!ReadNumericCompressed((*working_columns)[req.field_index], row,
+                                                       &value)) {
+                                continue;
+                            }
+                            auto& agg = result.results[r];
+                            agg.count += 1;
+                            agg.sum += value;
+                            if (!agg.has_value) {
+                                agg.min = value;
+                                agg.max = value;
+                                agg.has_value = true;
+                            } else {
+                                agg.min = std::min(agg.min, value);
+                                agg.max = std::max(agg.max, value);
+                            }
+                        }
+                    }
+                } else {
+                    mimicdb::Mask mask;
+                    const mimicdb::Mask* mask_ptr = nullptr;
+                    if (!predicates.empty()) {
+                        if (!BuildPredicateMaskCompressed(*working_columns, predicates, &mask)) {
+                            continue;
+                        }
+                        mask_ptr = &mask;
+                    }
+                    for (size_t r = 0; r < requests.size(); ++r) {
+                        const auto& req = requests[r];
+                        if (req.field_index >= working_columns->size()) {
+                            continue;
+                        }
+                        mimicdb::AggregateResult seg_result;
+                        mimicdb::AggregateCompressed((*working_columns)[req.field_index], mask_ptr,
+                                                     &seg_result);
+                        AccumulateAggregate(&result.results[r], seg_result);
+                    }
+                }
+            } else {
+                process_fields(segment.Fields(), segment.RowCount(), &result.results,
+                               &result.rows_scanned);
+            }
+        }
+    } else {
+        const auto schedule = mimicdb::ScheduleSegments(segments.size(), thread_count);
+        std::vector<AggregateMultiResult> partial(thread_count);
+        for (auto& part : partial) {
+            part.results.resize(requests.size());
+        }
+        std::vector<std::thread> threads;
+        threads.reserve(thread_count);
+        for (size_t t = 0; t < thread_count; ++t) {
+            threads.emplace_back([&, t]() {
+                for (const auto seg_index : schedule[t]) {
+                    const auto& segment = segments[seg_index];
+                    if (!SegmentCanMatchPredicates(segment, predicates)) {
+                        partial[t].rows_pruned += segment.RowCount();
+                        continue;
+                    }
+                    if (segment.IsSealed() && !segment.CompressedColumns().empty()) {
+                        partial[t].rows_scanned += segment.RowCount();
+                        const auto& columns = segment.CompressedColumns();
+                        static thread_local DecodedColumns decoded;
+                        const auto* working_columns = &columns;
+                        if (NeedsLz4Decode(columns)) {
+                            if (!BuildReadableColumns(columns, &decoded)) {
+                                continue;
+                            }
+                            working_columns = &decoded.views;
+                        }
+                        const bool single_eq =
+                            predicates.size() == 1 && predicates[0].op == mimicdb::CompareOp::kEq &&
+                            !predicates[0].is_null_check;
+                        if (single_eq && predicates[0].field_index < working_columns->size()) {
+                            const auto& pred = predicates[0];
+                            const auto& pred_col = (*working_columns)[pred.field_index];
+                            for (size_t row = 0; row < segment.RowCount(); ++row) {
+                                bool keep = false;
+                                if (pred_col.type == mimicdb::FieldType::kString ||
+                                    pred_col.type == mimicdb::FieldType::kBytes) {
+                                    keep = ReadVarlenCompressed(pred_col, row) == pred.bytes;
+                                } else {
+                                    double value = 0.0;
+                                    keep = ReadNumericCompressed(pred_col, row, &value) &&
+                                           value == pred.value;
+                                }
+                                if (!keep) {
+                                    continue;
+                                }
+                                for (size_t r = 0; r < requests.size(); ++r) {
+                                    const auto& req = requests[r];
+                                    if (req.field_index >= working_columns->size()) {
+                                        continue;
+                                    }
+                                    double value = 0.0;
+                                    if (!ReadNumericCompressed((*working_columns)[req.field_index],
+                                                               row, &value)) {
+                                        continue;
+                                    }
+                                    auto& agg = partial[t].results[r];
+                                    agg.count += 1;
+                                    agg.sum += value;
+                                    if (!agg.has_value) {
+                                        agg.min = value;
+                                        agg.max = value;
+                                        agg.has_value = true;
+                                    } else {
+                                        agg.min = std::min(agg.min, value);
+                                        agg.max = std::max(agg.max, value);
+                                    }
+                                }
+                            }
+                        } else {
+                            mimicdb::Mask mask;
+                            const mimicdb::Mask* mask_ptr = nullptr;
+                            if (!predicates.empty()) {
+                                if (!BuildPredicateMaskCompressed(*working_columns, predicates,
+                                                                  &mask)) {
+                                    continue;
+                                }
+                                mask_ptr = &mask;
+                            }
+                            for (size_t r = 0; r < requests.size(); ++r) {
+                                const auto& req = requests[r];
+                                if (req.field_index >= working_columns->size()) {
+                                    continue;
+                                }
+                                mimicdb::AggregateResult seg_result;
+                                mimicdb::AggregateCompressed((*working_columns)[req.field_index],
+                                                             mask_ptr, &seg_result);
+                                AccumulateAggregate(&partial[t].results[r], seg_result);
+                            }
+                        }
+                    } else {
+                        process_fields(segment.Fields(), segment.RowCount(), &partial[t].results,
+                                       &partial[t].rows_scanned);
+                    }
+                }
+            });
+        }
+        for (auto& thread : threads) {
+            thread.join();
+        }
+        for (const auto& part : partial) {
+            result.rows_scanned += part.rows_scanned;
+            result.rows_pruned += part.rows_pruned;
+            for (size_t r = 0; r < requests.size(); ++r) {
+                AccumulateAggregate(&result.results[r], part.results[r]);
+            }
+        }
+    }
+    process_fields(state->dataset.ActiveFields(), state->dataset.ActiveRowCount(),
+                   &result.results, &result.rows_scanned);
     return result;
 }
 

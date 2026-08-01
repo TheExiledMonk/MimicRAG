@@ -131,6 +131,7 @@ class NetworkTransport:
     host: str
     port: int
     default_db: str = "default"
+    identity_key_path: str | None = None
 
     def create_database(self, name: str) -> None:
         client = self._client()
@@ -181,7 +182,12 @@ class NetworkTransport:
 
     def _client(self):
         from client.mimicdb_client import MimicDBClient  # local import to avoid hard dep
-        return MimicDBClient(host=self.host, port=self.port, default_db=self.default_db)
+        return MimicDBClient(
+            host=self.host,
+            port=self.port,
+            default_db=self.default_db,
+            identity_key_path=self.identity_key_path,
+        )
 
 
 def _coerce_predicate(field_type: str, value: float):

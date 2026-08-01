@@ -506,6 +506,70 @@ bool ValidatePredicates(const std::vector<mimicapi::FieldDef>& fields,
     return true;
 }
 
+bool ParseAggregateRequests(PyObject* list_obj,
+                            std::vector<mimicapi::AggregateRequest>* out) {
+    if (!list_obj || list_obj == Py_None) {
+        PyErr_SetString(PyExc_TypeError, "aggregate requests must be a sequence");
+        return false;
+    }
+    PyObject* seq = PySequence_Fast(list_obj, "aggregate requests must be a sequence");
+    if (!seq) {
+        return false;
+    }
+    const Py_ssize_t seq_len = PySequence_Fast_GET_SIZE(seq);
+    out->reserve(static_cast<size_t>(seq_len));
+    for (Py_ssize_t i = 0; i < seq_len; ++i) {
+        PyObject* item = PySequence_Fast_GET_ITEM(seq, i);
+        if (!PyDict_Check(item)) {
+            Py_DECREF(seq);
+            PyErr_SetString(PyExc_TypeError, "aggregate request must be a dict");
+            return false;
+        }
+        PyObject* kind_obj = PyDict_GetItemString(item, "kind");
+        PyObject* field_obj = PyDict_GetItemString(item, "field_index");
+        PyObject* alias_obj = PyDict_GetItemString(item, "alias");
+        if (!kind_obj || !PyUnicode_Check(kind_obj) || !field_obj || !PyLong_Check(field_obj)) {
+            Py_DECREF(seq);
+            PyErr_SetString(PyExc_TypeError, "aggregate request requires kind and field_index");
+            return false;
+        }
+        PyObject* kind_bytes = PyUnicode_AsUTF8String(kind_obj);
+        if (!kind_bytes) {
+            Py_DECREF(seq);
+            return false;
+        }
+        std::string kind = PyBytes_AsString(kind_bytes);
+        Py_DECREF(kind_bytes);
+        mimicapi::AggregateRequest req;
+        if (kind == "COUNT") {
+            req.kind = mimicapi::AggregateKind::kCount;
+        } else if (kind == "SUM") {
+            req.kind = mimicapi::AggregateKind::kSum;
+        } else if (kind == "MIN") {
+            req.kind = mimicapi::AggregateKind::kMin;
+        } else if (kind == "MAX") {
+            req.kind = mimicapi::AggregateKind::kMax;
+        } else {
+            Py_DECREF(seq);
+            PyErr_SetString(PyExc_ValueError, "unsupported aggregate kind");
+            return false;
+        }
+        req.field_index = static_cast<size_t>(PyLong_AsUnsignedLong(field_obj));
+        if (alias_obj && PyUnicode_Check(alias_obj)) {
+            PyObject* alias_bytes = PyUnicode_AsUTF8String(alias_obj);
+            if (!alias_bytes) {
+                Py_DECREF(seq);
+                return false;
+            }
+            req.alias = PyBytes_AsString(alias_bytes);
+            Py_DECREF(alias_bytes);
+        }
+        out->push_back(std::move(req));
+    }
+    Py_DECREF(seq);
+    return true;
+}
+
 PyObject* ApiClientCoreScan(ApiClientCoreObject* self, PyObject* args, PyObject* kwargs) {
     const char* db = nullptr;
     const char* name = nullptr;
@@ -614,6 +678,121 @@ PyObject* ApiClientCoreScan(ApiClientCoreObject* self, PyObject* args, PyObject*
     return rows_list;
 }
 
+PyObject* ApiClientCoreScanDebug(ApiClientCoreObject* self, PyObject* args, PyObject* kwargs) {
+    const char* db = nullptr;
+    const char* name = nullptr;
+    PyObject* columns_obj = Py_None;
+    PyObject* predicates_obj = Py_None;
+    unsigned long long limit = 0;
+    unsigned long long offset = 0;
+    static const char* kwlist[] = {"db", "name", "columns", "predicates", "limit", "offset", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ss|OOkk",
+                                     const_cast<char**>(kwlist),
+                                     &db, &name, &columns_obj, &predicates_obj,
+                                     &limit, &offset)) {
+        return nullptr;
+    }
+    std::vector<std::string> columns;
+    if (columns_obj != Py_None) {
+        PyObject* seq = PySequence_Fast(columns_obj, "columns must be a sequence");
+        if (!seq) {
+            return nullptr;
+        }
+        const Py_ssize_t seq_len = PySequence_Fast_GET_SIZE(seq);
+        columns.reserve(static_cast<size_t>(seq_len));
+        for (Py_ssize_t i = 0; i < seq_len; ++i) {
+            PyObject* item = PySequence_Fast_GET_ITEM(seq, i);
+            if (!PyUnicode_Check(item)) {
+                Py_DECREF(seq);
+                PyErr_SetString(PyExc_TypeError, "column names must be strings");
+                return nullptr;
+            }
+            PyObject* bytes = PyUnicode_AsUTF8String(item);
+            if (!bytes) {
+                Py_DECREF(seq);
+                return nullptr;
+            }
+            columns.emplace_back(PyBytes_AsString(bytes));
+            Py_DECREF(bytes);
+        }
+        Py_DECREF(seq);
+    }
+    std::vector<mimicapi::Predicate> predicates;
+    if (!ParsePredicates(predicates_obj, &predicates)) {
+        return nullptr;
+    }
+    const auto* field_defs = self->core->FieldsFor(db, name);
+    if (!field_defs) {
+        PyErr_SetString(PyExc_KeyError, "unknown dataset");
+        return nullptr;
+    }
+    if (!ValidatePredicates(*field_defs, predicates)) {
+        return nullptr;
+    }
+    std::string error;
+    const auto result = self->core->Scan(db, name, columns, predicates,
+                                         static_cast<size_t>(limit),
+                                         static_cast<size_t>(offset), &error);
+    if (!error.empty()) {
+        PyErr_SetString(PyExc_RuntimeError, error.c_str());
+        return nullptr;
+    }
+    PyObject* rows_list = PyList_New(static_cast<Py_ssize_t>(result.rows.size()));
+    for (size_t i = 0; i < result.rows.size(); ++i) {
+        PyObject* row_dict = PyDict_New();
+        for (size_t j = 0; j < result.columns.size(); ++j) {
+            const auto& value = result.rows[i][j];
+            PyObject* py_value = Py_None;
+            if (value.is_null) {
+                Py_INCREF(Py_None);
+                PyDict_SetItemString(row_dict, result.columns[j].c_str(), Py_None);
+                continue;
+            }
+            switch (value.type) {
+                case mimicdb::FieldType::kInt32:
+                    py_value = PyLong_FromLong(value.i32);
+                    break;
+                case mimicdb::FieldType::kInt64:
+                    py_value = PyLong_FromLongLong(value.i64);
+                    break;
+                case mimicdb::FieldType::kFloat64:
+                    py_value = PyFloat_FromDouble(value.f64);
+                    break;
+                case mimicdb::FieldType::kBool:
+                    py_value = PyBool_FromLong(value.b ? 1 : 0);
+                    break;
+                case mimicdb::FieldType::kDictInt32:
+                    py_value = PyLong_FromLong(value.i32);
+                    break;
+                case mimicdb::FieldType::kString:
+                    py_value = PyUnicode_FromStringAndSize(
+                        value.bytes.data(),
+                        static_cast<Py_ssize_t>(value.bytes.size()));
+                    break;
+                case mimicdb::FieldType::kBytes:
+                    py_value = PyBytes_FromStringAndSize(
+                        value.bytes.data(),
+                        static_cast<Py_ssize_t>(value.bytes.size()));
+                    break;
+            }
+            if (!py_value) {
+                Py_DECREF(row_dict);
+                Py_DECREF(rows_list);
+                return nullptr;
+            }
+            PyDict_SetItemString(row_dict, result.columns[j].c_str(), py_value);
+            Py_DECREF(py_value);
+        }
+        PyList_SET_ITEM(rows_list, static_cast<Py_ssize_t>(i), row_dict);
+    }
+    PyObject* stats = PyDict_New();
+    PyDict_SetItemString(stats, "rows_scanned",
+                         PyLong_FromUnsignedLongLong(result.rows_scanned));
+    PyDict_SetItemString(stats, "rows_pruned",
+                         PyLong_FromUnsignedLongLong(result.rows_pruned));
+    return PyTuple_Pack(2, rows_list, stats);
+}
+
 PyObject* ApiClientCoreAggregate(ApiClientCoreObject* self, PyObject* args, PyObject* kwargs) {
     const char* db = nullptr;
     const char* name = nullptr;
@@ -670,6 +849,103 @@ PyObject* ApiClientCoreAggregate(ApiClientCoreObject* self, PyObject* args, PyOb
     }
     PyDict_SetItemString(dict, "rows_scanned",
                          PyLong_FromUnsignedLongLong(result.rows_scanned));
+    PyDict_SetItemString(dict, "rows_pruned",
+                         PyLong_FromUnsignedLongLong(result.rows_pruned));
+    return dict;
+}
+
+PyObject* ApiClientCoreAggregateMulti(ApiClientCoreObject* self, PyObject* args, PyObject* kwargs) {
+    const char* db = nullptr;
+    const char* name = nullptr;
+    PyObject* requests_obj = nullptr;
+    PyObject* predicates_obj = Py_None;
+    static const char* kwlist[] = {"db", "name", "requests", "predicates", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ssO|O",
+                                     const_cast<char**>(kwlist),
+                                     &db, &name, &requests_obj, &predicates_obj)) {
+        return nullptr;
+    }
+    std::vector<mimicapi::AggregateRequest> requests;
+    if (!ParseAggregateRequests(requests_obj, &requests)) {
+        return nullptr;
+    }
+    std::vector<mimicapi::Predicate> predicates;
+    if (!ParsePredicates(predicates_obj, &predicates)) {
+        return nullptr;
+    }
+    const auto* field_defs = self->core->FieldsFor(db, name);
+    if (!field_defs) {
+        PyErr_SetString(PyExc_KeyError, "unknown dataset");
+        return nullptr;
+    }
+    if (!ValidatePredicates(*field_defs, predicates)) {
+        return nullptr;
+    }
+    std::string error;
+    const auto result = self->core->AggregateMulti(db, name, requests, predicates, &error);
+    if (!error.empty()) {
+        PyErr_SetString(PyExc_RuntimeError, error.c_str());
+        return nullptr;
+    }
+    PyObject* dict = PyDict_New();
+    for (size_t i = 0; i < result.requests.size(); ++i) {
+        const auto& req = result.requests[i];
+        const auto& agg = result.results[i];
+        std::string key;
+        if (!req.alias.empty()) {
+            key = req.alias;
+        } else {
+            switch (req.kind) {
+                case mimicapi::AggregateKind::kCount:
+                    key = "count";
+                    break;
+                case mimicapi::AggregateKind::kSum:
+                    key = "sum_" + std::to_string(req.field_index);
+                    break;
+                case mimicapi::AggregateKind::kMin:
+                    key = "min_" + std::to_string(req.field_index);
+                    break;
+                case mimicapi::AggregateKind::kMax:
+                    key = "max_" + std::to_string(req.field_index);
+                    break;
+            }
+        }
+        PyObject* value = nullptr;
+        switch (req.kind) {
+            case mimicapi::AggregateKind::kCount:
+                value = PyLong_FromUnsignedLongLong(agg.count);
+                break;
+            case mimicapi::AggregateKind::kSum:
+                value = PyFloat_FromDouble(agg.sum);
+                break;
+            case mimicapi::AggregateKind::kMin:
+                if (agg.has_value) {
+                    value = PyFloat_FromDouble(agg.min);
+                } else {
+                    Py_INCREF(Py_None);
+                    value = Py_None;
+                }
+                break;
+            case mimicapi::AggregateKind::kMax:
+                if (agg.has_value) {
+                    value = PyFloat_FromDouble(agg.max);
+                } else {
+                    Py_INCREF(Py_None);
+                    value = Py_None;
+                }
+                break;
+        }
+        if (!value) {
+            Py_DECREF(dict);
+            return nullptr;
+        }
+        PyDict_SetItemString(dict, key.c_str(), value);
+        Py_DECREF(value);
+    }
+    PyDict_SetItemString(dict, "rows_scanned",
+                         PyLong_FromUnsignedLongLong(result.rows_scanned));
+    PyDict_SetItemString(dict, "rows_pruned",
+                         PyLong_FromUnsignedLongLong(result.rows_pruned));
     return dict;
 }
 
@@ -719,7 +995,10 @@ PyMethodDef ApiClientCoreMethods[] = {
     {"drop_dataset", (PyCFunction)ApiClientCoreDropDataset, METH_VARARGS, nullptr},
     {"append_batch", (PyCFunction)ApiClientCoreAppendBatch, METH_VARARGS, nullptr},
     {"scan", (PyCFunction)ApiClientCoreScan, METH_VARARGS | METH_KEYWORDS, nullptr},
+    {"scan_debug", (PyCFunction)ApiClientCoreScanDebug, METH_VARARGS | METH_KEYWORDS, nullptr},
     {"aggregate", (PyCFunction)ApiClientCoreAggregate, METH_VARARGS | METH_KEYWORDS, nullptr},
+    {"aggregate_multi", (PyCFunction)ApiClientCoreAggregateMulti,
+     METH_VARARGS | METH_KEYWORDS, nullptr},
     {"compression_stats", (PyCFunction)ApiClientCoreCompressionStats, METH_VARARGS, nullptr},
     {nullptr, nullptr, 0, nullptr},
 };

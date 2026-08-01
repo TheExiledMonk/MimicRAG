@@ -29,6 +29,8 @@ class Segment {
 public:
     Segment(size_t row_capacity, std::vector<FieldVector> fields);
     Segment(size_t row_capacity, size_t row_count, std::vector<FieldVector> fields);
+    Segment(size_t row_capacity, size_t row_count, std::vector<FieldVector> fields,
+            bool build_compression);
 
     size_t RowCapacity() const;
     size_t RowCount() const;
@@ -56,7 +58,7 @@ private:
     std::vector<std::vector<uint64_t>> compressed_validity_;
     bool compression_ready_ = false;
 
-    void ComputeStats();
+    void ComputeStats(bool build_compression = true);
     void BuildCompressionViews();
     void ResetCompression();
 };

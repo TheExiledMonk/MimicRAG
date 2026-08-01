@@ -1,0 +1,6 @@
+{
+  "bench_scan": {
+    "rows_per_sec_min": 1000000.0,
+    "bytes_per_sec_min": 8000000.0
+  }
+}

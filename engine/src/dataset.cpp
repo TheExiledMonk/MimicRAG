@@ -22,12 +22,19 @@ size_t Dataset::SegmentCapacity() const {
 }
 
 void Dataset::AddField(FieldVector field) {
+    const size_t existing_rows = ActiveRowCount();
     fields_.push_back(std::move(field));
     active_fields_.push_back(fields_.back());
+    if (existing_rows > 0) {
+        auto& added = active_fields_.back();
+        for (size_t i = 0; i < existing_rows; ++i) {
+            added.AppendNull();
+        }
+    }
 }
 
 const std::vector<FieldVector>& Dataset::Fields() const {
-    return fields_;
+    return active_fields_;
 }
 
 const std::vector<FieldVector>& Dataset::ActiveFields() const {

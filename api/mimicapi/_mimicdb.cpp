@@ -1,6 +1,7 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
+#include <algorithm>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -29,6 +30,7 @@ struct ParsedPredicate {
     size_t field_index = 0;
     mimicdb::CompareOp op = mimicdb::CompareOp::kEq;
     double value = 0.0;
+    mimicdb::FieldType field_type = mimicdb::FieldType::kInt32;
 };
 
 struct DecodedColumns {
@@ -132,6 +134,65 @@ bool BuildMaskCompressedColumns(const std::vector<mimicdb::CompressedColumnView>
     }
     *out_mask = std::move(mask);
     return has_mask;
+}
+
+bool ReadNumericField(const mimicdb::FieldVector& field, size_t index, double* out) {
+    if (field.HasNulls() && !field.IsValid(index)) {
+        return false;
+    }
+    switch (field.Type()) {
+        case mimicdb::FieldType::kInt32:
+            *out = static_cast<double>(field.DataInt32()[index]);
+            return true;
+        case mimicdb::FieldType::kInt64:
+            *out = static_cast<double>(field.DataInt64()[index]);
+            return true;
+        case mimicdb::FieldType::kFloat64:
+            *out = field.DataFloat64()[index];
+            return true;
+        case mimicdb::FieldType::kBool:
+            *out = field.DataBool()[index] ? 1.0 : 0.0;
+            return true;
+        case mimicdb::FieldType::kDictInt32:
+            *out = static_cast<double>(field.DictionaryValue(field.DataDictIds()[index]));
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool MatchSingleEq(const mimicdb::FieldVector& field, const ParsedPredicate& pred,
+                   size_t index) {
+    if (field.HasNulls() && !field.IsValid(index)) {
+        return false;
+    }
+    switch (pred.field_type) {
+        case mimicdb::FieldType::kInt32:
+            return field.DataInt32()[index] == static_cast<int32_t>(pred.value);
+        case mimicdb::FieldType::kInt64:
+            return field.DataInt64()[index] == static_cast<int64_t>(pred.value);
+        case mimicdb::FieldType::kFloat64:
+            return field.DataFloat64()[index] == pred.value;
+        case mimicdb::FieldType::kBool:
+            return (field.DataBool()[index] != 0) == (pred.value != 0.0);
+        case mimicdb::FieldType::kDictInt32:
+            return field.DictionaryValue(field.DataDictIds()[index]) ==
+                   static_cast<int64_t>(pred.value);
+        default:
+            return false;
+    }
+}
+
+bool MatchSingleEqCompressed(const mimicdb::CompressedColumnView& column,
+                             const ParsedPredicate& pred, size_t index) {
+    if (!mimicdb::IsValid(column, index)) {
+        return false;
+    }
+    double value = 0.0;
+    if (!mimicdb::ReadNumericValue(column, index, &value)) {
+        return false;
+    }
+    return value == pred.value;
 }
 
 mimicdb::FieldType ParseFieldType(const std::string& type_name, bool* ok) {
@@ -512,6 +573,9 @@ PyObject* DatasetAppendBatch(DatasetObject* self, PyObject* args) {
                     validity.push_back(1);
                 }
             }
+            if (bytes.empty()) {
+                bytes.push_back(0);
+            }
             length_values.push_back(std::move(lengths));
             bytes_values.push_back(std::move(bytes));
             batch.lengths = length_values.back().data();
@@ -618,9 +682,13 @@ PyObject* DatasetAggregateInternal(DatasetObject* self, PyObject* predicates_obj
             }
             value = static_cast<double>(val);
         }
-        predicates.push_back({it->second, op, value});
+        ParsedPredicate parsed;
+        parsed.field_index = it->second;
+        parsed.op = op;
+        parsed.value = value;
+        parsed.field_type = type;
+        predicates.push_back(parsed);
     }
-
     std::vector<const mimicdb::Segment*> segments;
     segments.reserve(self->dataset->Segments().size() + 1);
     for (const auto& seg : self->dataset->Segments()) {
@@ -638,6 +706,8 @@ PyObject* DatasetAggregateInternal(DatasetObject* self, PyObject* predicates_obj
     if (debug) {
         metrics.AddSegmentsTotal(static_cast<uint64_t>(segments.size()));
     }
+    uint64_t rows_scanned = 0;
+    uint64_t rows_pruned = 0;
 
     PyObject* result = PyDict_New();
     if (!result) {
@@ -681,6 +751,8 @@ PyObject* DatasetAggregateInternal(DatasetObject* self, PyObject* predicates_obj
     const bool sum_matches_min = !has_min || sum_index == min_index;
     const bool sum_matches_max = !has_max || sum_index == max_index;
     const bool need_mixed = has_sum && (has_min || has_max) && sum_matches_min && sum_matches_max;
+    const bool single_eq =
+        predicates.size() == 1 && predicates[0].op == mimicdb::CompareOp::kEq;
 
     auto check_agg_type = [&](size_t index) -> bool {
         const auto type = self->dataset->Fields()[index].Type();
@@ -697,8 +769,21 @@ PyObject* DatasetAggregateInternal(DatasetObject* self, PyObject* predicates_obj
     mimicdb::AggregateResult minmax_acc;
     mimicdb::AggregateResult mixed_acc;
     bool mixed_has_value = false;
+    uint64_t match_count = 0;
+
+    auto count_mask_bits = [](const mimicdb::Mask& mask) -> uint64_t {
+        uint64_t count = 0;
+        const size_t size = mask.Size();
+        for (size_t i = 0; i < size; ++i) {
+            if (mask.Get(i)) {
+                count += 1;
+            }
+        }
+        return count;
+    };
 
     for (const auto* seg : segments) {
+        const size_t count = seg->RowCount();
         bool matches = true;
         for (const auto& pred : predicates) {
             const auto& stats = seg->ColumnStats();
@@ -712,12 +797,13 @@ PyObject* DatasetAggregateInternal(DatasetObject* self, PyObject* predicates_obj
             if (debug) {
                 metrics.AddSegmentsPruned(1);
             }
+            rows_pruned += count;
             continue;
         }
         if (debug) {
             metrics.AddSegmentsScanned(1);
         }
-        const size_t count = seg->RowCount();
+        rows_scanned += count;
         const bool compressed = seg->IsSealed() && !seg->CompressedColumns().empty();
         if (compressed) {
             const auto& cols = seg->CompressedColumns();
@@ -730,13 +816,214 @@ PyObject* DatasetAggregateInternal(DatasetObject* self, PyObject* predicates_obj
                 }
                 working = &decoded.views;
             }
-            mimicdb::Mask mask;
-            const bool has_mask =
-                BuildMaskCompressedColumns(*working, predicates, &mask);
-            const mimicdb::Mask* mask_ptr = has_mask ? &mask : nullptr;
+            auto update_agg = [](mimicdb::AggregateResult* acc, double value) {
+                acc->count += 1;
+                acc->sum += value;
+                if (!acc->has_value) {
+                    acc->min = value;
+                    acc->max = value;
+                    acc->has_value = true;
+                } else {
+                    acc->min = std::min(acc->min, value);
+                    acc->max = std::max(acc->max, value);
+                }
+            };
+            if (single_eq && predicates[0].field_index < working->size()) {
+                const auto& pred = predicates[0];
+                const auto& pred_col = (*working)[pred.field_index];
+                for (size_t row = 0; row < count; ++row) {
+                    if (!MatchSingleEqCompressed(pred_col, pred, row)) {
+                        continue;
+                    }
+                    match_count += 1;
+                    if (need_mixed) {
+                        double value = 0.0;
+                        if (!mimicdb::ReadNumericValue((*working)[sum_index], row, &value)) {
+                            continue;
+                        }
+                        update_agg(&mixed_acc, value);
+                        mixed_has_value = true;
+                    } else {
+                        if (has_sum) {
+                            double value = 0.0;
+                            if (mimicdb::ReadNumericValue((*working)[sum_index], row, &value)) {
+                                sum_acc.sum += value;
+                                sum_acc.count += 1;
+                            }
+                        }
+                        if (has_min || has_max) {
+                            const size_t idx = has_min ? min_index : max_index;
+                            double value = 0.0;
+                            if (mimicdb::ReadNumericValue((*working)[idx], row, &value)) {
+                                update_agg(&minmax_acc, value);
+                            }
+                        }
+                    }
+                }
+            } else {
+                mimicdb::Mask mask;
+                const bool has_mask =
+                    BuildMaskCompressedColumns(*working, predicates, &mask);
+                const mimicdb::Mask* mask_ptr = has_mask ? &mask : nullptr;
+                if (has_mask) {
+                    match_count += count_mask_bits(mask);
+                } else {
+                    match_count += count;
+                }
+                if (need_mixed) {
+                    mimicdb::AggregateResult seg_result;
+                    mimicdb::AggregateCompressed((*working)[sum_index], mask_ptr, &seg_result);
+                    mixed_acc.sum += seg_result.sum;
+                    mixed_acc.count += seg_result.count;
+                    if (seg_result.has_value) {
+                        if (!mixed_has_value) {
+                            mixed_acc.min = seg_result.min;
+                            mixed_acc.max = seg_result.max;
+                            mixed_acc.has_value = true;
+                            mixed_has_value = true;
+                        } else {
+                            if (seg_result.min < mixed_acc.min) {
+                                mixed_acc.min = seg_result.min;
+                            }
+                            if (seg_result.max > mixed_acc.max) {
+                                mixed_acc.max = seg_result.max;
+                            }
+                        }
+                    }
+                } else {
+                    if (has_sum) {
+                        mimicdb::AggregateResult seg_sum;
+                        mimicdb::AggregateCompressed((*working)[sum_index], mask_ptr, &seg_sum);
+                        sum_acc.sum += seg_sum.sum;
+                        sum_acc.count += seg_sum.count;
+                    }
+                    if (has_min || has_max) {
+                        const size_t idx = has_min ? min_index : max_index;
+                        mimicdb::AggregateResult seg_mm;
+                        mimicdb::AggregateCompressed((*working)[idx], mask_ptr, &seg_mm);
+                        if (seg_mm.has_value) {
+                            if (!minmax_acc.has_value) {
+                                minmax_acc = seg_mm;
+                            } else {
+                                if (seg_mm.min < minmax_acc.min) {
+                                    minmax_acc.min = seg_mm.min;
+                                }
+                                if (seg_mm.max > minmax_acc.max) {
+                                    minmax_acc.max = seg_mm.max;
+                                }
+                                minmax_acc.count += seg_mm.count;
+                            }
+                        } else {
+                            minmax_acc.count += seg_mm.count;
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if (single_eq) {
+            const auto& pred = predicates[0];
+            const auto& pred_field = seg->Fields()[pred.field_index];
+            for (size_t row = 0; row < count; ++row) {
+                if (!MatchSingleEq(pred_field, pred, row)) {
+                    continue;
+                }
+                match_count += 1;
+                if (need_mixed) {
+                    double value = 0.0;
+                    if (!ReadNumericField(seg->Fields()[sum_index], row, &value)) {
+                        continue;
+                    }
+                    mixed_acc.count += 1;
+                    mixed_acc.sum += value;
+                    if (!mixed_acc.has_value) {
+                        mixed_acc.min = value;
+                        mixed_acc.max = value;
+                        mixed_acc.has_value = true;
+                        mixed_has_value = true;
+                    } else {
+                        mixed_acc.min = std::min(mixed_acc.min, value);
+                        mixed_acc.max = std::max(mixed_acc.max, value);
+                    }
+                } else {
+                    if (has_sum) {
+                        double value = 0.0;
+                        if (ReadNumericField(seg->Fields()[sum_index], row, &value)) {
+                            sum_acc.sum += value;
+                            sum_acc.count += 1;
+                        }
+                    }
+                    if (has_min || has_max) {
+                        const size_t idx = has_min ? min_index : max_index;
+                        double value = 0.0;
+                        if (ReadNumericField(seg->Fields()[idx], row, &value)) {
+                            minmax_acc.count += 1;
+                            if (!minmax_acc.has_value) {
+                                minmax_acc.min = value;
+                                minmax_acc.max = value;
+                                minmax_acc.has_value = true;
+                            } else {
+                                minmax_acc.min = std::min(minmax_acc.min, value);
+                                minmax_acc.max = std::max(minmax_acc.max, value);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            mimicdb::Mask mask(count);
+            for (size_t i = 0; i < count; ++i) {
+                mask.Set(i, true);
+            }
+            for (const auto& pred : predicates) {
+                const auto& field = seg->Fields()[pred.field_index];
+                const auto type = field.Type();
+                for (size_t row = 0; row < count; ++row) {
+                    if (!mask.Get(row)) {
+                        continue;
+                    }
+                    if (field.HasNulls() && !field.IsValid(row)) {
+                        mask.Set(row, false);
+                        continue;
+                    }
+                    bool keep = false;
+                    switch (type) {
+                        case mimicdb::FieldType::kInt32:
+                            keep = mimicdb::CompareInt64(field.DataInt32()[row],
+                                                      static_cast<int64_t>(pred.value), pred.op);
+                            break;
+                        case mimicdb::FieldType::kInt64:
+                            keep = mimicdb::CompareInt64(field.DataInt64()[row],
+                                                      static_cast<int64_t>(pred.value), pred.op);
+                            break;
+                        case mimicdb::FieldType::kFloat64:
+                            keep = mimicdb::CompareFloat64(field.DataFloat64()[row], pred.value,
+                                                           pred.op);
+                            break;
+                        case mimicdb::FieldType::kBool:
+                            keep = mimicdb::CompareInt64(field.DataBool()[row] ? 1 : 0,
+                                                      static_cast<int64_t>(pred.value), pred.op);
+                            break;
+                        case mimicdb::FieldType::kDictInt32: {
+                            const auto* dict = field.Dictionary();
+                            const auto* ids = field.DataDictIds();
+                            keep = mimicdb::CompareInt64(dict->Value(ids[row]),
+                                                      static_cast<int64_t>(pred.value), pred.op);
+                            break;
+                        }
+                        default:
+                            break;
+                    }
+                    if (!keep) {
+                        mask.Set(row, false);
+                    }
+                }
+            }
+            match_count += count_mask_bits(mask);
+
             if (need_mixed) {
                 mimicdb::AggregateResult seg_result;
-                mimicdb::AggregateCompressed((*working)[sum_index], mask_ptr, &seg_result);
+                mimicdb::AggregateMixed(seg->Fields()[sum_index], &mask, &seg_result);
                 mixed_acc.sum += seg_result.sum;
                 mixed_acc.count += seg_result.count;
                 if (seg_result.has_value) {
@@ -757,14 +1044,14 @@ PyObject* DatasetAggregateInternal(DatasetObject* self, PyObject* predicates_obj
             } else {
                 if (has_sum) {
                     mimicdb::AggregateResult seg_sum;
-                    mimicdb::AggregateCompressed((*working)[sum_index], mask_ptr, &seg_sum);
+                    mimicdb::AggregateSum(seg->Fields()[sum_index], &mask, &seg_sum);
                     sum_acc.sum += seg_sum.sum;
                     sum_acc.count += seg_sum.count;
                 }
                 if (has_min || has_max) {
                     const size_t idx = has_min ? min_index : max_index;
                     mimicdb::AggregateResult seg_mm;
-                    mimicdb::AggregateCompressed((*working)[idx], mask_ptr, &seg_mm);
+                    mimicdb::AggregateMinMax(seg->Fields()[idx], &mask, &seg_mm);
                     if (seg_mm.has_value) {
                         if (!minmax_acc.has_value) {
                             minmax_acc = seg_mm;
@@ -780,101 +1067,6 @@ PyObject* DatasetAggregateInternal(DatasetObject* self, PyObject* predicates_obj
                     } else {
                         minmax_acc.count += seg_mm.count;
                     }
-                }
-            }
-            continue;
-        }
-        mimicdb::Mask mask(count);
-        for (size_t i = 0; i < count; ++i) {
-            mask.Set(i, true);
-        }
-        for (const auto& pred : predicates) {
-            const auto& field = seg->Fields()[pred.field_index];
-            const auto type = field.Type();
-            for (size_t row = 0; row < count; ++row) {
-                if (!mask.Get(row)) {
-                    continue;
-                }
-                if (field.HasNulls() && !field.IsValid(row)) {
-                    mask.Set(row, false);
-                    continue;
-                }
-                bool keep = false;
-                switch (type) {
-                    case mimicdb::FieldType::kInt32:
-                        keep = mimicdb::CompareInt64(field.DataInt32()[row],
-                                                  static_cast<int64_t>(pred.value), pred.op);
-                        break;
-                    case mimicdb::FieldType::kInt64:
-                        keep = mimicdb::CompareInt64(field.DataInt64()[row],
-                                                  static_cast<int64_t>(pred.value), pred.op);
-                        break;
-                    case mimicdb::FieldType::kFloat64:
-                        keep = mimicdb::CompareFloat64(field.DataFloat64()[row], pred.value, pred.op);
-                        break;
-                    case mimicdb::FieldType::kBool:
-                        keep = mimicdb::CompareInt64(field.DataBool()[row] ? 1 : 0,
-                                                  static_cast<int64_t>(pred.value), pred.op);
-                        break;
-                    case mimicdb::FieldType::kDictInt32: {
-                        const auto* dict = field.Dictionary();
-                        const auto* ids = field.DataDictIds();
-                        keep = mimicdb::CompareInt64(dict->Value(ids[row]),
-                                                  static_cast<int64_t>(pred.value), pred.op);
-                        break;
-                    }
-                }
-                if (!keep) {
-                    mask.Set(row, false);
-                }
-            }
-        }
-
-        if (need_mixed) {
-            mimicdb::AggregateResult seg_result;
-            mimicdb::AggregateMixed(seg->Fields()[sum_index], &mask, &seg_result);
-            mixed_acc.sum += seg_result.sum;
-            mixed_acc.count += seg_result.count;
-            if (seg_result.has_value) {
-                if (!mixed_has_value) {
-                    mixed_acc.min = seg_result.min;
-                    mixed_acc.max = seg_result.max;
-                    mixed_acc.has_value = true;
-                    mixed_has_value = true;
-                } else {
-                    if (seg_result.min < mixed_acc.min) {
-                        mixed_acc.min = seg_result.min;
-                    }
-                    if (seg_result.max > mixed_acc.max) {
-                        mixed_acc.max = seg_result.max;
-                    }
-                }
-            }
-        } else {
-            if (has_sum) {
-                mimicdb::AggregateResult seg_sum;
-                mimicdb::AggregateSum(seg->Fields()[sum_index], &mask, &seg_sum);
-                sum_acc.sum += seg_sum.sum;
-                sum_acc.count += seg_sum.count;
-            }
-            if (has_min || has_max) {
-                const size_t idx = has_min ? min_index : max_index;
-                mimicdb::AggregateResult seg_mm;
-                mimicdb::AggregateMinMax(seg->Fields()[idx], &mask, &seg_mm);
-                if (seg_mm.has_value) {
-                    if (!minmax_acc.has_value) {
-                        minmax_acc = seg_mm;
-                    } else {
-                        if (seg_mm.min < minmax_acc.min) {
-                            minmax_acc.min = seg_mm.min;
-                        }
-                        if (seg_mm.max > minmax_acc.max) {
-                            minmax_acc.max = seg_mm.max;
-                        }
-                        minmax_acc.count += seg_mm.count;
-                    }
-                } else {
-                    minmax_acc.count += seg_mm.count;
                 }
             }
         }
@@ -914,19 +1106,12 @@ PyObject* DatasetAggregateInternal(DatasetObject* self, PyObject* predicates_obj
     }
 
     if (count_flag && PyObject_IsTrue(count_flag)) {
-        if (need_mixed) {
-            PyDict_SetItemString(result, "count",
-                                 PyLong_FromUnsignedLongLong(mixed_acc.count));
-        } else if (has_sum) {
-            PyDict_SetItemString(result, "count",
-                                 PyLong_FromUnsignedLongLong(sum_acc.count));
-        } else if (has_min || has_max) {
-            PyDict_SetItemString(result, "count",
-                                 PyLong_FromUnsignedLongLong(minmax_acc.count));
-        } else {
-            PyDict_SetItemString(result, "count",
-                                 PyLong_FromUnsignedLongLong(0));
+        uint64_t count_value = match_count;
+        if (!has_sum && (has_min || has_max)) {
+            count_value = minmax_acc.count;
         }
+        PyDict_SetItemString(result, "count",
+                             PyLong_FromUnsignedLongLong(count_value));
     }
 
     if (debug) {
@@ -937,6 +1122,10 @@ PyObject* DatasetAggregateInternal(DatasetObject* self, PyObject* predicates_obj
                              PyLong_FromUnsignedLongLong(metrics.segments_scanned));
         PyDict_SetItemString(stats, "segments_pruned",
                              PyLong_FromUnsignedLongLong(metrics.segments_pruned));
+        PyDict_SetItemString(stats, "rows_scanned",
+                             PyLong_FromUnsignedLongLong(rows_scanned));
+        PyDict_SetItemString(stats, "rows_pruned",
+                             PyLong_FromUnsignedLongLong(rows_pruned));
         return PyTuple_Pack(2, result, stats);
     }
 
@@ -1074,8 +1263,15 @@ PyObject* DatasetScan(DatasetObject* self, PyObject* args) {
             }
             value = static_cast<double>(val);
         }
-        predicates.push_back({it->second, op, value});
+        ParsedPredicate parsed;
+        parsed.field_index = it->second;
+        parsed.op = op;
+        parsed.value = value;
+        parsed.field_type = type;
+        predicates.push_back(parsed);
     }
+    const bool single_eq =
+        predicates.size() == 1 && predicates[0].op == mimicdb::CompareOp::kEq;
 
     std::vector<const mimicdb::Segment*> segments;
     segments.reserve(self->dataset->Segments().size() + 1);
@@ -1114,14 +1310,28 @@ PyObject* DatasetScan(DatasetObject* self, PyObject* args) {
                 working = &decoded.views;
             }
             mimicdb::Mask mask;
-            const bool has_mask =
-                BuildMaskCompressedColumns(*working, predicates, &mask);
+            bool has_mask = false;
+            if (!single_eq) {
+                has_mask = BuildMaskCompressedColumns(*working, predicates, &mask);
+            }
             for (size_t row = 0; row < count; ++row) {
-                if (has_mask && !mask.Get(row)) {
-                    continue;
+                if (limit && added >= limit) {
+                    stop = true;
+                    break;
                 }
-                if (!has_mask && !predicates.empty()) {
-                    continue;
+                if (single_eq) {
+                    const auto& pred = predicates[0];
+                    if (pred.field_index >= working->size() ||
+                        !MatchSingleEqCompressed((*working)[pred.field_index], pred, row)) {
+                        continue;
+                    }
+                } else {
+                    if (has_mask && !mask.Get(row)) {
+                        continue;
+                    }
+                    if (!has_mask && !predicates.empty()) {
+                        continue;
+                    }
                 }
                 if (skipped < offset) {
                     skipped += 1;
@@ -1256,66 +1466,11 @@ PyObject* DatasetScan(DatasetObject* self, PyObject* args) {
             }
             continue;
         }
-
-        mimicdb::Mask mask(count);
-        for (size_t i = 0; i < count; ++i) {
-            mask.Set(i, true);
-        }
-        for (const auto& pred : predicates) {
-            const auto& field = seg->Fields()[pred.field_index];
-            const auto type = field.Type();
-            for (size_t row = 0; row < count; ++row) {
-                if (!mask.Get(row)) {
-                    continue;
-                }
-                if (field.HasNulls() && !field.IsValid(row)) {
-                    mask.Set(row, false);
-                    continue;
-                }
-                bool keep = false;
-                switch (type) {
-                    case mimicdb::FieldType::kInt32:
-                        keep = mimicdb::CompareInt64(field.DataInt32()[row],
-                                                     static_cast<int64_t>(pred.value), pred.op);
-                        break;
-                    case mimicdb::FieldType::kInt64:
-                        keep = mimicdb::CompareInt64(field.DataInt64()[row],
-                                                     static_cast<int64_t>(pred.value), pred.op);
-                        break;
-                    case mimicdb::FieldType::kFloat64:
-                        keep = mimicdb::CompareFloat64(field.DataFloat64()[row], pred.value,
-                                                       pred.op);
-                        break;
-                    case mimicdb::FieldType::kBool:
-                        keep = mimicdb::CompareInt64(field.DataBool()[row] ? 1 : 0,
-                                                     static_cast<int64_t>(pred.value), pred.op);
-                        break;
-                    case mimicdb::FieldType::kDictInt32: {
-                        const auto* dict = field.Dictionary();
-                        const auto* ids = field.DataDictIds();
-                        keep = mimicdb::CompareInt64(dict->Value(ids[row]),
-                                                     static_cast<int64_t>(pred.value), pred.op);
-                        break;
-                    }
-                }
-                if (!keep) {
-                    mask.Set(row, false);
-                }
-            }
-        }
-
-        for (size_t row = 0; row < count; ++row) {
-            if (!mask.Get(row)) {
-                continue;
-            }
-            if (skipped < offset) {
-                skipped += 1;
-                continue;
-            }
+        auto append_row = [&](size_t row) -> bool {
             PyObject* row_obj = PyDict_New();
             if (!row_obj) {
                 Py_DECREF(rows);
-                return nullptr;
+                return false;
             }
             for (size_t i = 0; i < column_indices.size(); ++i) {
                 const size_t field_index = column_indices[i];
@@ -1367,11 +1522,16 @@ PyObject* DatasetScan(DatasetObject* self, PyObject* args) {
                             static_cast<Py_ssize_t>(lengths[row]));
                         break;
                     }
+                    case mimicdb::FieldType::kArray:
+                    case mimicdb::FieldType::kObject:
+                        Py_INCREF(Py_None);
+                        value = Py_None;
+                        break;
                 }
                 if (!value) {
                     Py_DECREF(row_obj);
                     Py_DECREF(rows);
-                    return nullptr;
+                    return false;
                 }
                 PyDict_SetItemString(row_obj, name, value);
                 Py_DECREF(value);
@@ -1381,7 +1541,97 @@ PyObject* DatasetScan(DatasetObject* self, PyObject* args) {
             added += 1;
             if (limit && added >= limit) {
                 stop = true;
-                break;
+                return true;
+            }
+            return true;
+        };
+
+        if (single_eq) {
+            const auto& pred = predicates[0];
+            const auto& field = seg->Fields()[pred.field_index];
+            for (size_t row = 0; row < count; ++row) {
+                if (!MatchSingleEq(field, pred, row)) {
+                    continue;
+                }
+                if (skipped < offset) {
+                    skipped += 1;
+                    continue;
+                }
+                if (!append_row(row)) {
+                    return nullptr;
+                }
+                if (stop) {
+                    break;
+                }
+            }
+        } else {
+            mimicdb::Mask mask(count);
+            for (size_t i = 0; i < count; ++i) {
+                mask.Set(i, true);
+            }
+            for (const auto& pred : predicates) {
+                const auto& field = seg->Fields()[pred.field_index];
+                const auto type = field.Type();
+                for (size_t row = 0; row < count; ++row) {
+                    if (!mask.Get(row)) {
+                        continue;
+                    }
+                    if (field.HasNulls() && !field.IsValid(row)) {
+                        mask.Set(row, false);
+                        continue;
+                    }
+                    bool keep = false;
+                    switch (type) {
+                        case mimicdb::FieldType::kInt32:
+                            keep = mimicdb::CompareInt64(field.DataInt32()[row],
+                                                         static_cast<int64_t>(pred.value),
+                                                         pred.op);
+                            break;
+                        case mimicdb::FieldType::kInt64:
+                            keep = mimicdb::CompareInt64(field.DataInt64()[row],
+                                                         static_cast<int64_t>(pred.value),
+                                                         pred.op);
+                            break;
+                        case mimicdb::FieldType::kFloat64:
+                            keep = mimicdb::CompareFloat64(field.DataFloat64()[row], pred.value,
+                                                           pred.op);
+                            break;
+                        case mimicdb::FieldType::kBool:
+                            keep = mimicdb::CompareInt64(field.DataBool()[row] ? 1 : 0,
+                                                         static_cast<int64_t>(pred.value),
+                                                         pred.op);
+                            break;
+                        case mimicdb::FieldType::kDictInt32: {
+                            const auto* dict = field.Dictionary();
+                            const auto* ids = field.DataDictIds();
+                            keep = mimicdb::CompareInt64(dict->Value(ids[row]),
+                                                         static_cast<int64_t>(pred.value),
+                                                         pred.op);
+                            break;
+                        }
+                        default:
+                            break;
+                    }
+                    if (!keep) {
+                        mask.Set(row, false);
+                    }
+                }
+            }
+
+            for (size_t row = 0; row < count; ++row) {
+                if (!mask.Get(row)) {
+                    continue;
+                }
+                if (skipped < offset) {
+                    skipped += 1;
+                    continue;
+                }
+                if (!append_row(row)) {
+                    return nullptr;
+                }
+                if (stop) {
+                    break;
+                }
             }
         }
         if (stop) {

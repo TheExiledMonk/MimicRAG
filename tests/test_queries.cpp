@@ -65,16 +65,16 @@ int main() {
     };
     mimicdb::AggregateResult sum_pred;
     mimicdb::AggregateSumPredicate(users.Fields()[0], predicate2, &pred_ctx2, &sum_pred);
-    assert(sum_pred.sum == 60.0);
+    assert(sum_pred.sum == 40.0);
 
     mimicdb::AggregateResult count_pred;
     mimicdb::AggregateCountPredicate(users.Fields()[0], predicate2, &pred_ctx2, &count_pred);
-    assert(count_pred.count == agg.count);
+    assert(count_pred.count == 1);
 
     mimicdb::AggregateResult minmax_pred;
     mimicdb::AggregateMinMaxPredicate(users.Fields()[0], predicate2, &pred_ctx2, &minmax_pred);
-    assert(minmax_pred.min == agg.min);
-    assert(minmax_pred.max == agg.max);
+    assert(minmax_pred.min == 40.0);
+    assert(minmax_pred.max == 40.0);
 
     struct PredCtx {
         const int64_t* data;

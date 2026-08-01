@@ -42,6 +42,9 @@ void FieldVector::Resize(size_t size) {
 void FieldVector::SetValid(size_t index, bool valid) {
     if (validity_.Size() == 0) {
         validity_.Resize(size_);
+        for (size_t i = 0; i < size_; ++i) {
+            validity_.Set(i, true);
+        }
     }
     validity_.Set(index, valid);
 }
@@ -286,7 +289,11 @@ bool FieldVector::AppendNull() {
     validity_.Set(size_, false);
     if (type_ == FieldType::kString || type_ == FieldType::kBytes ||
         type_ == FieldType::kArray) {
-        data_lengths_.push_back(0);
+        if (data_lengths_.size() == size_ + 1) {
+            data_lengths_[size_] = 0;
+        } else {
+            data_lengths_.push_back(0);
+        }
         offsets_valid_ = false;
     }
     size_ += 1;

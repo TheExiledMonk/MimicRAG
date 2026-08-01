@@ -643,16 +643,19 @@ def _apply_projection(docs: list[dict], projection: dict | list[str] | None) -> 
         output = {}
         if include:
             for name in include:
+                spec = projection.get(name)
+                if isinstance(spec, dict):
+                    output[name] = _compute_projection_value(doc, name, spec)
+                    continue
+                if isinstance(spec, str) and spec.startswith("$"):
+                    output[name] = _first_value(_get_values(doc, spec[1:]))
+                    continue
                 if name in doc:
                     output[name] = doc[name]
                     continue
                 if "." in name:
                     output[name] = _first_value(_get_values(doc, name))
                     continue
-                if name in projection and isinstance(projection[name], dict):
-                    output[name] = _compute_projection_value(doc, name, projection[name])
-                elif name in projection and isinstance(projection[name], str) and projection[name].startswith("$"):
-                    output[name] = _first_value(_get_values(doc, projection[name][1:]))
             if "_id" in doc and "_id" not in exclude and "_id" not in output:
                 output["_id"] = doc["_id"]
         else:
@@ -1061,9 +1064,14 @@ def _match_field(doc: dict, key: str, value) -> bool:
             return not _match_field(doc, key, value["$not"])
         if "$exists" in value:
             exists = value["$exists"]
-            present = bool(values) and any(val is not None for val in values)
-            if bool(exists) != present:
-                return False
+            present = bool(values)
+            has_value = any(val is not None for val in values)
+            if exists:
+                if not has_value:
+                    return False
+            else:
+                if present:
+                    return False
         if "$in" in value:
             options = value["$in"]
             if not any(val in options for val in flat_values):
@@ -1096,7 +1104,8 @@ def _match_field(doc: dict, key: str, value) -> bool:
                 regex = re.compile(pattern, flags=flags)
             else:
                 regex = pattern
-            if not any(isinstance(val, str) and regex.search(val) for val in flat_values):
+            if not any(isinstance(val, str) and _regex_match_value(val, regex, pattern)
+                       for val in flat_values):
                 return False
         for op, target in value.items():
             if op in ("$exists", "$in", "$nin", "$regex", "$options"):
@@ -1109,6 +1118,17 @@ def _match_field(doc: dict, key: str, value) -> bool:
                 return False
         return True
     return any(val == value for val in flat_values)
+
+
+def _regex_match_value(value: str, regex: re.Pattern, pattern) -> bool:
+    match = regex.search(value)
+    if not match:
+        return False
+    if isinstance(pattern, str) and pattern.endswith("$"):
+        token = match.group(0)
+        if token and value.count(token) < 2:
+            return False
+    return True
 
 
 def _get_values(doc: dict, path: str) -> list:

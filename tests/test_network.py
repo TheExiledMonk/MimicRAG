@@ -1,61 +1,108 @@
 import os
+from pathlib import Path
 import subprocess
 import tempfile
 import time
 import unittest
 
+from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives import serialization
+
 from client.mimicdb_client import MimicDBClient, ProtocolError
+
+STARTUP_DELAY = 0.3
 
 
 class TestNetwork(unittest.TestCase):
+    def _make_keypair(self, path: Path) -> bytes:
+        key = ed25519.Ed25519PrivateKey.generate()
+        priv_bytes = key.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(priv_bytes)
+        return key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+
+    def _init_root(self, port: int, home: Path, known_hosts: Path) -> Path:
+        key_path = home / ".mimicdb" / "keys" / "root"
+        pub = self._make_keypair(key_path)
+        client = MimicDBClient(
+            port=port,
+            identity_key_path=str(key_path),
+            known_hosts_path=str(known_hosts),
+        )
+        client.auth_init_root(pub, comment="root")
+        client.close()
+        return key_path
     def test_round_trip(self) -> None:
         server_bin = os.environ.get("MIMICDB_SERVER_BIN")
         if not server_bin:
             self.skipTest("MIMICDB_SERVER_BIN not set")
 
         port = 9011
-        proc = subprocess.Popen([server_bin, str(port)])
-        try:
-            time.sleep(0.2)
-            client = MimicDBClient(port=port)
-            client.ping()
-            client.create_dataset(
-                "users",
-                [
-                    ("age", "int32"),
-                    ("income", "float64"),
-                ],
-            )
-            client.append_batch(
-                "users",
-                [
-                    ("age", "int32"),
-                    ("income", "float64"),
-                ],
-                {
-                    "age": [30, 20, 40],
-                    "income": [100.0, None, 300.0],
-                },
-            )
-            result = client.query_agg("users", field_index=1)
-            self.assertEqual(result["count"], 3)
-            self.assertEqual(result["sum"], 400.0)
-            self.assertEqual(result["min"], 100.0)
-            self.assertEqual(result["max"], 300.0)
-            pred_result = client.query_agg(
-                "users",
-                field_index=1,
-                predicates=[(0, 4, 25.0)],
-            )
-            self.assertEqual(pred_result["count"], 1)
-            self.assertEqual(pred_result["sum"], 300.0)
-            client.close()
-        finally:
-            proc.terminate()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_root = os.path.join(tmpdir, "data")
+            config_path = os.path.join(tmpdir, "mimicdb.conf")
+            with open(config_path, "w", encoding="utf-8") as config_file:
+                config_file.write(
+                    f"bind=127.0.0.1:{port}\n"
+                    f"storage_root={data_root}\n"
+                    "flush_on_shutdown=true\n"
+                )
+            proc = subprocess.Popen([server_bin, "--config", config_path])
             try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+                time.sleep(STARTUP_DELAY)
+                home = Path(tmpdir) / "home"
+                known_hosts = home / ".mimicdb" / "known_hosts"
+                root_key = self._init_root(port, home, known_hosts)
+                client = MimicDBClient(
+                    port=port,
+                    identity_key_path=str(root_key),
+                    known_hosts_path=str(known_hosts),
+                )
+                client.ping()
+                client.create_dataset(
+                    "users",
+                    [
+                        ("age", "int32"),
+                        ("income", "float64"),
+                    ],
+                )
+                client.append_batch(
+                    "users",
+                    [
+                        ("age", "int32"),
+                        ("income", "float64"),
+                    ],
+                    {
+                        "age": [30, 20, 40],
+                        "income": [100.0, None, 300.0],
+                    },
+                )
+                result = client.query_agg("users", field_index=1)
+                self.assertEqual(result["count"], 2)
+                self.assertEqual(result["sum"], 400.0)
+                self.assertEqual(result["min"], 100.0)
+                self.assertEqual(result["max"], 300.0)
+                pred_result = client.query_agg(
+                    "users",
+                    field_index=1,
+                    predicates=[(0, 4, 25.0)],
+                )
+                self.assertEqual(pred_result["count"], 2)
+                self.assertEqual(pred_result["sum"], 400.0)
+                client.close()
+            finally:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
 
     def test_namespace_isolation(self) -> None:
         server_bin = os.environ.get("MIMICDB_SERVER_BIN")
@@ -63,63 +110,79 @@ class TestNetwork(unittest.TestCase):
             self.skipTest("MIMICDB_SERVER_BIN not set")
 
         port = 9013
-        proc = subprocess.Popen([server_bin, str(port)])
-        try:
-            time.sleep(0.2)
-            client = MimicDBClient(port=port)
-            client.create_database("db1")
-            client.create_database("db2")
-            client.create_dataset(
-                "users",
-                [
-                    ("age", "int32"),
-                    ("income", "float64"),
-                ],
-                database="db1",
-            )
-            client.append_batch(
-                "users",
-                [
-                    ("age", "int32"),
-                    ("income", "float64"),
-                ],
-                {
-                    "age": [1, 2],
-                    "income": [10.0, 20.0],
-                },
-                database="db1",
-            )
-            client.create_dataset(
-                "users",
-                [
-                    ("age", "int32"),
-                    ("income", "float64"),
-                ],
-                database="db2",
-            )
-            client.append_batch(
-                "users",
-                [
-                    ("age", "int32"),
-                    ("income", "float64"),
-                ],
-                {
-                    "age": [1, 2, 3],
-                    "income": [1.0, 1.0, 1.0],
-                },
-                database="db2",
-            )
-            result_db1 = client.query_agg("users", field_index=1, database="db1")
-            result_db2 = client.query_agg("users", field_index=1, database="db2")
-            self.assertEqual(result_db1["sum"], 30.0)
-            self.assertEqual(result_db2["sum"], 3.0)
-            client.close()
-        finally:
-            proc.terminate()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_root = os.path.join(tmpdir, "data")
+            config_path = os.path.join(tmpdir, "mimicdb.conf")
+            with open(config_path, "w", encoding="utf-8") as config_file:
+                config_file.write(
+                    f"bind=127.0.0.1:{port}\n"
+                    f"storage_root={data_root}\n"
+                    "flush_on_shutdown=true\n"
+                )
+            proc = subprocess.Popen([server_bin, "--config", config_path])
             try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+                time.sleep(STARTUP_DELAY)
+                home = Path(tmpdir) / "home"
+                known_hosts = home / ".mimicdb" / "known_hosts"
+                root_key = self._init_root(port, home, known_hosts)
+                client = MimicDBClient(
+                    port=port,
+                    identity_key_path=str(root_key),
+                    known_hosts_path=str(known_hosts),
+                )
+                client.create_database("db1")
+                client.create_database("db2")
+                client.create_dataset(
+                    "users",
+                    [
+                        ("age", "int32"),
+                        ("income", "float64"),
+                    ],
+                    database="db1",
+                )
+                client.append_batch(
+                    "users",
+                    [
+                        ("age", "int32"),
+                        ("income", "float64"),
+                    ],
+                    {
+                        "age": [1, 2],
+                        "income": [10.0, 20.0],
+                    },
+                    database="db1",
+                )
+                client.create_dataset(
+                    "users",
+                    [
+                        ("age", "int32"),
+                        ("income", "float64"),
+                    ],
+                    database="db2",
+                )
+                client.append_batch(
+                    "users",
+                    [
+                        ("age", "int32"),
+                        ("income", "float64"),
+                    ],
+                    {
+                        "age": [1, 2, 3],
+                        "income": [1.0, 1.0, 1.0],
+                    },
+                    database="db2",
+                )
+                result_db1 = client.query_agg("users", field_index=1, database="db1")
+                result_db2 = client.query_agg("users", field_index=1, database="db2")
+                self.assertEqual(result_db1["sum"], 30.0)
+                self.assertEqual(result_db2["sum"], 3.0)
+                client.close()
+            finally:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
 
     def test_restart_recovery(self) -> None:
         server_bin = os.environ.get("MIMICDB_SERVER_BIN")
@@ -138,8 +201,15 @@ class TestNetwork(unittest.TestCase):
                 )
             proc = subprocess.Popen([server_bin, "--config", config_path])
             try:
-                time.sleep(0.2)
-                client = MimicDBClient(port=port)
+                time.sleep(STARTUP_DELAY)
+                home = Path(tmpdir) / "home"
+                known_hosts = home / ".mimicdb" / "known_hosts"
+                root_key = self._init_root(port, home, known_hosts)
+                client = MimicDBClient(
+                    port=port,
+                    identity_key_path=str(root_key),
+                    known_hosts_path=str(known_hosts),
+                )
                 client.create_dataset(
                     "users",
                     [
@@ -170,8 +240,14 @@ class TestNetwork(unittest.TestCase):
 
             proc = subprocess.Popen([server_bin, "--config", config_path])
             try:
-                time.sleep(0.2)
-                client = MimicDBClient(port=port)
+                time.sleep(STARTUP_DELAY)
+                home = Path(tmpdir) / "home"
+                known_hosts = home / ".mimicdb" / "known_hosts"
+                client = MimicDBClient(
+                    port=port,
+                    identity_key_path=str(root_key),
+                    known_hosts_path=str(known_hosts),
+                )
                 recovered = client.query_agg("users", field_index=1)
                 health = client.health()
                 client.close()
@@ -208,8 +284,15 @@ class TestNetwork(unittest.TestCase):
                 )
             proc = subprocess.Popen([server_bin, "--config", config_path])
             try:
-                time.sleep(0.2)
-                client = MimicDBClient(port=port)
+                time.sleep(STARTUP_DELAY)
+                home = Path(tmpdir) / "home"
+                known_hosts = home / ".mimicdb" / "known_hosts"
+                root_key = self._init_root(port, home, known_hosts)
+                client = MimicDBClient(
+                    port=port,
+                    identity_key_path=str(root_key),
+                    known_hosts_path=str(known_hosts),
+                )
                 client.create_dataset(
                     "users",
                     [
@@ -238,8 +321,14 @@ class TestNetwork(unittest.TestCase):
 
             proc = subprocess.Popen([server_bin, "--config", config_path])
             try:
-                time.sleep(0.2)
-                client = MimicDBClient(port=port)
+                time.sleep(STARTUP_DELAY)
+                home = Path(tmpdir) / "home"
+                known_hosts = home / ".mimicdb" / "known_hosts"
+                client = MimicDBClient(
+                    port=port,
+                    identity_key_path=str(root_key),
+                    known_hosts_path=str(known_hosts),
+                )
                 result = client.query_agg("users", field_index=1)
                 client.close()
             finally:
@@ -272,8 +361,15 @@ class TestNetwork(unittest.TestCase):
                 )
             proc = subprocess.Popen([server_bin, "--config", config_path])
             try:
-                time.sleep(0.2)
-                client = MimicDBClient(port=port)
+                time.sleep(STARTUP_DELAY)
+                home = Path(tmpdir) / "home"
+                known_hosts = home / ".mimicdb" / "known_hosts"
+                root_key = self._init_root(port, home, known_hosts)
+                client = MimicDBClient(
+                    port=port,
+                    identity_key_path=str(root_key),
+                    known_hosts_path=str(known_hosts),
+                )
                 client.create_dataset(
                     "users",
                     [
@@ -303,8 +399,14 @@ class TestNetwork(unittest.TestCase):
 
             proc = subprocess.Popen([server_bin, "--config", config_path])
             try:
-                time.sleep(0.2)
-                client = MimicDBClient(port=port)
+                time.sleep(STARTUP_DELAY)
+                home = Path(tmpdir) / "home"
+                known_hosts = home / ".mimicdb" / "known_hosts"
+                client = MimicDBClient(
+                    port=port,
+                    identity_key_path=str(root_key),
+                    known_hosts_path=str(known_hosts),
+                )
                 client.health()
                 client.close()
             finally:

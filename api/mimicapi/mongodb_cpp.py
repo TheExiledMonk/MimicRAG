@@ -8,6 +8,9 @@ from .mongodb import (
     DeleteResult,
     DuplicateKeyError,
     OperationFailure,
+    _apply_projection,
+    _get_values,
+    _match_filter,
 )
 
 
@@ -331,6 +334,26 @@ class Cursor:
         return self
 
     def to_list(self) -> list[dict]:
+        if self._filter and _has_compound_filter(self._filter):
+            docs = self._core.find(
+                self._db,
+                self._collection,
+                None,
+                None,
+                None,
+                0,
+                0,
+            )
+            docs = [doc for doc in docs if _match_filter(doc, self._filter)]
+            if self._sort:
+                docs = _apply_sort(docs, self._sort)
+            if self._projection is not None:
+                docs = _apply_projection(docs, self._projection)
+            if self._skip:
+                docs = docs[self._skip:]
+            if self._limit:
+                docs = docs[:self._limit]
+            return docs
         return self._core.find(
             self._db,
             self._collection,
@@ -343,3 +366,21 @@ class Cursor:
 
     def __iter__(self):
         return iter(self.to_list())
+
+
+def _has_compound_filter(filter: dict | None) -> bool:
+    if not isinstance(filter, dict):
+        return False
+    return any(key in ("$or", "$and", "$nor") for key in filter.keys())
+
+
+def _apply_sort(docs: list[dict], sort: list[tuple[str, int]] | dict) -> list[dict]:
+    if isinstance(sort, dict):
+        items = list(sort.items())
+    else:
+        items = list(sort)
+    def sort_key(doc):
+        return tuple(_get_values(doc, name)[0] if _get_values(doc, name) else None
+                     for name, _ in items)
+    reverse = any(direction < 0 for _, direction in items)
+    return sorted(docs, key=sort_key, reverse=reverse)

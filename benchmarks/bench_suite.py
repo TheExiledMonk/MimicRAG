@@ -10,6 +10,8 @@ import sys
 from mimicapi import ApiClient, Dataset, MongoClientCpp, MySQLConnection, CppApiClient
 from mimicapi.sql_parser import parse_sql
 from mimicapi.sql_exec import execute_query
+from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives import serialization
 
 
 def resolve_server_bin(server_bin: str, repo_root: Path) -> str:
@@ -28,6 +30,49 @@ def resolve_server_bin(server_bin: str, repo_root: Path) -> str:
         f"server binary not found at '{server_bin}'. "
         "Build the server or pass the correct path via --server-bin."
     )
+
+
+def _load_or_create_identity_key(path: Path) -> bytes:
+    if path.exists():
+        data = path.read_bytes()
+        key = ed25519.Ed25519PrivateKey.from_private_bytes(data)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        key = ed25519.Ed25519PrivateKey.generate()
+        path.write_bytes(
+            key.private_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PrivateFormat.Raw,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        )
+    return key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+
+
+def _bootstrap_auth(host: str, port: int, identity_key_path: str | None) -> None:
+    if not identity_key_path:
+        return
+    repo_root = Path(__file__).resolve().parents[1]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    from client.mimicdb_client import MimicDBClient, ProtocolError
+
+    key_path = Path(identity_key_path).expanduser()
+    public_key = _load_or_create_identity_key(key_path)
+    client = MimicDBClient(
+        host=host,
+        port=port,
+        identity_key_path=str(key_path),
+    )
+    try:
+        client.auth_init_root(public_key, comment="bench-root")
+    except ProtocolError:
+        pass
+    finally:
+        client.close()
 
 
 def _perf_available() -> bool:
@@ -197,6 +242,7 @@ def run_dataset_bench(
     host: str | None,
     port: int | None,
     database: str,
+    identity_key_path: str | None,
     mask_reuse: bool,
     append_sleep_ms: int,
 ) -> dict[str, float]:
@@ -212,6 +258,7 @@ def run_dataset_bench(
         host=host,
         port=port,
         database=database,
+        identity_key_path=identity_key_path,
     )
     start = time.perf_counter()
     if append_mode == "row":
@@ -259,13 +306,20 @@ def run_mimicapi_bench(
     host: str | None,
     port: int | None,
     database: str,
+    identity_key_path: str | None,
     mask_reuse: bool,
     append_sleep_ms: int,
     cleanup: bool,
 ) -> dict[str, float]:
     rng = random.Random(seed)
     client = ApiClient()
-    client.add_mimicdb_backend("primary", host=host, port=port, default_db=database)
+    client.add_mimicdb_backend(
+        "primary",
+        host=host,
+        port=port,
+        default_db=database,
+        identity_key_path=identity_key_path,
+    )
     fields = [
         ("age", "int32"),
         ("country", "int32"),
@@ -610,6 +664,14 @@ class SqlCppClient:
         result = self._core.aggregate(db, dataset, field_index, converted)
         return result, {}
 
+    def query_agg_multi_routed(self, db, dataset, requests, predicates=None):
+        op_map = {0: "eq", 1: "ne", 2: "lt", 3: "le", 4: "gt", 5: "ge"}
+        converted = None
+        if predicates:
+            converted = [(idx, op_map[op], value) for idx, op, value in predicates]
+        result = self._core.aggregate_multi(db, dataset, requests, converted)
+        return result, {}
+
 
 def run_sql_dialect_bench(
     rows: int,
@@ -849,6 +911,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=9000)
     parser.add_argument("--server-bin", default=None)
     parser.add_argument("--database", default="bench")
+    parser.add_argument("--identity-key", default=None)
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--include-cpp-core", action="store_true")
     parser.add_argument("--sweep", action="store_true")
@@ -891,6 +954,11 @@ def main() -> None:
     try:
         host = args.host if args.transport == "network" else None
         port = args.port if args.transport == "network" else None
+        identity_key_path = args.identity_key or os.getenv("MIMICDB_BENCH_IDENTITY_KEY")
+        if args.transport == "network" and not identity_key_path:
+            identity_key_path = str(Path.home() / ".mimicdb" / "bench_identity")
+        if server_proc is not None and host is not None and port is not None:
+            _bootstrap_auth(host, port, identity_key_path)
         run_id = args.run_id
         if run_id is None and args.transport == "network":
             run_id = str(int(time.time()))
@@ -960,6 +1028,8 @@ def main() -> None:
                             ]
                             if args.server_bin:
                                 child_args += ["--server-bin", args.server_bin]
+                            if identity_key_path:
+                                child_args += ["--identity-key", identity_key_path]
                             if args.mask_reuse:
                                 child_args.append("--mask-reuse")
                             if not args.cleanup:
@@ -994,6 +1064,8 @@ def main() -> None:
                         ]
                         if args.server_bin:
                             child_args += ["--server-bin", args.server_bin]
+                        if identity_key_path:
+                            child_args += ["--identity-key", identity_key_path]
                         if args.mask_reuse:
                             child_args.append("--mask-reuse")
                         if not args.cleanup:
@@ -1026,6 +1098,7 @@ def main() -> None:
                     host,
                     port,
                     f"{dataset_db}{sweep_suffix}",
+                    identity_key_path,
                     args.mask_reuse,
                     args.append_sleep_ms,
                 )
@@ -1041,6 +1114,7 @@ def main() -> None:
                     host,
                     port,
                     f"{api_db}{sweep_suffix}",
+                    identity_key_path,
                     args.mask_reuse,
                     args.append_sleep_ms,
                     args.cleanup,

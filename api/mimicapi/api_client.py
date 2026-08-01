@@ -53,12 +53,18 @@ class ApiClient:
         host: str | None = None,
         port: int | None = None,
         default_db: str = "default",
+        identity_key_path: str | None = None,
     ) -> None:
         local = host is None and port is None
         self.add_server(name, host=host, port=port, local=local)
         self.register_transport(
             name,
-            MimicDBAdapter(host=host, port=port, default_db=default_db),
+            MimicDBAdapter(
+                host=host,
+                port=port,
+                default_db=default_db,
+                identity_key_path=identity_key_path,
+            ),
         )
 
     def register_transport(self, name: str, transport: BackendAdapter) -> None:
@@ -173,10 +179,8 @@ class ApiClient:
             return name, result, latency
 
         if consistency == "any":
-            fastest = self.select_fastest()
-            if fastest is None:
-                fastest = servers[0]
-            name, result, latency = query_one(fastest.name)
+            primary = servers[0] if verify else (self.select_fastest() or servers[0])
+            name, result, latency = query_one(primary.name)
             stats = {
                 "server": name,
                 "latency_ms": latency,
@@ -227,10 +231,19 @@ class ApiClient:
                 stats["servers_failed"] += 1
         if len(results) < needed:
             raise RuntimeError("quorum read not reached")
-        first_key = next(iter(results))
-        if "rows_scanned" in results[first_key]:
-            stats["rows_scanned"] = results[first_key]["rows_scanned"]
-        return results[first_key], stats
+        merged = {
+            "count": sum(res.get("count", 0) for res in results.values()),
+            "sum": sum(res.get("sum", 0.0) for res in results.values()),
+        }
+        mins = [res.get("min") for res in results.values() if res.get("min") is not None]
+        maxs = [res.get("max") for res in results.values() if res.get("max") is not None]
+        merged["min"] = min(mins) if mins else None
+        merged["max"] = max(maxs) if maxs else None
+        rows = [res.get("rows_scanned") for res in results.values()
+                if res.get("rows_scanned") is not None]
+        if rows:
+            stats["rows_scanned"] = sum(rows)
+        return merged, stats
 
     def next_batch_id(self) -> int:
         self._batch_counter += 1
@@ -464,23 +477,19 @@ class ApiClient:
             raise RuntimeError(f"missing transport for '{name}'")
         if name not in self._servers:
             raise RuntimeError(f"unknown server '{name}'")
-
-        def replay():
-            for entry in list(self._replay_log):
-                try:
-                    transport.append_batch(
-                        entry["db"],
-                        entry["dataset"],
-                        entry["fields"],
-                        entry["columns"],
-                        entry["batch_id"],
-                    )
-                    self.mark_success(name)
-                except Exception:
-                    self.mark_failure(name)
-                    break
-
-        self._executor.submit(replay)
+        for entry in list(self._replay_log):
+            try:
+                transport.append_batch(
+                    entry["db"],
+                    entry["dataset"],
+                    entry["fields"],
+                    entry["columns"],
+                    entry["batch_id"],
+                )
+                self.mark_success(name)
+            except Exception:
+                self.mark_failure(name)
+                break
 
     def enable_disk_replay_log(self, path: str, max_entries: int = 1024) -> None:
         log_path = Path(path)

@@ -34,6 +34,27 @@ struct AggregateResult {
     uint64_t count = 0;
     bool has_value = false;
     size_t rows_scanned = 0;
+    size_t rows_pruned = 0;
+};
+
+enum class AggregateKind {
+    kCount,
+    kSum,
+    kMin,
+    kMax,
+};
+
+struct AggregateRequest {
+    AggregateKind kind = AggregateKind::kCount;
+    size_t field_index = 0;
+    std::string alias;
+};
+
+struct AggregateMultiResult {
+    std::vector<AggregateRequest> requests;
+    std::vector<AggregateResult> results;
+    uint64_t rows_scanned = 0;
+    uint64_t rows_pruned = 0;
 };
 
 struct CompressionStats {
@@ -48,6 +69,8 @@ struct CompressionStats {
 struct ScanResult {
     std::vector<std::string> columns;
     std::vector<std::vector<mimicdb::FieldValue>> rows;
+    uint64_t rows_scanned = 0;
+    uint64_t rows_pruned = 0;
 };
 
 class ApiClientCore {
@@ -55,6 +78,8 @@ public:
     bool CreateDatabase(const std::string& name);
     bool CreateDataset(const std::string& db, const std::string& name,
                        const std::vector<FieldDef>& fields);
+    bool AddFields(const std::string& db, const std::string& name,
+                   const std::vector<FieldDef>& fields, std::string* error);
     bool DropDatabase(const std::string& name);
     bool DropDataset(const std::string& db, const std::string& name);
     const std::vector<FieldDef>* FieldsFor(const std::string& db, const std::string& name) const;
@@ -69,6 +94,10 @@ public:
                               size_t field_index,
                               const std::vector<Predicate>& predicates,
                               std::string* error) const;
+    AggregateMultiResult AggregateMulti(const std::string& db, const std::string& name,
+                                        const std::vector<AggregateRequest>& requests,
+                                        const std::vector<Predicate>& predicates,
+                                        std::string* error) const;
     CompressionStats CompressionStatsFor(const std::string& db, const std::string& name,
                                          std::string* error) const;
 

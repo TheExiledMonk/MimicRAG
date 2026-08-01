@@ -198,16 +198,71 @@ bool ParseFilters(PyObject* filter_obj, std::vector<mimicapi::Filter>* out) {
                         PyErr_SetString(PyExc_TypeError, "$not must be dict");
                         return false;
                     }
-                    std::vector<mimicapi::Filter> nested;
-                    if (!ParseFilters(op_val, &nested)) {
-                        return false;
-                    }
-                    for (auto& child : nested) {
-                        if (child.field.empty()) {
-                            continue;
+                    PyObject* inner_key = nullptr;
+                    PyObject* inner_val = nullptr;
+                    Py_ssize_t inner_pos = 0;
+                    while (PyDict_Next(op_val, &inner_pos, &inner_key, &inner_val)) {
+                        if (!PyUnicode_Check(inner_key)) {
+                            PyErr_SetString(PyExc_TypeError, "operator must be string");
+                            return false;
                         }
-                        child.negated = true;
-                        out->push_back(std::move(child));
+                        PyObject* inner_bytes = PyUnicode_AsUTF8String(inner_key);
+                        if (!inner_bytes) {
+                            return false;
+                        }
+                        std::string inner_op = PyBytes_AsString(inner_bytes);
+                        Py_DECREF(inner_bytes);
+                        bool inner_ok = false;
+                        const auto inner_enum = ParseFilterOp(inner_op, &inner_ok);
+                        if (!inner_ok) {
+                            PyErr_SetString(PyExc_ValueError, "unsupported operator");
+                            return false;
+                        }
+                        mimicapi::Filter filter;
+                        filter.field = field;
+                        filter.op = inner_enum;
+                        filter.negated = true;
+                        if (inner_enum == mimicapi::FilterOp::kExists) {
+                            filter.exists = PyObject_IsTrue(inner_val) != 0;
+                        } else if (inner_enum == mimicapi::FilterOp::kRegex) {
+                            if (!PyUnicode_Check(inner_val)) {
+                                PyErr_SetString(PyExc_TypeError, "$regex must be string");
+                                return false;
+                            }
+                            PyObject* regex_bytes = PyUnicode_AsUTF8String(inner_val);
+                            if (!regex_bytes) {
+                                return false;
+                            }
+                            filter.regex = PyBytes_AsString(regex_bytes);
+                            Py_DECREF(regex_bytes);
+                            PyObject* options_obj = PyDict_GetItemString(op_val, "$options");
+                            if (options_obj && PyUnicode_Check(options_obj)) {
+                                PyObject* opt_bytes = PyUnicode_AsUTF8String(options_obj);
+                                if (!opt_bytes) {
+                                    return false;
+                                }
+                                filter.regex_options = PyBytes_AsString(opt_bytes);
+                                Py_DECREF(opt_bytes);
+                            }
+                        } else if (inner_enum == mimicapi::FilterOp::kIn ||
+                                   inner_enum == mimicapi::FilterOp::kNin ||
+                                   inner_enum == mimicapi::FilterOp::kAll) {
+                            PyObject* seq = PySequence_Fast(inner_val, "operator requires sequence");
+                            if (!seq) {
+                                return false;
+                            }
+                            const Py_ssize_t len = PySequence_Fast_GET_SIZE(seq);
+                            for (Py_ssize_t i = 0; i < len; ++i) {
+                                PyObject* item = PySequence_Fast_GET_ITEM(seq, i);
+                                filter.values.push_back(ParseValue(item));
+                            }
+                            Py_DECREF(seq);
+                        } else if (inner_enum == mimicapi::FilterOp::kSize) {
+                            filter.values.push_back(ParseValue(inner_val));
+                        } else {
+                            filter.values.push_back(ParseValue(inner_val));
+                        }
+                        out->push_back(std::move(filter));
                     }
                     continue;
                 }

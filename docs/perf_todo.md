@@ -14,20 +14,20 @@ Goal: incremental, measurable speed improvements without violating the hot-loop 
 - [x] Mask reuse in aggregates (targets: `engine/src/aggregate.cpp`)
 
 ## Multi-threading
-- [ ] Segment-level parallel scans (targets: `engine/src/scan.cpp`)
-- [ ] Thread-local aggregates + reduction (targets: `engine/src/aggregate.cpp`)
-- [ ] Deterministic reduction ordering (targets: `engine/src/aggregate.cpp`)
+- [x] Segment-level parallel scans (targets: `engine/src/scan.cpp`)
+- [x] Thread-local aggregates + reduction (targets: `engine/src/aggregate.cpp`)
+- [x] Deterministic reduction ordering (targets: `engine/src/aggregate.cpp`)
 
 ## Reduction + output strategies
-- [ ] Row-id first, projection later (targets: `engine/src/scan.cpp`, `engine/src/projection.cpp`)
-- [ ] Prefix-sum output compaction (targets: `engine/src/output_compaction.cpp`)
-- [ ] Sparse mask bit-packing (targets: `engine/src/mask.cpp`)
+- [x] Row-id first, projection later (targets: `engine/src/scan.cpp`, `engine/src/projection.cpp`)
+- [x] Prefix-sum output compaction (targets: `engine/src/output_compaction.cpp`)
+- [x] Sparse mask bit-packing (targets: `engine/src/mask.cpp`)
 
 ## Build + compiler tuning
-- [ ] Enable LTO (targets: `CMakeLists.txt`)
-- [ ] Tune `-march`/`-mtune` flags for host builds (targets: `CMakeLists.txt`)
-- [ ] PGO harness + profile usage (targets: `benchmarks/bench_scan.cpp`, `CMakeLists.txt`)
+- [x] Enable LTO (targets: `CMakeLists.txt`)
+- [x] Tune `-march`/`-mtune` flags for host builds (targets: `CMakeLists.txt`)
+- [x] PGO harness + profile usage (targets: `benchmarks/bench_scan.cpp`, `CMakeLists.txt`)
 
 ## Measurement
-- [ ] Standardize perf metrics output (rows/sec, bytes/sec, cache/branch misses) (targets: `engine/src/metrics.cpp`, `benchmarks/bench_scan.cpp`)
-- [ ] Add perf regression thresholds (targets: `benchmarks/`)
+- [x] Standardize perf metrics output (rows/sec, bytes/sec, cache/branch misses) (targets: `engine/src/metrics.cpp`, `benchmarks/bench_scan.cpp`)
+- [x] Add perf regression thresholds (targets: `benchmarks/`)

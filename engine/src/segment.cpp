@@ -264,13 +264,13 @@ bool EncodeForDelta(const FieldVector& field, std::vector<uint8_t>* data,
 
 Segment::Segment(size_t row_capacity, std::vector<FieldVector> fields)
     : row_capacity_(row_capacity),
-      fields_(std::move(fields)),
       format_{row_capacity} {
-    row_count_ = ResolveRowCount(fields_, row_count_);
-    if (row_count_ > row_capacity_) {
-        row_count_ = row_capacity_;
+    fields_.reserve(fields.size());
+    for (const auto& field : fields) {
+        fields_.emplace_back(field.Name(), field.Type());
     }
-    sealed_ = row_count_ >= row_capacity_;
+    row_count_ = 0;
+    sealed_ = false;
     ComputeStats();
 }
 
@@ -287,6 +287,20 @@ Segment::Segment(size_t row_capacity, size_t row_count, std::vector<FieldVector>
     ComputeStats();
 }
 
+Segment::Segment(size_t row_capacity, size_t row_count, std::vector<FieldVector> fields,
+                 bool build_compression)
+    : row_capacity_(row_capacity),
+      row_count_(row_count),
+      fields_(std::move(fields)),
+      format_{row_capacity} {
+    row_count_ = ResolveRowCount(fields_, row_count_);
+    if (row_count_ > row_capacity_) {
+        row_count_ = row_capacity_;
+    }
+    sealed_ = row_count_ >= row_capacity_;
+    ComputeStats(build_compression);
+}
+
 size_t Segment::RowCapacity() const {
     return row_capacity_;
 }
@@ -300,9 +314,13 @@ bool Segment::Append(size_t rows) {
         return false;
     }
     row_count_ += rows;
+    for (auto& field : fields_) {
+        field.Resize(row_count_);
+    }
     if (row_count_ == row_capacity_) {
         sealed_ = true;
     }
+    ComputeStats();
     return true;
 }
 
@@ -352,7 +370,7 @@ const std::vector<CompressedColumnView>& Segment::CompressedColumns() const {
     return compressed_columns_;
 }
 
-void Segment::ComputeStats() {
+void Segment::ComputeStats(bool build_compression) {
     stats_.clear();
     stats_.reserve(fields_.size());
     compression_kinds_.assign(fields_.size(), ColumnCompressionKind::kNone);
@@ -582,9 +600,13 @@ void Segment::ComputeStats() {
                 static_cast<uint32_t>(estimate > 0xFFFFFFFFu ? 0xFFFFFFFFu : estimate);
         }
         stats_.push_back(stats);
-        compression_kinds_[idx] = ChooseCompression(stats, field.Type());
+        if (build_compression) {
+            compression_kinds_[idx] = ChooseCompression(stats, field.Type());
+        }
     }
-    BuildCompressionViews();
+    if (build_compression) {
+        BuildCompressionViews();
+    }
 }
 
 void Segment::ResetCompression() {

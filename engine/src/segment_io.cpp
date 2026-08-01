@@ -182,14 +182,6 @@ bool SegmentWriter::Write(const Segment& segment) {
         if (!out.good()) {
             return false;
         }
-    }
-
-    for (size_t i = 0; i < columns.size(); ++i) {
-        const auto& field = segment.Fields()[i];
-        const CompressedColumnView* view = nullptr;
-        if (use_compressed && i < compressed.size()) {
-            view = &compressed[i];
-        }
         if (columns[i].validity_words == 0) {
             continue;
         }
@@ -322,50 +314,220 @@ bool SegmentReader::Read(Segment* out_segment) {
         }
         FieldVector field("col" + std::to_string(i), static_cast<FieldType>(col.type));
         const auto field_type = static_cast<FieldType>(col.type);
-        if (field_type != FieldType::kString && field_type != FieldType::kBytes &&
-            field_type != FieldType::kArray) {
+        const bool is_varlen = field_type == FieldType::kString ||
+            field_type == FieldType::kBytes || field_type == FieldType::kArray;
+        if (!is_varlen) {
             field.Resize(static_cast<size_t>(col.value_count));
         }
-        switch (static_cast<FieldType>(col.type)) {
-            case FieldType::kInt32:
-                std::memcpy(field.MutableInt32(), base + offset, col.data_bytes);
-                break;
-            case FieldType::kInt64:
-                std::memcpy(field.MutableInt64(), base + offset, col.data_bytes);
-                break;
-            case FieldType::kFloat64:
-                std::memcpy(field.MutableFloat64(), base + offset, col.data_bytes);
-                break;
-            case FieldType::kBool:
-                std::memcpy(field.MutableBool(), base + offset, col.data_bytes);
-                break;
-            case FieldType::kDictInt32:
-                std::memcpy(field.MutableDictIds(), base + offset, col.data_bytes);
-                break;
-            case FieldType::kString:
-            case FieldType::kBytes:
-            case FieldType::kArray: {
-                const size_t length_bytes = static_cast<size_t>(col.aux_bytes);
-                if (offset + length_bytes + col.data_bytes > mapped_size) {
+        ColumnCompressionKind kind =
+            static_cast<ColumnCompressionKind>(col.compression_kind);
+        if (field_type == FieldType::kFloat64 && kind != ColumnCompressionKind::kLz4) {
+            kind = ColumnCompressionKind::kNone;
+        }
+        const size_t aux_bytes = static_cast<size_t>(col.aux_bytes);
+        const uint8_t* aux_ptr = aux_bytes > 0 ? base + offset : nullptr;
+        const uint8_t* data_ptr = base + offset + aux_bytes;
+        if (kind == ColumnCompressionKind::kNone) {
+            switch (field_type) {
+                case FieldType::kInt32:
+                    std::memcpy(field.MutableInt32(), data_ptr, col.data_bytes);
+                    break;
+                case FieldType::kInt64:
+                    std::memcpy(field.MutableInt64(), data_ptr, col.data_bytes);
+                    break;
+                case FieldType::kFloat64:
+                    std::memcpy(field.MutableFloat64(), data_ptr, col.data_bytes);
+                    break;
+                case FieldType::kBool:
+                    std::memcpy(field.MutableBool(), data_ptr, col.data_bytes);
+                    break;
+                case FieldType::kDictInt32:
+                    std::memcpy(field.MutableDictIds(), data_ptr, col.data_bytes);
+                    break;
+                case FieldType::kString:
+                case FieldType::kBytes:
+                case FieldType::kArray: {
+                    const size_t length_bytes = static_cast<size_t>(col.aux_bytes);
+                    if (offset + length_bytes + col.data_bytes > mapped_size) {
 #if defined(__unix__) || defined(__APPLE__)
-                    munmap(const_cast<uint8_t*>(base), mapped_size);
+                        munmap(const_cast<uint8_t*>(base), mapped_size);
 #endif
-                    return false;
-                }
-                const auto* lengths = reinterpret_cast<const uint32_t*>(base + offset);
-                const auto* bytes = reinterpret_cast<const uint8_t*>(base + offset + length_bytes);
-                if (!field.LoadVarlen(lengths, static_cast<size_t>(col.value_count),
-                                      bytes, static_cast<size_t>(col.data_bytes))) {
+                        return false;
+                    }
+                    const auto* lengths = reinterpret_cast<const uint32_t*>(aux_ptr);
+                    const auto* bytes = reinterpret_cast<const uint8_t*>(data_ptr);
+                    if (!field.LoadVarlen(lengths, static_cast<size_t>(col.value_count),
+                                          bytes, static_cast<size_t>(col.data_bytes))) {
 #if defined(__unix__) || defined(__APPLE__)
-                    munmap(const_cast<uint8_t*>(base), mapped_size);
+                        munmap(const_cast<uint8_t*>(base), mapped_size);
 #endif
-                    return false;
+                        return false;
+                    }
+                    offset += length_bytes;
+                    break;
                 }
-                offset += length_bytes;
-                break;
+                case FieldType::kObject:
+                    return false;
             }
-            case FieldType::kObject:
-                return false;
+        } else if (kind == ColumnCompressionKind::kLz4) {
+                if (is_varlen) {
+                    const size_t length_bytes = static_cast<size_t>(col.value_count) *
+                        sizeof(uint32_t);
+                    std::vector<uint8_t> decoded_lengths(length_bytes);
+                if (!DecodeLz4Literal(aux_ptr, static_cast<size_t>(col.aux_bytes),
+                                      decoded_lengths.data(), decoded_lengths.size())) {
+#if defined(__unix__) || defined(__APPLE__)
+                    munmap(const_cast<uint8_t*>(base), mapped_size);
+#endif
+                    return false;
+                }
+                const auto* lengths =
+                    reinterpret_cast<const uint32_t*>(decoded_lengths.data());
+                size_t total_bytes = 0;
+                for (size_t j = 0; j < static_cast<size_t>(col.value_count); ++j) {
+                    total_bytes += lengths[j];
+                }
+                std::vector<uint8_t> decoded_bytes(total_bytes);
+                if (!DecodeLz4Literal(data_ptr, static_cast<size_t>(col.data_bytes),
+                                      decoded_bytes.data(), decoded_bytes.size())) {
+#if defined(__unix__) || defined(__APPLE__)
+                    munmap(const_cast<uint8_t*>(base), mapped_size);
+#endif
+                    return false;
+                }
+                    if (!field.LoadVarlen(lengths, static_cast<size_t>(col.value_count),
+                                          decoded_bytes.data(),
+                                          static_cast<size_t>(decoded_bytes.size()))) {
+#if defined(__unix__) || defined(__APPLE__)
+                    munmap(const_cast<uint8_t*>(base), mapped_size);
+#endif
+                    return false;
+                }
+                    offset += static_cast<size_t>(col.aux_bytes);
+                } else {
+                    const size_t raw_bytes = [&]() {
+                    switch (field_type) {
+                        case FieldType::kInt32:
+                            return static_cast<size_t>(col.value_count) * sizeof(int32_t);
+                        case FieldType::kInt64:
+                            return static_cast<size_t>(col.value_count) * sizeof(int64_t);
+                        case FieldType::kFloat64:
+                            return static_cast<size_t>(col.value_count) * sizeof(double);
+                        case FieldType::kBool:
+                            return static_cast<size_t>(col.value_count) * sizeof(uint8_t);
+                        case FieldType::kDictInt32:
+                            return static_cast<size_t>(col.value_count) * sizeof(uint32_t);
+                        default:
+                            return static_cast<size_t>(0);
+                    }
+                }();
+                std::vector<uint8_t> decoded(raw_bytes);
+                if (!DecodeLz4Literal(data_ptr, static_cast<size_t>(col.data_bytes),
+                                      decoded.data(), decoded.size())) {
+#if defined(__unix__) || defined(__APPLE__)
+                    munmap(const_cast<uint8_t*>(base), mapped_size);
+#endif
+                    return false;
+                }
+                switch (field_type) {
+                    case FieldType::kInt32:
+                        std::memcpy(field.MutableInt32(), decoded.data(), decoded.size());
+                        break;
+                    case FieldType::kInt64:
+                        std::memcpy(field.MutableInt64(), decoded.data(), decoded.size());
+                        break;
+                    case FieldType::kFloat64:
+                        std::memcpy(field.MutableFloat64(), decoded.data(), decoded.size());
+                        break;
+                    case FieldType::kBool:
+                        std::memcpy(field.MutableBool(), decoded.data(), decoded.size());
+                        break;
+                    case FieldType::kDictInt32:
+                        std::memcpy(field.MutableDictIds(), decoded.data(), decoded.size());
+                        break;
+                    default:
+                        return false;
+                }
+            }
+        } else {
+            CompressedColumnView view;
+            view.kind = kind;
+            view.type = field_type;
+            view.row_count = static_cast<size_t>(col.value_count);
+            view.ops = CompressionOpsFor(kind);
+            view.data = data_ptr;
+            view.data_size = static_cast<size_t>(col.data_bytes);
+            view.aux = aux_ptr;
+            view.aux_size = static_cast<size_t>(col.aux_bytes);
+            if (col.validity_words > 0) {
+                const size_t validity_bytes =
+                    static_cast<size_t>(col.validity_words) * sizeof(uint64_t);
+                view.validity_words =
+                    reinterpret_cast<const uint64_t*>(data_ptr + col.data_bytes);
+                view.validity_word_count = static_cast<size_t>(col.validity_words);
+                view.validity_bit_count = static_cast<size_t>(col.value_count);
+                if (offset + col.aux_bytes + col.data_bytes + validity_bytes > mapped_size) {
+#if defined(__unix__) || defined(__APPLE__)
+                    munmap(const_cast<uint8_t*>(base), mapped_size);
+#endif
+                    return false;
+                }
+            }
+            switch (field_type) {
+                case FieldType::kInt32: {
+                    auto* out = field.MutableInt32();
+                    for (size_t j = 0; j < view.row_count; ++j) {
+                        int64_t value = 0;
+                        if (ReadInt64Value(view, j, &value)) {
+                            out[j] = static_cast<int32_t>(value);
+                        } else {
+                            out[j] = 0;
+                        }
+                    }
+                    break;
+                }
+                case FieldType::kInt64: {
+                    auto* out = field.MutableInt64();
+                    for (size_t j = 0; j < view.row_count; ++j) {
+                        int64_t value = 0;
+                        if (ReadInt64Value(view, j, &value)) {
+                            out[j] = value;
+                        } else {
+                            out[j] = 0;
+                        }
+                    }
+                    break;
+                }
+                case FieldType::kBool: {
+                    auto* out = field.MutableBool();
+                    for (size_t j = 0; j < view.row_count; ++j) {
+                        int64_t value = 0;
+                        if (ReadInt64Value(view, j, &value)) {
+                            out[j] = value != 0 ? 1 : 0;
+                        } else {
+                            out[j] = 0;
+                        }
+                    }
+                    break;
+                }
+                case FieldType::kDictInt32: {
+                    auto* out = field.MutableDictIds();
+                    for (size_t j = 0; j < view.row_count; ++j) {
+                        int64_t value = 0;
+                        if (ReadInt64Value(view, j, &value)) {
+                            out[j] = static_cast<uint32_t>(value);
+                        } else {
+                            out[j] = 0;
+                        }
+                    }
+                    break;
+                }
+                default:
+                    return false;
+            }
+            if (aux_bytes > 0) {
+                offset += aux_bytes;
+            }
         }
         offset += static_cast<size_t>(col.data_bytes);
         if (col.validity_words > 0) {
@@ -387,13 +549,8 @@ bool SegmentReader::Read(Segment* out_segment) {
     if (out_segment != nullptr) {
         Segment segment(static_cast<size_t>(header_.row_capacity),
                         static_cast<size_t>(header_.row_count),
-                        std::move(fields));
-        std::vector<ColumnCompressionKind> kinds;
-        kinds.reserve(column_headers_.size());
-        for (const auto& col : column_headers_) {
-            kinds.push_back(static_cast<ColumnCompressionKind>(col.compression_kind));
-        }
-        segment.SetCompressionKinds(std::move(kinds));
+                        std::move(fields),
+                        false);
         *out_segment = std::move(segment);
     }
 #if defined(__unix__) || defined(__APPLE__)

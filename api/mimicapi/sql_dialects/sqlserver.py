@@ -11,11 +11,11 @@ def normalize(sql: str) -> str:
 
 
 def _normalize_top(sql: str) -> str:
-    match = re.search(r"SELECT\\s+TOP\\s+(\\d+)", sql, re.IGNORECASE)
+    match = re.search(r"SELECT\s+TOP\s+(\d+)", sql, re.IGNORECASE)
     if not match:
         return sql
     limit = match.group(1)
-    sql = re.sub(r"SELECT\\s+TOP\\s+\\d+", "SELECT", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"SELECT\s+TOP\s+\d+", "SELECT", sql, flags=re.IGNORECASE)
     if " LIMIT " not in sql.upper():
         sql = f"{sql} LIMIT {limit}"
     return sql

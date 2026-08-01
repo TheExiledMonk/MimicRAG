@@ -1,0 +1,31 @@
+{
+  "name": "mimicdb-ui-electron",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.mimicdb.management-ui",
+    "productName": "MimicDB Management UI",
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../desktop/dist",
+        "to": "service"
+      }
+    ]
+  }
+}

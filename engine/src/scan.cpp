@@ -166,6 +166,33 @@ void ScanSegmentsParallel(const std::vector<Segment>& segments, size_t thread_co
     }
 }
 
+void ScanSegmentsParallelMaskFirst(const std::vector<Segment>& segments, size_t thread_count,
+                                   PredicateFn predicate, void* predicate_ctx, ConsumeFn consume,
+                                   const std::vector<void*>& consume_ctxs) {
+    if (thread_count == 0 || segments.empty() || !consume || !predicate) {
+        return;
+    }
+    if (consume_ctxs.size() < thread_count) {
+        return;
+    }
+    const auto schedule = ScheduleSegments(segments.size(), thread_count);
+    std::vector<std::thread> threads;
+    threads.reserve(thread_count);
+    for (size_t t = 0; t < thread_count; ++t) {
+        threads.emplace_back([&, t]() {
+            for (size_t idx : schedule[t]) {
+                const size_t count = segments[idx].RowCount();
+                Mask mask(count);
+                BuildMaskLoop(count, predicate, predicate_ctx, &mask);
+                ScanLoopMasked(count, mask, consume, consume_ctxs[t]);
+            }
+        });
+    }
+    for (auto& thread : threads) {
+        thread.join();
+    }
+}
+
 std::vector<size_t> PruneSegmentsByPredicate(const std::vector<Segment>& segments,
                                              size_t field_index, CompareOp op, double value) {
     std::vector<size_t> indices;

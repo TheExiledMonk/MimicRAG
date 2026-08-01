@@ -17,7 +17,10 @@ def normalize_in(sql: str) -> str:
     pattern = re.compile(r"(\w+)\s+IN\s*\(([^)]+)\)", re.IGNORECASE)
     def repl(match: re.Match) -> str:
         col = match.group(1)
-        values = [v.strip() for v in match.group(2).split(",") if v.strip()]
+        raw_values = match.group(2)
+        if "SELECT" in raw_values.upper():
+            return match.group(0)
+        values = [v.strip() for v in raw_values.split(",") if v.strip()]
         if not values:
             return "FALSE"
         parts = [f"{col} = {val}" for val in values]

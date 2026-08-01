@@ -63,8 +63,6 @@ int main() {
     assert(reader.Read(&read_back));
     assert(read_back.RowCapacity() == 8);
     assert(read_back.RowCount() == 8);
-    std::remove(path.c_str());
-
     mimicdb::SegmentReader fingerprint_ok(path);
     fingerprint_ok.SetExpectedSchemaFingerprint(segment.SchemaFingerprint());
     assert(fingerprint_ok.Read(nullptr));
@@ -80,6 +78,8 @@ int main() {
     other.AddField(mimicdb::FieldVector("age", mimicdb::FieldType::kInt32));
     mimicdb::SegmentReader fingerprint_schema_bad(path);
     assert(!fingerprint_schema_bad.ReadWithSchema(nullptr, other.SchemaView()));
+
+    std::remove(path.c_str());
 
     const std::string bad_path = "tests/segment_bad_header.bin";
     {

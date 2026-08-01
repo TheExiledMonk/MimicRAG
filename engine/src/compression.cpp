@@ -83,6 +83,39 @@ uint64_t ReadBits(const uint8_t* data, size_t bit_offset, uint8_t bits) {
     return value;
 }
 
+bool ReadBitpackValueFast(const uint8_t* data, size_t index, const BitpackHeader& header,
+                          uint64_t* out) {
+    if (!data || !out) {
+        return false;
+    }
+    switch (header.bits) {
+        case 4: {
+            const uint8_t byte = data[index >> 1];
+            const uint8_t nibble = (index & 1u) ? (byte >> 4) : (byte & 0x0F);
+            *out = nibble;
+            return true;
+        }
+        case 8:
+            *out = data[index];
+            return true;
+        case 16: {
+            uint16_t value = 0;
+            std::memcpy(&value, data + index * sizeof(uint16_t), sizeof(uint16_t));
+            *out = value;
+            return true;
+        }
+        case 32: {
+            uint32_t value = 0;
+            std::memcpy(&value, data + index * sizeof(uint32_t), sizeof(uint32_t));
+            *out = value;
+            return true;
+        }
+        default:
+            break;
+    }
+    return false;
+}
+
 bool EncodeLz4LiteralBlock(const uint8_t* src, size_t src_size,
                            std::vector<uint8_t>* out) {
     if (!out) {
@@ -238,11 +271,12 @@ void DecodeDictionary(const CompressedColumnView& column, const Mask& mask, void
         return;
     }
     const auto* ids = reinterpret_cast<const uint32_t*>(column.data);
+    const bool dense_ids = header.count <= 256;
     for (size_t i = 0; i < column.row_count; ++i) {
         if (mask.Size() > 0 && !mask.Get(i)) {
             continue;
         }
-        if (!IsValid(column, i) || !ids || ids[i] >= header.count) {
+        if (!IsValid(column, i) || !ids || (!dense_ids && ids[i] >= header.count)) {
             out[i] = 0;
             continue;
         }
@@ -259,11 +293,26 @@ void DecodeBitpack(const CompressedColumnView& column, const Mask& mask, void* o
         return;
     }
     auto* out = reinterpret_cast<int64_t*>(out_buffer);
+    const bool has_mask = mask.Size() > 0;
+    if (!has_mask && (header.bits == 4 || header.bits == 8 || header.bits == 16 ||
+                      header.bits == 32)) {
+        for (size_t i = 0; i < column.row_count; ++i) {
+            uint64_t delta = 0;
+            if (!ReadBitpackValueFast(column.data, i, header, &delta)) {
+                delta = ReadBits(column.data, i * header.bits, header.bits);
+            }
+            out[i] = header.base + static_cast<int64_t>(delta);
+        }
+        return;
+    }
     for (size_t i = 0; i < column.row_count; ++i) {
-        if (mask.Size() > 0 && !mask.Get(i)) {
+        if (has_mask && !mask.Get(i)) {
             continue;
         }
-        const uint64_t delta = ReadBits(column.data, i * header.bits, header.bits);
+        uint64_t delta = 0;
+        if (!ReadBitpackValueFast(column.data, i, header, &delta)) {
+            delta = ReadBits(column.data, i * header.bits, header.bits);
+        }
         out[i] = header.base + static_cast<int64_t>(delta);
     }
 }
@@ -278,8 +327,22 @@ void DecodeForDelta(const CompressedColumnView& column, const Mask& mask, void* 
     }
     const auto* deltas = reinterpret_cast<const uint32_t*>(column.data);
     auto* out = reinterpret_cast<int64_t*>(out_buffer);
+    const bool has_mask = mask.Size() > 0;
+    if (!has_mask) {
+        size_t i = 0;
+        for (; i + 3 < column.row_count; i += 4) {
+            out[i] = header.base + static_cast<int64_t>(deltas[i]);
+            out[i + 1] = header.base + static_cast<int64_t>(deltas[i + 1]);
+            out[i + 2] = header.base + static_cast<int64_t>(deltas[i + 2]);
+            out[i + 3] = header.base + static_cast<int64_t>(deltas[i + 3]);
+        }
+        for (; i < column.row_count; ++i) {
+            out[i] = header.base + static_cast<int64_t>(deltas[i]);
+        }
+        return;
+    }
     for (size_t i = 0; i < column.row_count; ++i) {
-        if (mask.Size() > 0 && !mask.Get(i)) {
+        if (!mask.Get(i)) {
             continue;
         }
         out[i] = header.base + static_cast<int64_t>(deltas[i]);
@@ -427,6 +490,7 @@ void ScanPredicateDictionary(const CompressedColumnView& column,
         return;
     }
     const auto* ids = reinterpret_cast<const uint32_t*>(column.data);
+    const bool dense_ids = header.count <= 256;
     uint32_t match_id = 0;
     bool has_id = false;
     if (predicate.op == CompareOp::kEq || predicate.op == CompareOp::kNe) {
@@ -455,7 +519,7 @@ void ScanPredicateDictionary(const CompressedColumnView& column,
             out_mask->Set(i, keep);
             continue;
         }
-        if (!ids || ids[i] >= header.count) {
+        if (!ids || (!dense_ids && ids[i] >= header.count)) {
             out_mask->Set(i, false);
             continue;
         }
@@ -490,12 +554,21 @@ void ScanPredicateBitpack(const CompressedColumnView& column,
     if (!ReadBitpackHeader(column, &header)) {
         return;
     }
+    const bool fast_bits = header.bits == 4 || header.bits == 8 ||
+                           header.bits == 16 || header.bits == 32;
     for (size_t i = 0; i < column.row_count; ++i) {
         if (!IsValid(column, i)) {
             out_mask->Set(i, false);
             continue;
         }
-        const uint64_t delta = ReadBits(column.data, i * header.bits, header.bits);
+        uint64_t delta = 0;
+        if (fast_bits) {
+            if (!ReadBitpackValueFast(column.data, i, header, &delta)) {
+                delta = ReadBits(column.data, i * header.bits, header.bits);
+            }
+        } else {
+            delta = ReadBits(column.data, i * header.bits, header.bits);
+        }
         const int64_t value = header.base + static_cast<int64_t>(delta);
         const uint8_t keep =
             CompareInt64Branchless(value, predicate.i64, predicate.op);
@@ -528,7 +601,21 @@ void ScanPredicateForDelta(const CompressedColumnView& column,
         return;
     }
     const auto* deltas = reinterpret_cast<const uint32_t*>(column.data);
-    for (size_t i = 0; i < column.row_count; ++i) {
+    size_t i = 0;
+    for (; i + 3 < column.row_count; i += 4) {
+        for (size_t j = 0; j < 4; ++j) {
+            const size_t idx = i + j;
+            if (!IsValid(column, idx)) {
+                out_mask->Set(idx, false);
+                continue;
+            }
+            const int64_t value = header.base + static_cast<int64_t>(deltas[idx]);
+            const uint8_t keep =
+                CompareInt64Branchless(value, predicate.i64, predicate.op);
+            out_mask->Set(idx, keep != 0);
+        }
+    }
+    for (; i < column.row_count; ++i) {
         if (!IsValid(column, i)) {
             out_mask->Set(i, false);
             continue;

@@ -105,3 +105,21 @@ target_compile_features(mimicdb_test_compression PRIVATE cxx_std_20)
 target_compile_options(mimicdb_test_compression PRIVATE -Wall -Wextra -Wpedantic)
 
 add_test(NAME mimicdb_test_compression COMMAND mimicdb_test_compression)
+
+add_test(NAME mimiccli_smoke_test COMMAND bash scripts/mimiccli_smoke_test.sh)
+
+set(TEST_WORKDIR ${CMAKE_SOURCE_DIR})
+set_tests_properties(
+    mimicdb_test_smoke
+    mimicdb_test_hash
+    mimicdb_test_mask
+    mimicdb_test_queries
+    mimicdb_test_field_vector
+    mimicdb_test_segment_io
+    mimicdb_test_scan
+    mimicdb_test_simd
+    mimicdb_test_compression
+    mimiccli_smoke_test
+    PROPERTIES
+    WORKING_DIRECTORY ${TEST_WORKDIR}
+)

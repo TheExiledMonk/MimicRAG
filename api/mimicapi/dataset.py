@@ -45,6 +45,7 @@ class Dataset:
         port: int | None = None,
         database: str = "default",
         create: bool = True,
+        identity_key_path: str | None = None,
     ) -> None:
         if lock_mode not in _LOCK_MODES:
             raise ValueError(
@@ -65,6 +66,7 @@ class Dataset:
                 host=host or "127.0.0.1",
                 port=port or 9000,
                 default_db=database,
+                identity_key_path=identity_key_path,
             )
             if create:
                 self._net.create_database(database)

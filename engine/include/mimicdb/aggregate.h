@@ -37,6 +37,8 @@ void AggregateMixedPredicate(const FieldVector& field, PredicateFn predicate, vo
                              AggregateResult* out);
 void AggregateCompressed(const CompressedColumnView& column, const Mask* mask,
                          AggregateResult* out);
+void AggregateSegmentsParallel(const std::vector<Segment>& segments, size_t field_index,
+                               size_t thread_count, AggregateResult* out);
 
 }  // namespace mimicdb
 

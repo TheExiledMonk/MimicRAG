@@ -31,3 +31,4 @@ target_include_directories(mimicdb_engine PUBLIC
 target_compile_features(mimicdb_engine PUBLIC cxx_std_20)
 
 target_compile_options(mimicdb_engine PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(mimicdb_engine PUBLIC mimicdb_build_flags)

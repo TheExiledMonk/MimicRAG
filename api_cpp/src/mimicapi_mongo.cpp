@@ -626,7 +626,7 @@ bool MatchFilter(const MongoDocument& doc, const Filter& filter) {
     const bool has_value = present && !IsNullValue(it->second);
     bool matched = false;
     if (filter.op == FilterOp::kExists) {
-        matched = (filter.exists ? present : !present);
+        matched = filter.exists ? has_value : !present;
     } else {
         if (!present) {
             matched = false;
@@ -798,7 +798,7 @@ std::vector<mimicdb::FieldValue> CollectFieldValues(const MongoDocument& doc,
 std::vector<MongoDocument> ApplyProjection(const std::vector<MongoDocument>& docs,
                                            const ProjectionSpec& projection) {
     if (projection.include.empty() && projection.exclude.empty() &&
-        projection.computed.empty()) {
+        projection.computed.empty() && projection.slices.empty()) {
         return docs;
     }
     std::vector<MongoDocument> out;
@@ -991,10 +991,7 @@ bool TryBuildPredicate(const Filter& filter,
         return false;
     }
     if (filter.op == FilterOp::kExists) {
-        out->field_index = it->second;
-        out->is_null_check = true;
-        out->null_is = !filter.exists;
-        return true;
+        return false;
     }
     if (filter.op == FilterOp::kIn || filter.op == FilterOp::kNin ||
         filter.op == FilterOp::kAll || filter.op == FilterOp::kSize ||
@@ -1441,6 +1438,37 @@ bool MongoClientCore::EnsureSchema(const std::string& db, const std::string& col
     auto& state = db_state[collection];
     if (state.initialized) {
         if (core_->FieldsFor(db, collection) != nullptr) {
+            std::vector<FieldDef> new_fields;
+            for (const auto& doc : docs) {
+                for (const auto& item : doc.fields) {
+                    const auto& name = item.first;
+                    if (name == "_id" || name == "_deleted" || name == "_version") {
+                        continue;
+                    }
+                    if (state.field_index.find(name) != state.field_index.end()) {
+                        continue;
+                    }
+                    if (!IsScalar(item.second.type)) {
+                        if (error) {
+                            *error = "unsupported field type";
+                        }
+                        return false;
+                    }
+                    FieldDef def = InferField(name, item.second);
+                    state.field_index[name] = state.fields.size();
+                    state.fields.push_back(def);
+                    new_fields.push_back(def);
+                }
+            }
+            if (!new_fields.empty()) {
+                if (!core_->AddFields(db, collection, new_fields, error)) {
+                    return false;
+                }
+                state.latest_cache.clear();
+                state.cached_fields.clear();
+                state.last_seen_version = 0;
+                state.cache_valid = false;
+            }
             return true;
         }
         state = CollectionState();
@@ -1640,6 +1668,9 @@ bool MongoClientCore::InsertMany(const std::string& db, const std::string& colle
                     validity.push_back(1);
                 }
             }
+            if (bytes.empty()) {
+                bytes.push_back(0);
+            }
             state->length_scratch.push_back(std::move(lengths));
             state->bytes_scratch.push_back(std::move(bytes));
             batch.lengths = state->length_scratch.back().data();
@@ -1650,7 +1681,14 @@ bool MongoClientCore::InsertMany(const std::string& db, const std::string& colle
         batch.validity = state->validity_scratch.back().data();
         state->batch_scratch.push_back(batch);
     }
-    return core_->AppendBatch(db, collection, state->batch_scratch, error);
+    const bool ok = core_->AppendBatch(db, collection, state->batch_scratch, error);
+    if (ok) {
+        state->latest_cache.clear();
+        state->cached_fields.clear();
+        state->last_seen_version = 0;
+        state->cache_valid = false;
+    }
+    return ok;
 }
 
 std::vector<MongoDocument> MongoClientCore::Find(const std::string& db,
@@ -1818,6 +1856,7 @@ std::vector<MongoDocument> MongoClientCore::AggregatePipeline(
     }
     std::vector<std::string> required_fields;
     std::unordered_set<std::string> seen_fields;
+    std::unordered_set<std::string> computed_fields;
     bool needs_all = false;
     for (const auto& stage : pipeline) {
         if (stage.type == StageType::kLookup || stage.type == StageType::kFacet) {
@@ -1830,26 +1869,37 @@ std::vector<MongoDocument> MongoClientCore::AggregatePipeline(
             if (stage.group.has_id) {
                 if (!stage.group.fields.empty()) {
                     for (const auto& field : stage.group.fields) {
-                        AppendUnique(&required_fields, &seen_fields, field.field);
+                        if (computed_fields.find(field.field) == computed_fields.end()) {
+                            AppendUnique(&required_fields, &seen_fields, field.field);
+                        }
                     }
                 } else {
-                    AppendUnique(&required_fields, &seen_fields, stage.group.field);
+                    if (computed_fields.find(stage.group.field) == computed_fields.end()) {
+                        AppendUnique(&required_fields, &seen_fields, stage.group.field);
+                    }
                 }
             }
             for (const auto& op : stage.ops) {
                 if (!op.field.empty()) {
-                    AppendUnique(&required_fields, &seen_fields, op.field);
+                    if (computed_fields.find(op.field) == computed_fields.end()) {
+                        AppendUnique(&required_fields, &seen_fields, op.field);
+                    }
                 }
             }
         } else if (stage.type == StageType::kSortByCount) {
             if (stage.sort_by_count.is_field) {
-                AppendUnique(&required_fields, &seen_fields, stage.sort_by_count.field);
+                if (computed_fields.find(stage.sort_by_count.field) == computed_fields.end()) {
+                    AppendUnique(&required_fields, &seen_fields, stage.sort_by_count.field);
+                }
             }
         } else if (stage.type == StageType::kAddFields) {
             for (const auto& field : stage.add_fields) {
                 if (field.from_field) {
-                    AppendUnique(&required_fields, &seen_fields, field.field);
+                    if (computed_fields.find(field.field) == computed_fields.end()) {
+                        AppendUnique(&required_fields, &seen_fields, field.field);
+                    }
                 }
+                computed_fields.insert(field.name);
             }
         } else if (stage.type == StageType::kProject) {
             if (ProjectionNeedsAll(stage.project)) {
@@ -1857,15 +1907,22 @@ std::vector<MongoDocument> MongoClientCore::AggregatePipeline(
                 break;
             }
             for (const auto& name : stage.project.include) {
-                AppendUnique(&required_fields, &seen_fields, name);
+                if (computed_fields.find(name) == computed_fields.end()) {
+                    AppendUnique(&required_fields, &seen_fields, name);
+                }
             }
             for (const auto& field : stage.project.computed) {
                 if (field.from_field) {
-                    AppendUnique(&required_fields, &seen_fields, field.field);
+                    if (computed_fields.find(field.field) == computed_fields.end()) {
+                        AppendUnique(&required_fields, &seen_fields, field.field);
+                    }
                 }
+                computed_fields.insert(field.name);
             }
         } else if (stage.type == StageType::kUnwind) {
-            AppendUnique(&required_fields, &seen_fields, stage.unwind.field);
+            if (computed_fields.find(stage.unwind.field) == computed_fields.end()) {
+                AppendUnique(&required_fields, &seen_fields, stage.unwind.field);
+            }
         }
     }
 
@@ -2411,17 +2468,8 @@ size_t MongoClientCore::Update(const std::string& db, const std::string& collect
     if (updates_out.empty()) {
         return 0;
     }
-    if (state && state->initialized) {
-        for (const auto& doc : updates_out) {
-            for (const auto& item : doc.fields) {
-                if (state->field_index.find(item.first) == state->field_index.end()) {
-                    if (error) {
-                        *error = "unknown field for collection";
-                    }
-                    return matched;
-                }
-            }
-        }
+    if (!EnsureSchema(db, collection, updates_out, error)) {
+        return matched;
     }
     std::string append_error;
     InsertMany(db, collection, updates_out, &append_error);
