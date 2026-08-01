@@ -53,9 +53,13 @@
 - [x] Scale broad-probe shortlist capacity by probe pressure, candidate volume, and routing confidence.
 - [x] Detect poorly clustered cosine fields and route automatic IVF requests to exact CPU/Vulkan search.
 - [x] Add opt-in vector-worker CPU affinity for latency-sensitive dedicated hosts.
-- [ ] Persist a versioned per-segment IVF sidecar and load it during recovery.
-- [ ] Rebuild changed sealed indexes in the background rather than on the first ANN query.
+- [x] Persist a versioned checksummed IVF sidecar and load it during recovery.
+- [x] Rebuild stale sealed indexes through idle maintenance while queries use exact fallback.
 - [ ] Add representative-dataset recall calibration for automatic default probe selection.
 - [ ] Add tombstone/update handling, compaction, index observability, and repair tools.
 - [ ] Evaluate scalar/product quantization only after representative memory benchmarks.
 - [ ] Revisit HNSW only for workloads whose recall/latency curve IVF cannot meet.
+
+Public embedding datasets in `.fvecs` format can be measured with
+`mimicdb_bench_vector_file BASE.fvecs QUERY.fvecs GROUNDTRUTH.ivecs`; the harness reports
+p50/p95/p99, recall@10, MRR, build time, selected probes, and exact-fallback state.

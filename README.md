@@ -200,3 +200,7 @@ The server preloads new sealed vector segments during append processing, outside
 latency. Embedded users can call `PreloadVectorField()` explicitly during warm-up.
 Vector-bearing server datasets currently retain their sealed CPU segments as well, ensuring
 the normal segment-cache eviction policy cannot remove rows from exact search results.
+IVF indexes are saved beside dataset segments as versioned `.ivf` sidecars. Recovery checks
+the schema, sealed-row generation, and payload checksum before publishing an index. Missing,
+stale, or corrupt sidecars are rebuilt by idle maintenance; approximate requests use exact
+CPU/Vulkan search until the replacement is ready.

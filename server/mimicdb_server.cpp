@@ -168,6 +168,12 @@ struct DatabaseState {
     std::string path;
     std::unordered_map<std::string, DatasetState> datasets;
 };
+struct IvfBuildTask {
+    std::string database;
+    std::string dataset;
+    size_t field = 0;
+    VectorMetric metric = VectorMetric::kCosine;
+};
 
 struct SchemaFileHeader {
     uint32_t magic = 0x4D435343;  // "MCSC"
@@ -2691,8 +2697,10 @@ private:
             return;
         }
         for (size_t field = 0; field < it->second.dataset->Fields().size(); ++field) {
-            if (it->second.dataset->Fields()[field].Type() == FieldType::kVectorFloat32)
+            if (it->second.dataset->Fields()[field].Type() == FieldType::kVectorFloat32) {
                 PreloadVectorField(*it->second.dataset, field);
+                QueueIvfBuild(db_name,name,field,VectorMetric::kCosine);
+            }
         }
         if (batch_id != 0) {
             it->second.seen_batches.insert(batch_id);
@@ -2916,7 +2924,9 @@ private:
         std::vector<VectorSearchHit> hits;
         const bool approximate = (metric_id & 0x80U) != 0;
         const auto metric = static_cast<VectorMetric>(metric_id & 0x7fU);
-        const bool search_ok = approximate
+        const bool ivf_ready=approximate&&VectorIvfReady(*it->second.dataset,field_index,metric);
+        if(approximate&&!ivf_ready) QueueIvfBuild(db_name,name,field_index,metric);
+        const bool search_ok = approximate&&ivf_ready
             ? VectorSearchIvf(*it->second.dataset, field_index, query.data(), query.size(),
                               top_k, metric, ivf_probes, &hits, predicates)
             : VectorSearch(*it->second.dataset, field_index, query.data(), query.size(),
@@ -4909,6 +4919,8 @@ private:
     std::unordered_map<std::string, std::chrono::steady_clock::time_point>
         handshake_nonce_cache_{};
     std::atomic<uint64_t> authz_denied_counter_{0};
+    std::mutex ivf_task_mutex_;
+    std::vector<IvfBuildTask> ivf_tasks_;
 
     std::string DatabasePath(const std::string& name) const {
         if (IsAuthDatabaseName(name) && !auth_db_path_.empty()) {
@@ -4931,6 +4943,35 @@ private:
         return (std::filesystem::path(DatasetPath(db_name, dataset_name)) /
                 ("segment_" + std::to_string(index) + ".mimicdb"))
             .string();
+    }
+
+    std::string IvfPath(const std::string& db_name,const std::string& dataset_name,
+                        size_t field,VectorMetric metric) const {
+        return (std::filesystem::path(DatasetPath(db_name,dataset_name)) /
+                ("vector_"+std::to_string(field)+"_"+std::to_string(static_cast<unsigned>(metric))+".ivf"))
+            .string();
+    }
+
+    void QueueIvfBuild(const std::string& db_name,const std::string& dataset_name,
+                       size_t field,VectorMetric metric) {
+        std::lock_guard lock(ivf_task_mutex_);
+        for(const auto& task:ivf_tasks_) if(task.database==db_name&&task.dataset==dataset_name&&
+            task.field==field&&task.metric==metric)return;
+        ivf_tasks_.push_back({db_name,dataset_name,field,metric});
+    }
+
+    void RunIvfMaintenance() {
+        IvfBuildTask task;
+        {
+            std::lock_guard lock(ivf_task_mutex_);
+            if(ivf_tasks_.empty())return;
+            task=ivf_tasks_.back();ivf_tasks_.pop_back();
+        }
+        auto db=databases_.find(task.database);if(db==databases_.end())return;
+        auto dataset=db->second.datasets.find(task.dataset);if(dataset==db->second.datasets.end())return;
+        if(BuildVectorIvf(*dataset->second.dataset,task.field,task.metric))
+            SaveVectorIvf(*dataset->second.dataset,task.field,task.metric,
+                          IvfPath(task.database,task.dataset,task.field,task.metric).c_str());
     }
 
     uint64_t SegmentBytes(const Segment& segment) const {
@@ -5955,6 +5996,7 @@ private:
         RunAuthRetentionTasks();
         PruneSessions();
         PruneHandshakeNonces();
+        RunIvfMaintenance();
         if (flush_interval_ms_ > 0) {
             const auto now = std::chrono::steady_clock::now();
             if (last_active_flush_.time_since_epoch().count() == 0 ||
@@ -6016,10 +6058,20 @@ private:
                 EnforceSegmentCacheLimits(state);
             }
             for (size_t field = 0; field < state.dataset->Fields().size(); ++field) {
-                if (state.dataset->Fields()[field].Type() == FieldType::kVectorFloat32)
+                if (state.dataset->Fields()[field].Type() == FieldType::kVectorFloat32) {
                     PreloadVectorField(*state.dataset, field);
+                    for(const auto metric:{VectorMetric::kCosine,VectorMetric::kDot,
+                                           VectorMetric::kL2Squared})
+                        LoadVectorIvf(*state.dataset,field,metric,
+                                      IvfPath(db_name,dataset_name,field,metric).c_str());
+                }
             }
             db_state.datasets[dataset_name] = std::move(state);
+            auto& recovered=db_state.datasets[dataset_name];
+            for(size_t field=0;field<recovered.dataset->Fields().size();++field)
+                if(recovered.dataset->Fields()[field].Type()==FieldType::kVectorFloat32&&
+                   !VectorIvfReady(*recovered.dataset,field,VectorMetric::kCosine))
+                    QueueIvfBuild(db_name,dataset_name,field,VectorMetric::kCosine);
         }
     }
 

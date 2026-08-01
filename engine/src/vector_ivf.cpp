@@ -5,6 +5,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -294,6 +297,71 @@ public:
         std::lock_guard lock(mutex_); auto found = indexes_.find({&dataset,field,metric});
         return found == indexes_.end() ? nullptr : found->second;
     }
+    bool Ready(const Dataset& dataset,size_t field,VectorMetric metric) {
+        size_t rows=0;for(const auto& segment:dataset.Segments())rows+=segment.RowCount();
+        std::lock_guard lock(mutex_);auto found=indexes_.find({&dataset,field,metric});
+        return found!=indexes_.end()&&found->second->source_rows==rows&&
+               found->second->segments==dataset.Segments().size()&&
+               found->second->dimension==dataset.VectorDimension(field);
+    }
+    bool Save(const Dataset& dataset,size_t field,VectorMetric metric,const char* path) {
+        std::shared_ptr<const Index> index;
+        {
+            std::lock_guard lock(mutex_);
+            auto found=indexes_.find({&dataset,field,metric});
+            if(found==indexes_.end())return false;
+            index=found->second;
+        }
+        std::vector<uint8_t> payload;
+        auto pod=[&](const auto& value){const auto* p=reinterpret_cast<const uint8_t*>(&value);payload.insert(payload.end(),p,p+sizeof(value));};
+        auto vector=[&](const auto& values){uint64_t count=values.size();pod(count);const auto* p=reinterpret_cast<const uint8_t*>(values.data());payload.insert(payload.end(),p,p+values.size()*sizeof(values[0]));};
+        pod(index->rows);pod(index->source_rows);pod(index->segments);pod(index->dimension);
+        pod(index->routing_dimensions);pod(index->centroids);pod(index->builds);
+        pod(index->build_seconds);pod(index->mean_assignment_distance);
+        vector(index->routing_columns);vector(index->offsets);vector(index->row_ids);
+        vector(index->centers);vector(index->sketch_scales);vector(index->packed_vectors);
+        vector(index->inverse_norms);vector(index->norm_squared);vector(index->sketches);
+        uint64_t bounds=index->bounds.size();pod(bounds);
+        for(const auto& bound:index->bounds){uint8_t numeric=bound.numeric;pod(numeric);vector(bound.minimum);vector(bound.maximum);}
+        uint64_t checksum=1469598103934665603ULL;
+        for(uint8_t byte:payload){checksum^=byte;checksum*=1099511628211ULL;}
+        struct Header{uint32_t magic,version;uint64_t schema,rows,payload_bytes,checksum;uint32_t field,metric;} header{
+            0x4D495646U,1,dataset.SchemaFingerprint(),index->source_rows,payload.size(),checksum,
+            static_cast<uint32_t>(field),static_cast<uint32_t>(metric)};
+        const std::filesystem::path target(path),temporary=target.string()+".tmp";
+        std::ofstream out(temporary,std::ios::binary|std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(&header),sizeof(header));
+        out.write(reinterpret_cast<const char*>(payload.data()),payload.size());out.close();
+        if(!out.good())return false;
+        std::error_code ec;std::filesystem::rename(temporary,target,ec);
+        if(ec){std::filesystem::remove(temporary);return false;}return true;
+    }
+    bool Load(const Dataset& dataset,size_t field,VectorMetric metric,const char* path) {
+        struct Header{uint32_t magic,version;uint64_t schema,rows,payload_bytes,checksum;uint32_t field,metric;} header{};
+        std::ifstream in(path,std::ios::binary);in.read(reinterpret_cast<char*>(&header),sizeof(header));
+        size_t rows=0;for(const auto& segment:dataset.Segments())rows+=segment.RowCount();
+        if(!in.good()||header.magic!=0x4D495646U||header.version!=1||header.schema!=dataset.SchemaFingerprint()||
+           header.rows!=rows||header.field!=field||header.metric!=static_cast<uint32_t>(metric)||header.payload_bytes>(1ULL<<40))return false;
+        std::vector<uint8_t> payload(header.payload_bytes);in.read(reinterpret_cast<char*>(payload.data()),payload.size());
+        if(!in.good())return false;
+        uint64_t checksum=1469598103934665603ULL;
+        for(uint8_t byte:payload){checksum^=byte;checksum*=1099511628211ULL;}if(checksum!=header.checksum)return false;
+        size_t cursor=0;auto pod=[&](auto* value){if(cursor>payload.size()||sizeof(*value)>payload.size()-cursor)return false;std::memcpy(value,payload.data()+cursor,sizeof(*value));cursor+=sizeof(*value);return true;};
+        auto vector=[&](auto* values){uint64_t count=0;if(!pod(&count)||count>SIZE_MAX/sizeof((*values)[0])||count*sizeof((*values)[0])>payload.size()-cursor)return false;values->resize(count);std::memcpy(values->data(),payload.data()+cursor,count*sizeof((*values)[0]));cursor+=count*sizeof((*values)[0]);return true;};
+        auto index=std::make_shared<Index>();
+        if(!pod(&index->rows)||!pod(&index->source_rows)||!pod(&index->segments)||!pod(&index->dimension)||
+           !pod(&index->routing_dimensions)||!pod(&index->centroids)||!pod(&index->builds)||
+           !pod(&index->build_seconds)||!pod(&index->mean_assignment_distance)||
+           !vector(&index->routing_columns)||!vector(&index->offsets)||!vector(&index->row_ids)||
+           !vector(&index->centers)||!vector(&index->sketch_scales)||!vector(&index->packed_vectors)||
+           !vector(&index->inverse_norms)||!vector(&index->norm_squared)||!vector(&index->sketches))return false;
+        uint64_t bounds=0;if(!pod(&bounds)||bounds>dataset.Fields().size())return false;index->bounds.resize(bounds);
+        for(auto& bound:index->bounds){uint8_t numeric=0;if(!pod(&numeric)||!vector(&bound.minimum)||!vector(&bound.maximum))return false;bound.numeric=numeric!=0;}
+        if(cursor!=payload.size()||index->source_rows!=rows||index->dimension!=dataset.VectorDimension(field)||
+           index->offsets.size()!=index->centroids+1||index->row_ids.size()!=index->rows||
+           index->packed_vectors.size()!=index->rows*index->dimension)return false;
+        {std::lock_guard lock(mutex_);indexes_[{&dataset,field,metric}]=std::move(index);}return true;
+    }
     std::shared_ptr<const ActiveIndex> GetActive(const Dataset& dataset,size_t field,
                                                  VectorMetric metric,const Index& index) {
         const Key key{&dataset,field,metric}; const size_t rows=dataset.ActiveRowCount();
@@ -366,6 +434,15 @@ bool BuildVectorIvf(const Dataset& dataset, size_t field, VectorMetric metric) {
     const auto index=store.Get(dataset,field,metric);
     if(index&&dataset.ActiveRowCount()) store.GetActive(dataset,field,metric,*index);
     return true;
+}
+bool VectorIvfReady(const Dataset& dataset,size_t field,VectorMetric metric){
+    return Store::Instance().Ready(dataset,field,metric);
+}
+bool SaveVectorIvf(const Dataset& dataset,size_t field,VectorMetric metric,const char* path){
+    return path&&Store::Instance().Save(dataset,field,metric,path);
+}
+bool LoadVectorIvf(const Dataset& dataset,size_t field,VectorMetric metric,const char* path){
+    return path&&Store::Instance().Load(dataset,field,metric,path);
 }
 
 bool VectorSearchIvf(const Dataset& dataset, size_t field, const float* query,

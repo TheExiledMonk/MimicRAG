@@ -31,6 +31,11 @@ struct IvfSearchStats {
 };
 
 bool BuildVectorIvf(const Dataset& dataset, size_t field_index, VectorMetric metric);
+bool VectorIvfReady(const Dataset& dataset, size_t field_index, VectorMetric metric);
+bool SaveVectorIvf(const Dataset& dataset, size_t field_index, VectorMetric metric,
+                   const char* path);
+bool LoadVectorIvf(const Dataset& dataset, size_t field_index, VectorMetric metric,
+                   const char* path);
 bool VectorSearchIvf(const Dataset& dataset, size_t field_index, const float* query,
                      size_t dimension, size_t top_k, VectorMetric metric,
                      size_t probes, std::vector<VectorSearchHit>* out,

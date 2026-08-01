@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <cstdlib>
 #include <future>
+#include <fstream>
 
 #include "mimicdb/dataset.h"
 #include "mimicdb/vector_search.h"
@@ -77,6 +78,10 @@ int main() {
     assert(mimicdb::BuildVectorIvf(filtered, 0, mimicdb::VectorMetric::kCosine));
     const auto ivf_stats = mimicdb::GetVectorIvfStats(
         filtered, 0, mimicdb::VectorMetric::kCosine);
+    const auto ivf_path = std::filesystem::temp_directory_path() / "mimicdb_vector_ivf_test.bin";
+    std::filesystem::remove(ivf_path);
+    assert(mimicdb::SaveVectorIvf(filtered, 0, mimicdb::VectorMetric::kCosine,
+                                  ivf_path.c_str()));
     std::vector<mimicdb::VectorSearchHit> exact_all;
     std::vector<mimicdb::VectorSearchHit> ivf_all;
     assert(mimicdb::VectorSearchIvf(filtered, 0, filtered_query, 2, 1,
@@ -144,8 +149,29 @@ int main() {
     restored.AddField(mimicdb::FieldVector("tenant", mimicdb::FieldType::kInt32));
     assert(restored.AddRecoveredSegment(std::move(recovered)));
     assert(restored.VectorDimension(0) == 2);
+    assert(mimicdb::LoadVectorIvf(restored, 0, mimicdb::VectorMetric::kCosine,
+                                  ivf_path.c_str()));
+    assert(mimicdb::VectorIvfReady(restored, 0, mimicdb::VectorMetric::kCosine));
     assert(mimicdb::VectorSearch(restored, 0, filtered_query, 2, 1,
                                  mimicdb::VectorMetric::kCosine, &hits));
+    {
+        std::fstream corrupt(ivf_path, std::ios::binary | std::ios::in | std::ios::out);
+        corrupt.seekg(-1, std::ios::end);
+        char byte = 0;
+        corrupt.read(&byte, 1);
+        byte ^= '\x7f';
+        corrupt.seekp(-1, std::ios::end);
+        corrupt.write(&byte, 1);
+    }
+    mimicdb::Dataset rejected("rejected");
+    rejected.AddField(mimicdb::FieldVector("embedding", mimicdb::FieldType::kVectorFloat32));
+    rejected.AddField(mimicdb::FieldVector("tenant", mimicdb::FieldType::kInt32));
+    mimicdb::Segment rejected_segment(0, std::vector<mimicdb::FieldVector>{});
+    assert(mimicdb::SegmentReader(path.string()).Read(&rejected_segment));
+    assert(rejected.AddRecoveredSegment(std::move(rejected_segment)));
+    assert(!mimicdb::LoadVectorIvf(rejected, 0, mimicdb::VectorMetric::kCosine,
+                                   ivf_path.c_str()));
     std::filesystem::remove(path);
+    std::filesystem::remove(ivf_path);
     return 0;
 }
