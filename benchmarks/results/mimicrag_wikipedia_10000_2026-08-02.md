@@ -57,6 +57,20 @@ loading, the same five-query loop measured 32.52 QPS sequential (26.83 ms averag
 26.11 ms p50, 32.06 ms p95) and 188.21 QPS at eight-way concurrency (36.02 ms
 average, 34.20 ms p50, 45.70 ms p95), with no HTTP errors.
 
+### Interned metadata and compact graph
+
+Document IDs, version IDs, tenant/scope, source URI, title, and JSON metadata are now
+stored once per document version rather than once per chunk. Graph node types are
+derived from compact ranges, chunk IDs/titles are referenced from chunk/document
+records, and the node lookup table uses numeric IDs. The graph remains CSR-based and
+the deep-dive endpoint returns the same wire representation.
+
+This reduced steady RSS again, from 1,913 MiB to 1,451 MiB. Private/anonymous memory
+fell from 1,417 MiB to 957 MiB; the remaining 476 MiB is clean file-backed data.
+Warm startup measured 4.63 seconds. Retrieval also improved to 36.77 QPS sequential
+(23.39 ms average, 22.42 ms p50, 28.50 ms p95) and 212.39 QPS at eight-way
+concurrency (31.15 ms average, 29.95 ms p50, 40.54 ms p95).
+
 The legacy JSONL file was removed only after binary-only restart, health counters,
 retrieval rankings, checksums, and concurrency tests passed. The original Wikimedia
 dump and the binary catalog remain available for regeneration and further testing.
