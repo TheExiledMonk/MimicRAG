@@ -24,6 +24,7 @@ add_library(mimicdb_engine
     src/simd_output.cpp
     src/vector_search.cpp
     src/vector_gpu.cpp
+    src/vector_ivf.cpp
 )
 
 target_include_directories(mimicdb_engine PUBLIC

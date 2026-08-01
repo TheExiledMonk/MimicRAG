@@ -4,6 +4,7 @@
 #include "mimicdb/hash.h"
 #include "mimicdb/config.h"
 #include "mimicdb/vector_gpu.h"
+#include "mimicdb/vector_ivf.h"
 
 namespace mimicdb {
 
@@ -12,6 +13,7 @@ Dataset::Dataset(std::string name)
 
 Dataset::~Dataset() {
     ReleaseVectorGpuDataset(*this);
+    ReleaseVectorIvfDataset(*this);
 }
 
 const std::string& Dataset::Name() const {

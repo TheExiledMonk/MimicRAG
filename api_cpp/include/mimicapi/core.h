@@ -105,6 +105,7 @@ public:
                       const std::vector<float>& query, size_t top_k,
                       mimicdb::VectorMetric metric,
                       const std::vector<mimicdb::VectorSearchPredicate>& predicates,
+                      bool approximate, size_t probes,
                       std::vector<mimicdb::VectorSearchHit>* out, std::string* error) const;
 
 private:

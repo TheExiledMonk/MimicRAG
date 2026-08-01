@@ -532,6 +532,7 @@ class MimicDBClient:
         self, dataset: str, field_index: int, query: Iterable[float], top_k: int = 10,
         metric: str = "cosine", database: str | None = None,
         predicates: list[tuple[int, int, float]] | None = None,
+        approximate: bool = False, probes: int = 0,
     ) -> list[dict[str, int | float]]:
         metrics = {"cosine": 0, "dot": 1, "l2": 2, "l2_squared": 2}
         if metric not in metrics:
@@ -543,7 +544,10 @@ class MimicDBClient:
         payload = bytearray()
         payload += struct.pack("<H", len(db_name)) + db_name.encode("utf-8")
         payload += struct.pack("<H", len(dataset)) + dataset.encode("utf-8")
-        payload += struct.pack("<HBII", field_index, metrics[metric], len(values), top_k)
+        metric_id = metrics[metric] | (0x80 if approximate else 0)
+        payload += struct.pack("<HBII", field_index, metric_id, len(values), top_k)
+        if approximate:
+            payload += struct.pack("<I", probes)
         pred_list = predicates or []
         payload += struct.pack("<H", len(pred_list))
         for pred_field, pred_op, pred_value in pred_list:

@@ -23,6 +23,8 @@ sources = [
     str(engine_src / "simd_output.cpp"),
     str(engine_src / "simd_dispatch.cpp"),
     str(engine_src / "vector_search.cpp"),
+    str(engine_src / "vector_gpu.cpp"),
+    str(engine_src / "vector_ivf.cpp"),
 ]
 
 core_sources = [

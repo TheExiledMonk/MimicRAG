@@ -103,6 +103,10 @@ class TestNetwork(unittest.TestCase):
                 )
                 vector_hits = client.vector_search("vectors", 0, [1.0, 0.0], top_k=2)
                 self.assertEqual([hit["row_id"] for hit in vector_hits], [0, 2])
+                vector_ann_hits = client.vector_search(
+                    "vectors", 0, [1.0, 0.0], top_k=2,
+                    approximate=True, probes=100000)
+                self.assertEqual([hit["row_id"] for hit in vector_ann_hits], [0, 2])
                 client.close()
             finally:
                 proc.terminate()

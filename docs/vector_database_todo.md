@@ -30,12 +30,19 @@
 - [x] Report vectors/sec, effective bandwidth, and latency.
 - [ ] Add configurable performance thresholds without hardware-specific defaults.
 
-## Production ANN follow-up
+## Specialist IVF ANN
 
-- [ ] Define a versioned immutable per-segment index sidecar format.
-- [ ] Add HNSW build-on-seal and background rebuild with checksums/atomic rename.
-- [ ] Search sealed HNSW indexes and brute-force the active segment, then merge top-k.
-- [ ] Add `ef_search`, `ef_construction`, and `M` configuration with safe limits.
-- [ ] Measure recall@k against exact search and gate ANN releases on recall targets.
+- [x] Build a compact in-memory coarse-quantizer over immutable sealed rows.
+- [x] Store packed list offsets and row IDs without a general-purpose ANN dependency.
+- [x] Route on a compact dimension sample, probe configurable lists, and exactly rerank candidates.
+- [x] Intersect structured predicates before candidate vectors are loaded or scored.
+- [x] Search the mutable active segment exactly and merge it with sealed-list results.
+- [x] Publish immutable index snapshots so concurrent searches do not hold the build lock.
+- [x] Expose opt-in IVF and probe count through embedded C++, Python, and the wire protocol.
+- [x] Measure recall@k against exact search on random and clustered vector workloads.
+- [ ] Persist a versioned per-segment IVF sidecar and load it during recovery.
+- [ ] Rebuild changed sealed indexes in the background rather than on the first ANN query.
+- [ ] Add representative-dataset recall calibration for automatic default probe selection.
 - [ ] Add tombstone/update handling, compaction, index observability, and repair tools.
 - [ ] Evaluate scalar/product quantization only after representative memory benchmarks.
+- [ ] Revisit HNSW only for workloads whose recall/latency curve IVF cannot meet.

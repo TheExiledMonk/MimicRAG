@@ -16,6 +16,7 @@
 #include "mimicdb/types.h"
 #include "mimicdb/compression.h"
 #include "mimicdb/vector_search.h"
+#include "mimicdb/vector_ivf.h"
 
 namespace {
 
@@ -1182,8 +1183,10 @@ PyObject* DatasetVectorSearch(DatasetObject* self, PyObject* args) {
     Py_ssize_t top_k = 10;
     const char* metric_name = nullptr;
     PyObject* predicates_obj = nullptr;
-    if (!PyArg_ParseTuple(args, "nOnsO", &field_index, &query_obj, &top_k,
-                          &metric_name, &predicates_obj)) return nullptr;
+    int approximate = 0;
+    unsigned long long probes = 0;
+    if (!PyArg_ParseTuple(args, "nOnsO|pK", &field_index, &query_obj, &top_k,
+                          &metric_name, &predicates_obj, &approximate, &probes)) return nullptr;
     PyObject* query_seq = PySequence_Fast(query_obj, "query must be a sequence");
     if (!query_seq) return nullptr;
     std::vector<float> query(static_cast<size_t>(PySequence_Fast_GET_SIZE(query_seq)));
@@ -1211,9 +1214,15 @@ PyObject* DatasetVectorSearch(DatasetObject* self, PyObject* args) {
         predicates.push_back({static_cast<size_t>(pred_field), op, value});
     }
     std::vector<mimicdb::VectorSearchHit> hits;
-    if (field_index < 0 || top_k <= 0 ||
-        !mimicdb::VectorSearch(*self->dataset, static_cast<size_t>(field_index), query.data(),
-                               query.size(), static_cast<size_t>(top_k), metric, &hits, predicates)) {
+    const bool search_ok = field_index >= 0 && top_k > 0 &&
+        (approximate
+         ? mimicdb::VectorSearchIvf(*self->dataset, static_cast<size_t>(field_index), query.data(),
+                                    query.size(), static_cast<size_t>(top_k), metric,
+                                    static_cast<size_t>(probes), &hits, predicates)
+         : mimicdb::VectorSearch(*self->dataset, static_cast<size_t>(field_index), query.data(),
+                                 query.size(), static_cast<size_t>(top_k), metric,
+                                 &hits, predicates));
+    if (!search_ok) {
         PyErr_SetString(PyExc_ValueError, "invalid vector search"); return nullptr;
     }
     PyObject* result = PyList_New(static_cast<Py_ssize_t>(hits.size()));

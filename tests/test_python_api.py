@@ -13,6 +13,11 @@ class TestPythonAPI(unittest.TestCase):
         hits = vectors.vector_search("embedding", [1.0, 0.0], top_k=2,
                                      predicates=[(1, 0, 1.0)])
         self.assertEqual([hit["row_id"] for hit in hits], [0, 2])
+        ann_hits = vectors.vector_search("embedding", [1.0, 0.0], top_k=2,
+                                         approximate=True, probes=100000)
+        exact_hits = vectors.vector_search("embedding", [1.0, 0.0], top_k=2)
+        self.assertEqual([hit["row_id"] for hit in ann_hits],
+                         [hit["row_id"] for hit in exact_hits])
         with self.assertRaises((ValueError, RuntimeError)):
             vectors.vector_search("embedding", [1.0, 0.0, 0.0])
 

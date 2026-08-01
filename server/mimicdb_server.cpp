@@ -43,6 +43,7 @@
 #include "mimicdb/types.h"
 #include "mimicdb/vector_search.h"
 #include "mimicdb/vector_gpu.h"
+#include "mimicdb/vector_ivf.h"
 
 bool IsLocalBind(const std::string& host);
 bool IsRootInitialized(const std::string& auth_db_path);
@@ -2876,13 +2877,15 @@ private:
         uint8_t metric_id = 0;
         uint32_t dimension = 0;
         uint32_t top_k = 0;
+        uint32_t ivf_probes = 0;
         uint16_t predicate_count = 0;
         if (!ReadName(payload, &cursor, &db_name) || !ReadName(payload, &cursor, &name) ||
             !ReadScalar(payload, &cursor, &field_index) ||
             !ReadScalar(payload, &cursor, &metric_id) ||
             !ReadScalar(payload, &cursor, &dimension) || !ReadScalar(payload, &cursor, &top_k) ||
+            ((metric_id & 0x80U) != 0 && !ReadScalar(payload, &cursor, &ivf_probes)) ||
             !ReadScalar(payload, &cursor, &predicate_count) ||
-            dimension == 0 || top_k == 0 || metric_id > 2 ||
+            dimension == 0 || top_k == 0 || (metric_id & 0x7fU) > 2 ||
             predicate_count > 1024) {
             SendStatus(client, header, Status::kBadRequest, {});
             return;
@@ -2911,8 +2914,14 @@ private:
         std::vector<float> query(dimension);
         std::memcpy(query.data(), payload.data() + cursor, query.size() * sizeof(float));
         std::vector<VectorSearchHit> hits;
-        if (!VectorSearch(*it->second.dataset, field_index, query.data(), query.size(), top_k,
-                          static_cast<VectorMetric>(metric_id), &hits, predicates)) {
+        const bool approximate = (metric_id & 0x80U) != 0;
+        const auto metric = static_cast<VectorMetric>(metric_id & 0x7fU);
+        const bool search_ok = approximate
+            ? VectorSearchIvf(*it->second.dataset, field_index, query.data(), query.size(),
+                              top_k, metric, ivf_probes, &hits, predicates)
+            : VectorSearch(*it->second.dataset, field_index, query.data(), query.size(),
+                           top_k, metric, &hits, predicates);
+        if (!search_ok) {
             SendStatus(client, header, Status::kBadRequest, {});
             return;
         }

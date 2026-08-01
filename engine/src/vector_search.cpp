@@ -490,6 +490,100 @@ bool VectorSearch(const Dataset& dataset, size_t field_index, const float* query
     return true;
 }
 
+bool VectorSearchCandidates(const Dataset& dataset, size_t field_index,
+                            const float* query, size_t dimension, size_t top_k,
+                            VectorMetric metric, const std::vector<uint32_t>& requested,
+                            std::vector<VectorSearchHit>* out,
+                            const std::vector<VectorSearchPredicate>& predicates) {
+    if (!out || !query || dimension == 0 || top_k == 0 ||
+        field_index >= dataset.Fields().size() ||
+        dataset.Fields()[field_index].Type() != FieldType::kVectorFloat32 ||
+        dataset.VectorDimension(field_index) != dimension) return false;
+    for (const auto& predicate : predicates)
+        if (predicate.field_index >= dataset.Fields().size()) return false;
+    for (size_t i = 0; i < dimension; ++i)
+        if (!std::isfinite(query[i])) return false;
+
+    std::vector<uint32_t> candidates = requested;
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+    struct Work {
+        const std::vector<FieldVector>* fields;
+        const std::vector<CompressedColumnView>* compressed;
+        uint64_t base;
+        std::vector<size_t> rows;
+        bool exact_all = false;
+    };
+    std::vector<Work> work;
+    std::vector<uint32_t> filtered_global;
+    uint64_t base = 0;
+    for (const auto& segment : dataset.Segments()) {
+        Work item{&segment.Fields(), &segment.CompressedColumns(), base, {}, false};
+        const uint64_t end = base + segment.RowCount();
+        auto first = std::lower_bound(candidates.begin(), candidates.end(), base);
+        auto last = std::lower_bound(first, candidates.end(), end);
+        item.rows.reserve(static_cast<size_t>(last - first));
+        for (; first != last; ++first) {
+            const size_t row = static_cast<size_t>(*first - base);
+            if (predicates.empty() || Matches(segment.Fields(), row,
+                                               &segment.CompressedColumns(), predicates)) {
+                item.rows.push_back(row);
+                filtered_global.push_back(*first);
+            }
+        }
+        if (!item.rows.empty()) work.push_back(std::move(item));
+        base = end;
+    }
+
+    std::priority_queue<VectorSearchHit, std::vector<VectorSearchHit>, Worse> heap;
+    const bool gpu_used = WantsGpu(filtered_global.size(), dimension) &&
+                          PreloadVectorField(dataset, field_index);
+    if (gpu_used) {
+        std::vector<float> distances;
+        if (!VectorGpuScore(dataset, field_index, query, dimension, metric,
+                            filtered_global, &distances)) return false;
+        for (size_t i = 0; i < distances.size(); ++i) {
+            const VectorSearchHit hit{filtered_global[i], distances[i]};
+            if (!std::isfinite(hit.distance)) continue;
+            if (heap.size() < top_k) heap.push(hit);
+            else if (hit.distance < heap.top().distance ||
+                     (hit.distance == heap.top().distance && hit.row_id < heap.top().row_id)) {
+                heap.pop(); heap.push(hit);
+            }
+        }
+        work.clear();
+    }
+    if (dataset.ActiveRowCount() != 0)
+        work.push_back({&dataset.ActiveFields(), nullptr, base, {}, true});
+
+    const float query_norm_squared = metric == VectorMetric::kCosine
+        ? FastDot(query, query, dimension) : 0.0F;
+    std::vector<std::vector<VectorSearchHit>> partial(work.size());
+    ParallelFor(work.size(), [&](size_t index) {
+        auto& item = work[index];
+        std::priority_queue<VectorSearchHit, std::vector<VectorSearchHit>, Worse> local;
+        SearchField(*item.fields, field_index, item.base, query, dimension, top_k,
+                    metric, query_norm_squared, item.compressed, predicates,
+                    item.exact_all ? nullptr : &item.rows, &local);
+        while (!local.empty()) { partial[index].push_back(local.top()); local.pop(); }
+    });
+    for (const auto& part : partial) {
+        for (const auto& hit : part) {
+            if (heap.size() < top_k) heap.push(hit);
+            else if (hit.distance < heap.top().distance ||
+                     (hit.distance == heap.top().distance && hit.row_id < heap.top().row_id)) {
+                heap.pop(); heap.push(hit);
+            }
+        }
+    }
+    out->resize(heap.size());
+    for (size_t i = heap.size(); i > 0; --i) { (*out)[i - 1] = heap.top(); heap.pop(); }
+    std::sort(out->begin(), out->end(), [](const auto& a, const auto& b) {
+        return a.distance != b.distance ? a.distance < b.distance : a.row_id < b.row_id;
+    });
+    return true;
+}
+
 VectorSearchRuntimeStats GetVectorSearchRuntimeStats() {
     auto& state = RoutingState();
     std::lock_guard lock(state.mutex);

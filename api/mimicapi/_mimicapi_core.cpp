@@ -890,10 +890,12 @@ PyObject* ApiClientCoreVectorSearch(ApiClientCoreObject* self, PyObject* args, P
     size_t top_k = 10;
     const char* metric_name = "cosine";
     PyObject* predicates_obj = Py_None;
-    static const char* kwlist[] = {"db", "name", "field_index", "query", "top_k", "metric", "predicates", nullptr};
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ssnO|nsO", const_cast<char**>(kwlist),
+    int approximate = 0;
+    size_t probes = 0;
+    static const char* kwlist[] = {"db", "name", "field_index", "query", "top_k", "metric", "predicates", "approximate", "probes", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ssnO|nsOpn", const_cast<char**>(kwlist),
                                      &db, &name, &field_index, &query_obj, &top_k,
-                                     &metric_name, &predicates_obj)) return nullptr;
+                                     &metric_name, &predicates_obj, &approximate, &probes)) return nullptr;
     PyObject* query_seq = PySequence_Fast(query_obj, "query must be a sequence");
     if (!query_seq) return nullptr;
     std::vector<float> query(static_cast<size_t>(PySequence_Fast_GET_SIZE(query_seq)));
@@ -920,7 +922,7 @@ PyObject* ApiClientCoreVectorSearch(ApiClientCoreObject* self, PyObject* args, P
     std::vector<mimicdb::VectorSearchHit> hits;
     std::string error;
     if (!self->core->VectorSearch(db, name, field_index, query, top_k, metric,
-                                  predicates, &hits, &error)) {
+                                  predicates, approximate != 0, probes, &hits, &error)) {
         PyErr_SetString(PyExc_RuntimeError, error.c_str()); return nullptr;
     }
     PyObject* result = PyList_New(static_cast<Py_ssize_t>(hits.size()));

@@ -220,6 +220,7 @@ class Dataset:
     def vector_search(self, field: str, query: list[float], top_k: int = 10,
                       metric: str = "cosine",
                       predicates: list[tuple[int, int, float]] | None = None,
+                      approximate: bool = False, probes: int = 0,
                       ) -> list[dict[str, int | float]]:
         if field not in self._fields or self._fields[field] != "vector_float32":
             raise ValueError(f"field '{field}' is not vector_float32")
@@ -227,12 +228,14 @@ class Dataset:
         if self._net is not None:
             return self._net.vector_search(self._name, field_index, query, top_k=top_k,
                                            metric=metric, database=self._database,
-                                           predicates=predicates)
+                                           predicates=predicates, approximate=approximate,
+                                           probes=probes)
         if self._cpp is not None:
             string_ops = {0: "eq", 1: "ne", 2: "lt", 3: "le", 4: "gt", 5: "ge"}
             cpp_predicates = [(index, string_ops[op], value)
                               for index, op, value in (predicates or [])]
-            return self._cpp.vector_search(field_index, query, top_k, metric, cpp_predicates)
+            return self._cpp.vector_search(field_index, query, top_k, metric, cpp_predicates,
+                                           approximate, probes)
         raise RuntimeError("vector_search requires the C++ or network backend")
 
     def _row_count(self) -> int:

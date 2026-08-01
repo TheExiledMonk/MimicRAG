@@ -8,6 +8,7 @@
 #include "mimicdb/array_codec.h"
 #include "mimicdb/compression.h"
 #include "mimicdb/scan.h"
+#include "mimicdb/vector_ivf.h"
 namespace mimicapi {
 namespace {
 
@@ -1505,11 +1506,16 @@ bool ApiClientCore::VectorSearch(
     const std::string& db, const std::string& name, size_t field_index,
     const std::vector<float>& query, size_t top_k, mimicdb::VectorMetric metric,
     const std::vector<mimicdb::VectorSearchPredicate>& predicates,
+    bool approximate, size_t probes,
     std::vector<mimicdb::VectorSearchHit>* out, std::string* error) const {
     const auto* state = GetDataset(db, name);
     if (!state) { if (error) *error = "unknown dataset"; return false; }
-    if (!mimicdb::VectorSearch(state->dataset, field_index, query.data(), query.size(),
-                               top_k, metric, out, predicates)) {
+    const bool ok = approximate
+        ? mimicdb::VectorSearchIvf(state->dataset, field_index, query.data(), query.size(),
+                                   top_k, metric, probes, out, predicates)
+        : mimicdb::VectorSearch(state->dataset, field_index, query.data(), query.size(),
+                                top_k, metric, out, predicates);
+    if (!ok) {
         if (error) *error = "invalid vector search";
         return false;
     }

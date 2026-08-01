@@ -9,6 +9,7 @@
 #include "mimicdb/vector_search.h"
 #include "mimicdb/segment_io.h"
 #include "mimicdb/vector_gpu.h"
+#include "mimicdb/vector_ivf.h"
 
 int main() {
     mimicdb::Dataset dataset("vectors");
@@ -31,7 +32,10 @@ int main() {
     filtered.AddField(mimicdb::FieldVector("tenant", mimicdb::FieldType::kInt32));
     for (int i = 0; i < 4100; ++i) {
         const float x = i == 4099 ? 1.0F : 0.0F;
-        assert(filtered.Append({mimicdb::FieldValue::VectorFloat32({x, 1.0F - x}),
+        const auto vector = i == 100
+            ? mimicdb::FieldValue::Null(mimicdb::FieldType::kVectorFloat32)
+            : mimicdb::FieldValue::VectorFloat32({x, 1.0F - x});
+        assert(filtered.Append({vector,
                                 mimicdb::FieldValue::Int32(i == 4099 ? 7 : 3)}));
     }
     const float filtered_query[] = {1.0F, 0.0F};
@@ -69,6 +73,20 @@ int main() {
     }
     for (auto& result : concurrent) assert(result.get());
     unsetenv("MIMICDB_VECTOR_BACKEND");
+
+    assert(mimicdb::BuildVectorIvf(filtered, 0, mimicdb::VectorMetric::kCosine));
+    const auto ivf_stats = mimicdb::GetVectorIvfStats(
+        filtered, 0, mimicdb::VectorMetric::kCosine);
+    std::vector<mimicdb::VectorSearchHit> exact_all;
+    std::vector<mimicdb::VectorSearchHit> ivf_all;
+    assert(mimicdb::VectorSearch(filtered, 0, filtered_query, 2, 10,
+                                 mimicdb::VectorMetric::kCosine, &exact_all));
+    assert(mimicdb::VectorSearchIvf(filtered, 0, filtered_query, 2, 10,
+                                    mimicdb::VectorMetric::kCosine,
+                                    ivf_stats.centroid_count, &ivf_all));
+    assert(exact_all.size() == ivf_all.size());
+    for (size_t i = 0; i < exact_all.size(); ++i)
+        assert(exact_all[i].row_id == ivf_all[i].row_id);
 
     const auto path = std::filesystem::temp_directory_path() / "mimicdb_vector_segment_test.bin";
     std::filesystem::remove(path);
