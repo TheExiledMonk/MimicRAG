@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include <functional>
 #include "mimicdb/predicate.h"
 
 namespace mimicdb {
@@ -39,6 +40,8 @@ bool VectorSearch(const Dataset& dataset, size_t field_index, const float* query
 VectorSearchRuntimeStats GetVectorSearchRuntimeStats();
 // Call before the first vector search; zero selects hardware concurrency.
 void ConfigureVectorSearchThreads(size_t threads);
+// Shared persistent pool for vector-index work; avoids per-query thread creation.
+void RunVectorParallel(size_t count, const std::function<void(size_t)>& function);
 
 }  // namespace mimicdb
 

@@ -595,4 +595,8 @@ void ConfigureVectorSearchThreads(size_t threads) {
     configured_cpu_threads.store(threads, std::memory_order_relaxed);
 }
 
+void RunVectorParallel(size_t count, const std::function<void(size_t)>& function) {
+    ParallelFor(count, function);
+}
+
 }  // namespace mimicdb

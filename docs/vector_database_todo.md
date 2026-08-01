@@ -40,6 +40,12 @@
 - [x] Publish immutable index snapshots so concurrent searches do not hold the build lock.
 - [x] Expose opt-in IVF and probe count through embedded C++, Python, and the wire protocol.
 - [x] Measure recall@k against exact search on random and clustered vector workloads.
+- [x] Select high-variance routing dimensions instead of fixed coordinate spacing.
+- [x] Prune impossible IVF lists with safe numeric predicate min/max bounds.
+- [x] Add adaptive default probing with explicit probe overrides.
+- [x] Add compact list-ordered int8 sketches and exact shortlist reranking for broad probes.
+- [x] Reuse the persistent vector worker pool for query-time index work.
+- [x] Parallelize full-dataset centroid assignment and expose per-stage timing counters.
 - [ ] Persist a versioned per-segment IVF sidecar and load it during recovery.
 - [ ] Rebuild changed sealed indexes in the background rather than on the first ANN query.
 - [ ] Add representative-dataset recall calibration for automatic default probe selection.

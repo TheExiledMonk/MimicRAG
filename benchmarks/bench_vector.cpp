@@ -104,8 +104,14 @@ int main(int argc, char** argv) {
               << " dimension=" << dimension << " top_k=" << top_k
               << " data_clusters=" << cluster_count
               << " centroids=" << ivf.centroid_count << " probes="
-              << (ivf_probes == 0 ? std::max<size_t>(1, ivf.centroid_count / 3) : ivf_probes)
+              << ivf.probes
               << " routing_dimensions=" << ivf.routing_dimensions
+              << " candidates=" << ivf.candidates
+              << " shortlisted=" << ivf.shortlisted
+              << " lists_pruned=" << ivf.lists_pruned
+              << " routing_seconds=" << ivf.routing_seconds
+              << " shortlist_seconds=" << ivf.shortlist_seconds
+              << " rerank_seconds=" << ivf.rerank_seconds
               << " iterations=" << iterations << " seconds="
               << ivf_timings[ivf_timings.size() / 2]
               << " min_seconds=" << ivf_timings.front()

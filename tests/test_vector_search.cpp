@@ -79,6 +79,12 @@ int main() {
         filtered, 0, mimicdb::VectorMetric::kCosine);
     std::vector<mimicdb::VectorSearchHit> exact_all;
     std::vector<mimicdb::VectorSearchHit> ivf_all;
+    assert(mimicdb::VectorSearchIvf(filtered, 0, filtered_query, 2, 1,
+                                    mimicdb::VectorMetric::kCosine, 0, &hits, predicates));
+    assert(hits.size() == 1 && hits[0].row_id == 4099);
+    const auto filtered_ivf_stats = mimicdb::GetVectorIvfStats(
+        filtered, 0, mimicdb::VectorMetric::kCosine);
+    assert(filtered_ivf_stats.lists_pruned > 0 && filtered_ivf_stats.candidates == 0);
     assert(mimicdb::VectorSearch(filtered, 0, filtered_query, 2, 10,
                                  mimicdb::VectorMetric::kCosine, &exact_all));
     assert(mimicdb::VectorSearchIvf(filtered, 0, filtered_query, 2, 10,

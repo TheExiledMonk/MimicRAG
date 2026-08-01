@@ -1,275 +1,427 @@
 #include "mimicdb/vector_ivf.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <numeric>
-#include <memory>
+#include <queue>
+#include <thread>
 #include <unordered_map>
 
 #include "mimicdb/dataset.h"
 
 namespace mimicdb {
-
 bool VectorSearchCandidates(const Dataset&, size_t, const float*, size_t, size_t,
                             VectorMetric, const std::vector<uint32_t>&,
                             std::vector<VectorSearchHit>*,
                             const std::vector<VectorSearchPredicate>&);
 
 namespace {
+using Clock = std::chrono::steady_clock;
+
 struct Key {
     const Dataset* dataset;
     size_t field;
     VectorMetric metric;
-    bool operator==(const Key& other) const {
-        return dataset == other.dataset && field == other.field && metric == other.metric;
+    bool operator==(const Key& x) const {
+        return dataset == x.dataset && field == x.field && metric == x.metric;
     }
 };
 struct KeyHash {
-    size_t operator()(const Key& key) const {
-        return std::hash<const void*>{}(key.dataset) ^ (key.field << 4) ^
-               static_cast<size_t>(key.metric);
+    size_t operator()(const Key& x) const {
+        return std::hash<const void*>{}(x.dataset) ^ (x.field << 4) ^ size_t(x.metric);
     }
 };
+struct Bounds {
+    bool numeric = false;
+    std::vector<double> minimum;
+    std::vector<double> maximum;
+};
 struct Index {
-    size_t rows = 0;
-    size_t source_rows = 0;
-    size_t segments = 0;
-    size_t dimension = 0;
-    size_t routing_dimensions = 0;
-    size_t centroids = 0;
-    std::vector<uint32_t> routing_columns;
-    std::vector<float> centers;
-    std::vector<uint32_t> offsets;
-    std::vector<uint32_t> row_ids;
+    size_t rows = 0, source_rows = 0, segments = 0, dimension = 0;
+    size_t routing_dimensions = 0, centroids = 0;
+    std::vector<uint32_t> routing_columns, offsets, row_ids;
+    std::vector<float> centers, sketch_scales;
+    std::vector<float> packed_vectors;
+    std::vector<int8_t> sketches;  // list-ordered, row-major routing projection
+    std::vector<Bounds> bounds;
     uint64_t builds = 0;
+    double build_seconds = 0.0;
 };
 
-float RoutingDistance(const float* vector, const float* center,
-                      const std::vector<uint32_t>& columns, VectorMetric metric) {
-    float dot = 0.0F, left_norm = 0.0F, right_norm = 0.0F, l2 = 0.0F;
+size_t ThreadCount() {
+    size_t result = std::max(1U, std::thread::hardware_concurrency());
+    if (const char* value = std::getenv("MIMICDB_VECTOR_CPU_THREADS")) {
+        const size_t parsed = std::strtoull(value, nullptr, 10);
+        if (parsed) result = parsed;
+    }
+    return result;
+}
+template <class F> void Parallel(size_t count, F function) {
+    if (count < 8192) { for (size_t i = 0; i < count; ++i) function(i); return; }
+    const size_t workers = std::min(count, ThreadCount());
+    if (workers < 2) { for (size_t i = 0; i < count; ++i) function(i); return; }
+    std::atomic<size_t> next{0};
+    std::vector<std::thread> threads;
+    for (size_t t = 0; t < workers; ++t) threads.emplace_back([&] {
+        for (;;) { const size_t i = next.fetch_add(1); if (i >= count) break; function(i); }
+    });
+    for (auto& thread : threads) thread.join();
+}
+
+bool Numeric(const FieldVector& field, size_t row, double* value) {
+    if (!field.IsValid(row)) return false;
+    switch (field.Type()) {
+        case FieldType::kInt32: *value = field.DataInt32()[row]; return true;
+        case FieldType::kInt64: *value = double(field.DataInt64()[row]); return true;
+        case FieldType::kFloat64: *value = field.DataFloat64()[row]; return true;
+        case FieldType::kBool: *value = field.DataBool()[row] ? 1.0 : 0.0; return true;
+        case FieldType::kDictInt32: *value = field.DictionaryValue(field.DataDictIds()[row]); return true;
+        default: return false;
+    }
+}
+
+float Distance(const float* vector, const float* center,
+               const std::vector<uint32_t>& columns, VectorMetric metric) {
+    float dot = 0, ln = 0, rn = 0, l2 = 0;
     for (size_t i = 0; i < columns.size(); ++i) {
-        const float left = vector[columns[i]], right = center[i];
-        if (metric == VectorMetric::kL2Squared) {
-            const float delta = left - right;
-            l2 += delta * delta;
-        } else {
-            dot += left * right;
-            if (metric == VectorMetric::kCosine) {
-                left_norm += left * left;
-                right_norm += right * right;
-            }
-        }
+        const float a = vector[columns[i]], b = center[i];
+        if (metric == VectorMetric::kL2Squared) { const float d = a - b; l2 += d * d; }
+        else { dot += a * b; if (metric == VectorMetric::kCosine) { ln += a*a; rn += b*b; } }
     }
     if (metric == VectorMetric::kL2Squared) return l2;
     if (metric == VectorMetric::kDot) return -dot;
-    if (left_norm <= 0.0F || right_norm <= 0.0F) return 1.0F;
-    return 1.0F - dot / std::sqrt(left_norm * right_norm);
+    return ln <= 0 || rn <= 0 ? 1.0F : 1.0F - dot / std::sqrt(ln * rn);
+}
+
+bool MayMatch(double minimum, double maximum, CompareOp op, double value) {
+    switch (op) {
+        case CompareOp::kEq: return value >= minimum && value <= maximum;
+        case CompareOp::kNe: return minimum != maximum || minimum != value;
+        case CompareOp::kLt: return minimum < value;
+        case CompareOp::kLe: return minimum <= value;
+        case CompareOp::kGt: return maximum > value;
+        case CompareOp::kGe: return maximum >= value;
+    }
+    return true;
 }
 
 class Store {
 public:
-    static Store& Instance() { static Store store; return store; }
+    static Store& Instance() { static Store value; return value; }
 
     bool Build(const Dataset& dataset, size_t field, VectorMetric metric) {
+        const auto started = Clock::now();
         if (field >= dataset.Fields().size() ||
             dataset.Fields()[field].Type() != FieldType::kVectorFloat32) return false;
-        size_t rows = 0;
-        for (const auto& segment : dataset.Segments()) rows += segment.RowCount();
-        if (rows == 0 || rows > UINT32_MAX) return false;
+        size_t source_rows = 0;
+        for (const auto& segment : dataset.Segments()) source_rows += segment.RowCount();
+        if (!source_rows || source_rows > UINT32_MAX) return false;
         const size_t dimension = dataset.VectorDimension(field);
-        Key key{&dataset, field, metric};
-        uint64_t previous_builds = 0;
+        const Key key{&dataset, field, metric};
+        uint64_t builds = 0;
         {
             std::lock_guard lock(mutex_);
             auto found = indexes_.find(key);
-            if (found != indexes_.end() && found->second->source_rows == rows &&
+            if (found != indexes_.end() && found->second->source_rows == source_rows &&
                 found->second->segments == dataset.Segments().size() &&
                 found->second->dimension == dimension) return true;
-            if (found != indexes_.end()) previous_builds = found->second->builds;
+            if (found != indexes_.end()) builds = found->second->builds;
         }
 
-        auto next = std::make_shared<Index>();
-        next->rows = rows;
-        next->source_rows = rows;
-        next->segments = dataset.Segments().size();
-        next->dimension = dimension;
-        next->routing_dimensions = std::min<size_t>(dimension, 96);
-        size_t centroid_count = std::clamp<size_t>(
-            static_cast<size_t>(std::sqrt(static_cast<double>(rows)) / 2.0), 32, 512);
-        if (const char* value = std::getenv("MIMICDB_IVF_CENTROIDS")) {
+        auto index = std::make_shared<Index>();
+        index->source_rows = source_rows; index->segments = dataset.Segments().size();
+        index->dimension = dimension; index->builds = builds + 1;
+        size_t routing_dimensions = std::min<size_t>(dimension, 96);
+        if (const char* value = std::getenv("MIMICDB_IVF_ROUTING_DIMS")) {
             const size_t parsed = std::strtoull(value, nullptr, 10);
-            if (parsed != 0) centroid_count = std::clamp<size_t>(parsed, 2, rows);
+            if (parsed) routing_dimensions = std::min(parsed, dimension);
         }
-        next->centroids = std::min(centroid_count, rows);
-        next->routing_columns.resize(next->routing_dimensions);
-        for (size_t i = 0; i < next->routing_dimensions; ++i)
-            next->routing_columns[i] = static_cast<uint32_t>(i * dimension / next->routing_dimensions);
+        index->routing_dimensions = routing_dimensions;
 
         std::vector<const float*> vectors;
-        std::vector<uint32_t> vector_row_ids;
-        vectors.reserve(rows);
-        vector_row_ids.reserve(rows);
-        uint64_t global_row = 0;
+        std::vector<uint32_t> global_ids;
+        vectors.reserve(source_rows); global_ids.reserve(source_rows);
+        uint32_t global = 0;
         for (const auto& segment : dataset.Segments()) {
             const auto& column = segment.Fields()[field];
-            for (size_t row = 0; row < segment.RowCount(); ++row) {
-                size_t stored_dimension = 0;
-                const float* value = column.VectorFloat32(row, &stored_dimension);
-                if (value && stored_dimension == dimension) {
-                    vectors.push_back(value);
-                    vector_row_ids.push_back(static_cast<uint32_t>(global_row));
-                }
-                ++global_row;
+            for (size_t row = 0; row < segment.RowCount(); ++row, ++global) {
+                size_t stored = 0; const float* vector = column.VectorFloat32(row, &stored);
+                if (vector && stored == dimension) { vectors.push_back(vector); global_ids.push_back(global); }
             }
         }
         if (vectors.empty()) return false;
-        const size_t indexed_rows = vectors.size();
-        next->centroids = std::min(next->centroids, indexed_rows);
-        next->centers.resize(next->centroids * next->routing_dimensions);
-        for (size_t center = 0; center < next->centroids; ++center) {
-            const size_t source = center * indexed_rows / next->centroids;
-            for (size_t d = 0; d < next->routing_dimensions; ++d)
-                next->centers[center * next->routing_dimensions + d] =
-                    vectors[source][next->routing_columns[d]];
+        index->rows = vectors.size();
+
+        // Select dimensions by sampled variance instead of fixed spacing.
+        const size_t variance_sample = std::min<size_t>(vectors.size(), 4096);
+        std::vector<std::pair<double, uint32_t>> variance(dimension);
+        for (size_t d = 0; d < dimension; ++d) {
+            double sum = 0, square = 0;
+            for (size_t s = 0; s < variance_sample; ++s) {
+                const double x = vectors[s * vectors.size() / variance_sample][d];
+                sum += x; square += x*x;
+            }
+            variance[d] = {square / variance_sample - std::pow(sum / variance_sample, 2), uint32_t(d)};
+        }
+        std::partial_sort(variance.begin(), variance.begin() + routing_dimensions, variance.end(),
+                          [](auto a, auto b) { return a.first > b.first; });
+        index->routing_columns.resize(routing_dimensions);
+        for (size_t d = 0; d < routing_dimensions; ++d) index->routing_columns[d] = variance[d].second;
+
+        size_t centers = std::clamp<size_t>(size_t(std::sqrt(double(vectors.size())) / 2), 32, 512);
+        if (const char* value = std::getenv("MIMICDB_IVF_CENTROIDS")) {
+            const size_t parsed = std::strtoull(value, nullptr, 10);
+            if (parsed) centers = std::clamp<size_t>(parsed, 2, vectors.size());
+        }
+        index->centroids = std::min(centers, vectors.size());
+        index->centers.resize(index->centroids * routing_dimensions);
+        // Deterministic far-apart sampling avoids adjacent/order-biased seeds.
+        const uint64_t stride = 2654435761ULL;
+        for (size_t c = 0; c < index->centroids; ++c) {
+            const float* source = vectors[(c * stride) % vectors.size()];
+            for (size_t d = 0; d < routing_dimensions; ++d)
+                index->centers[c*routing_dimensions+d] = source[index->routing_columns[d]];
         }
 
-        const size_t sample_count = std::min<size_t>(indexed_rows, 8192);
-        std::vector<uint32_t> assignments(sample_count);
-        std::vector<float> sums(next->centers.size());
-        std::vector<uint32_t> counts(next->centroids);
-        for (size_t iteration = 0; iteration < 5; ++iteration) {
-            std::fill(sums.begin(), sums.end(), 0.0F);
-            std::fill(counts.begin(), counts.end(), 0);
-            for (size_t sample = 0; sample < sample_count; ++sample) {
-                const float* vector = vectors[sample * indexed_rows / sample_count];
-                float best = std::numeric_limits<float>::infinity();
-                uint32_t best_center = 0;
-                for (size_t center = 0; center < next->centroids; ++center) {
-                    const float distance = RoutingDistance(
-                        vector, next->centers.data() + center * next->routing_dimensions,
-                        next->routing_columns, metric);
-                    if (distance < best) { best = distance; best_center = center; }
+        const size_t samples = std::min<size_t>(vectors.size(), 8192);
+        std::vector<float> sums(index->centers.size());
+        std::vector<uint32_t> counts(index->centroids);
+        for (size_t iteration = 0; iteration < 4; ++iteration) {
+            std::fill(sums.begin(), sums.end(), 0); std::fill(counts.begin(), counts.end(), 0);
+            for (size_t s = 0; s < samples; ++s) {
+                const float* vector = vectors[s * vectors.size() / samples];
+                float best = std::numeric_limits<float>::infinity(); size_t selected = 0;
+                for (size_t c = 0; c < index->centroids; ++c) {
+                    const float distance = Distance(vector, index->centers.data()+c*routing_dimensions,
+                                                    index->routing_columns, metric);
+                    if (distance < best) { best = distance; selected = c; }
                 }
-                assignments[sample] = best_center;
-                ++counts[best_center];
-                for (size_t d = 0; d < next->routing_dimensions; ++d)
-                    sums[best_center * next->routing_dimensions + d] +=
-                        vector[next->routing_columns[d]];
+                ++counts[selected];
+                for (size_t d = 0; d < routing_dimensions; ++d)
+                    sums[selected*routing_dimensions+d] += vector[index->routing_columns[d]];
             }
-            for (size_t center = 0; center < next->centroids; ++center) {
-                if (counts[center] == 0) continue;
-                for (size_t d = 0; d < next->routing_dimensions; ++d)
-                    next->centers[center * next->routing_dimensions + d] =
-                        sums[center * next->routing_dimensions + d] / counts[center];
-            }
+            for (size_t c = 0; c < index->centroids; ++c) if (counts[c])
+                for (size_t d = 0; d < routing_dimensions; ++d)
+                    index->centers[c*routing_dimensions+d] = sums[c*routing_dimensions+d] / counts[c];
         }
 
-        std::vector<uint32_t> all_assignments(indexed_rows);
-        next->offsets.assign(next->centroids + 1, 0);
-        for (size_t row = 0; row < indexed_rows; ++row) {
-            float best = std::numeric_limits<float>::infinity();
-            uint32_t best_center = 0;
-            for (size_t center = 0; center < next->centroids; ++center) {
-                const float distance = RoutingDistance(
-                    vectors[row], next->centers.data() + center * next->routing_dimensions,
-                    next->routing_columns, metric);
-                if (distance < best) { best = distance; best_center = center; }
+        std::vector<uint32_t> assignments(vectors.size());
+        index->offsets.assign(index->centroids + 1, 0);
+        Parallel(vectors.size(), [&](size_t row) {
+            float best = std::numeric_limits<float>::infinity(); uint32_t selected = 0;
+            for (uint32_t c = 0; c < index->centroids; ++c) {
+                const float distance = Distance(vectors[row], index->centers.data()+c*routing_dimensions,
+                                                index->routing_columns, metric);
+                if (distance < best) { best = distance; selected = c; }
             }
-            all_assignments[row] = best_center;
-            ++next->offsets[best_center + 1];
+            assignments[row] = selected;
+        });
+        for (uint32_t assignment : assignments) ++index->offsets[assignment+1];
+        std::partial_sum(index->offsets.begin(), index->offsets.end(), index->offsets.begin());
+        std::vector<uint32_t> positions = index->offsets;
+        index->row_ids.resize(vectors.size());
+        std::vector<const float*> ordered(vectors.size());
+        for (size_t row = 0; row < vectors.size(); ++row) {
+            const uint32_t position = positions[assignments[row]]++;
+            index->row_ids[position] = global_ids[row]; ordered[position] = vectors[row];
         }
-        std::partial_sum(next->offsets.begin(), next->offsets.end(), next->offsets.begin());
-        next->row_ids.resize(indexed_rows);
-        std::vector<uint32_t> write = next->offsets;
-        for (size_t row = 0; row < indexed_rows; ++row)
-            next->row_ids[write[all_assignments[row]]++] = vector_row_ids[row];
-        next->rows = indexed_rows;
-        next->builds = previous_builds + 1;
-        {
-            std::lock_guard lock(mutex_);
-            indexes_[key] = std::move(next);
+
+        // Per-dimension symmetric int8 sketches are list ordered for sequential shortlist scans.
+        float sketch_maximum = 0;
+        for (const float* vector : vectors) for (size_t d = 0; d < routing_dimensions; ++d)
+            sketch_maximum = std::max(sketch_maximum, std::fabs(vector[index->routing_columns[d]]));
+        index->sketch_scales.assign(routing_dimensions,
+            sketch_maximum > 0 ? 127.0F / sketch_maximum : 1.0F);
+        index->sketches.resize(vectors.size() * routing_dimensions);
+        index->packed_vectors.resize(vectors.size() * dimension);
+        Parallel(vectors.size(), [&](size_t row) {
+            std::copy_n(ordered[row], dimension, index->packed_vectors.data()+row*dimension);
+            for (size_t d = 0; d < routing_dimensions; ++d)
+                index->sketches[row*routing_dimensions+d] = int8_t(std::clamp(
+                    std::lrint(ordered[row][index->routing_columns[d]] * index->sketch_scales[d]), -127L, 127L));
+        });
+
+        // Safe list pruning bounds for every numeric predicate field.
+        index->bounds.resize(dataset.Fields().size());
+        for (size_t f = 0; f < dataset.Fields().size(); ++f) {
+            const auto type = dataset.Fields()[f].Type();
+            if (type != FieldType::kInt32 && type != FieldType::kInt64 && type != FieldType::kFloat64 &&
+                type != FieldType::kBool && type != FieldType::kDictInt32) continue;
+            auto& bound = index->bounds[f]; bound.numeric = true;
+            bound.minimum.assign(index->centroids, std::numeric_limits<double>::infinity());
+            bound.maximum.assign(index->centroids, -std::numeric_limits<double>::infinity());
         }
+        global = 0; size_t source_cursor = 0;
+        for (const auto& segment : dataset.Segments()) {
+            for (size_t row = 0; row < segment.RowCount(); ++row, ++global) {
+                if (source_cursor >= global_ids.size() || global_ids[source_cursor] != global) continue;
+                const uint32_t c = assignments[source_cursor++];
+                for (size_t f = 0; f < index->bounds.size(); ++f) if (index->bounds[f].numeric) {
+                    double value = 0; if (!Numeric(segment.Fields()[f], row, &value)) continue;
+                    index->bounds[f].minimum[c] = std::min(index->bounds[f].minimum[c], value);
+                    index->bounds[f].maximum[c] = std::max(index->bounds[f].maximum[c], value);
+                }
+            }
+        }
+        index->build_seconds = std::chrono::duration<double>(Clock::now()-started).count();
+        { std::lock_guard lock(mutex_); indexes_[key] = std::move(index); }
         return true;
     }
 
-    bool Candidates(const Dataset& dataset, size_t field, VectorMetric metric,
-                    const float* query, size_t probes, std::vector<uint32_t>* out,
-                    IvfSearchStats* stats) {
-        if (!Build(dataset, field, metric)) return false;
-        std::shared_ptr<const Index> held;
-        {
-            std::lock_guard lock(mutex_);
-            const auto found = indexes_.find({&dataset, field, metric});
-            if (found == indexes_.end()) return false;
-            held = found->second;
-        }
-        const Index& index = *held;
-        if (probes == 0) probes = std::max<size_t>(1, index.centroids / 3);
-        probes = std::min(probes, index.centroids);
-        std::vector<std::pair<float, uint32_t>> ranked(index.centroids);
-        for (uint32_t center = 0; center < index.centroids; ++center)
-            ranked[center] = {RoutingDistance(
-                query, index.centers.data() + center * index.routing_dimensions,
-                index.routing_columns, metric), center};
-        if (probes < ranked.size())
-            std::nth_element(ranked.begin(), ranked.begin() + probes, ranked.end(),
-                             [](const auto& a, const auto& b) { return a.first < b.first; });
-        size_t count = 0;
-        for (size_t i = 0; i < probes; ++i)
-            count += index.offsets[ranked[i].second + 1] - index.offsets[ranked[i].second];
-        out->clear(); out->reserve(count);
-        for (size_t i = 0; i < probes; ++i) {
-            const uint32_t center = ranked[i].second;
-            out->insert(out->end(), index.row_ids.begin() + index.offsets[center],
-                        index.row_ids.begin() + index.offsets[center + 1]);
-        }
-        if (stats) *stats = {index.rows, index.centroids, probes, out->size(),
-                             index.routing_dimensions, index.builds};
-        return true;
+    std::shared_ptr<const Index> Get(const Dataset& dataset, size_t field, VectorMetric metric) {
+        if (!Build(dataset, field, metric)) return {};
+        std::lock_guard lock(mutex_); auto found = indexes_.find({&dataset,field,metric});
+        return found == indexes_.end() ? nullptr : found->second;
     }
-
     IvfSearchStats Stats(const Dataset& dataset, size_t field, VectorMetric metric) {
-        std::lock_guard lock(mutex_);
-        const auto found = indexes_.find({&dataset, field, metric});
+        std::lock_guard lock(mutex_); auto found = indexes_.find({&dataset,field,metric});
         if (found == indexes_.end()) return {};
-        const auto& i = *found->second;
-        return {i.rows, i.centroids, 0, 0, i.routing_dimensions, i.builds};
+        IvfSearchStats result; result.indexed_rows=found->second->rows;
+        result.centroid_count=found->second->centroids; result.routing_dimensions=found->second->routing_dimensions;
+        result.builds=found->second->builds; result.build_seconds=found->second->build_seconds; return result;
     }
     void Release(const Dataset& dataset) {
         std::lock_guard lock(mutex_);
-        for (auto it = indexes_.begin(); it != indexes_.end();)
-            if (it->first.dataset == &dataset) it = indexes_.erase(it); else ++it;
+        for (auto it=indexes_.begin(); it!=indexes_.end();) it = it->first.dataset==&dataset ? indexes_.erase(it) : std::next(it);
     }
 private:
     std::mutex mutex_;
-    std::unordered_map<Key, std::shared_ptr<const Index>, KeyHash> indexes_;
+    std::unordered_map<Key,std::shared_ptr<const Index>,KeyHash> indexes_;
 };
-}  // namespace
 
-bool BuildVectorIvf(const Dataset& dataset, size_t field_index, VectorMetric metric) {
-    return Store::Instance().Build(dataset, field_index, metric);
-}
-bool VectorSearchIvf(const Dataset& dataset, size_t field_index, const float* query,
-                     size_t dimension, size_t top_k, VectorMetric metric,
-                     size_t probes, std::vector<VectorSearchHit>* out,
-                     const std::vector<VectorSearchPredicate>& predicates) {
-    std::vector<uint32_t> candidates;
-    if (!Store::Instance().Candidates(dataset, field_index, metric, query, probes,
-                                      &candidates, nullptr)) {
-        size_t sealed_rows = 0;
-        for (const auto& segment : dataset.Segments()) sealed_rows += segment.RowCount();
-        if (sealed_rows != 0) return false;
+bool ListMayMatch(const Index& index, uint32_t center,
+                  const std::vector<VectorSearchPredicate>& predicates) {
+    for (const auto& predicate : predicates) {
+        if (predicate.field_index >= index.bounds.size()) return false;
+        const auto& bound = index.bounds[predicate.field_index];
+        if (!bound.numeric || !std::isfinite(bound.minimum[center])) continue;
+        if (!MayMatch(bound.minimum[center], bound.maximum[center], predicate.op, predicate.value)) return false;
     }
-    return VectorSearchCandidates(dataset, field_index, query, dimension, top_k, metric,
-                                  candidates, out, predicates);
+    return true;
 }
-IvfSearchStats GetVectorIvfStats(const Dataset& dataset, size_t field_index,
-                                 VectorMetric metric) {
-    return Store::Instance().Stats(dataset, field_index, metric);
-}
-void ReleaseVectorIvfDataset(const Dataset& dataset) { Store::Instance().Release(dataset); }
+std::mutex last_stats_mutex;
+IvfSearchStats last_stats;
+Key last_key{};
+} // namespace
 
-}  // namespace mimicdb
+bool BuildVectorIvf(const Dataset& dataset, size_t field, VectorMetric metric) {
+    return Store::Instance().Build(dataset,field,metric);
+}
+
+bool VectorSearchIvf(const Dataset& dataset, size_t field, const float* query,
+                     size_t dimension, size_t top_k, VectorMetric metric, size_t probes,
+                     std::vector<VectorSearchHit>* out,
+                     const std::vector<VectorSearchPredicate>& predicates) {
+    const auto index = Store::Instance().Get(dataset,field,metric);
+    if (!index) {
+        size_t sealed=0; for (const auto& segment:dataset.Segments()) sealed+=segment.RowCount();
+        if (sealed) return false;
+        return VectorSearchCandidates(dataset,field,query,dimension,top_k,metric,{},out,predicates);
+    }
+    if (!query || dimension != index->dimension || !out || !top_k) return false;
+    const auto route_start=Clock::now();
+    std::vector<std::pair<float,uint32_t>> ranked;
+    ranked.reserve(index->centroids); size_t pruned=0;
+    for (uint32_t c=0;c<index->centroids;++c) {
+        if (!ListMayMatch(*index,c,predicates)) { ++pruned; continue; }
+        ranked.push_back({Distance(query,index->centers.data()+c*index->routing_dimensions,
+                                   index->routing_columns,metric),c});
+    }
+    std::sort(ranked.begin(),ranked.end());
+    if (probes==0) {
+        probes=std::max<size_t>(4,size_t(std::sqrt(double(index->centroids))));
+        // Easy queries have a pronounced routing gap and need fewer lists.
+        if (ranked.size()>4 && ranked[4].first > ranked[0].first*1.8F) probes=4;
+    }
+    probes=std::min(probes,ranked.size());
+    const double routing_seconds=std::chrono::duration<double>(Clock::now()-route_start).count();
+
+    std::vector<uint32_t> positions;
+    size_t candidates=0;
+    for(size_t p=0;p<probes;++p) candidates+=index->offsets[ranked[p].second+1]-index->offsets[ranked[p].second];
+    positions.reserve(candidates);
+    for(size_t p=0;p<probes;++p) for(uint32_t pos=index->offsets[ranked[p].second];pos<index->offsets[ranked[p].second+1];++pos) positions.push_back(pos);
+
+    const auto shortlist_start=Clock::now();
+    size_t shortlist_limit=std::max<size_t>(top_k*32,1024);
+    if (const char* value=std::getenv("MIMICDB_IVF_SHORTLIST")) { const size_t parsed=std::strtoull(value,nullptr,10); if(parsed) shortlist_limit=std::max(parsed,top_k); }
+    // Predicate paths retain all row IDs: the existing scorer intersects predicates before full vectors.
+    const size_t shortlist_crossover=std::max<size_t>(16384,shortlist_limit*4);
+    const bool use_shortlist=predicates.empty() && positions.size()>shortlist_crossover;
+    if (use_shortlist) {
+        std::vector<int16_t> quantized(index->routing_dimensions);
+        for(size_t d=0;d<index->routing_dimensions;++d) quantized[d]=int16_t(std::clamp(
+            std::lrint(query[index->routing_columns[d]]*index->sketch_scales[d]),-127L,127L));
+        std::vector<std::pair<float,uint32_t>> scores(positions.size());
+        const size_t score_workers=std::min(positions.size(),GetVectorSearchRuntimeStats().cpu_threads);
+        RunVectorParallel(score_workers,[&](size_t worker){
+            const size_t first=worker*positions.size()/score_workers;
+            const size_t last=(worker+1)*positions.size()/score_workers;
+            for(size_t i=first;i<last;++i){
+                const int8_t* sketch=index->sketches.data()+positions[i]*index->routing_dimensions;
+                int64_t dot=0, left_norm=0, right_norm=0, l2=0;
+                for(size_t d=0;d<index->routing_dimensions;++d) {
+                    const int left=quantized[d], right=sketch[d];
+                    if(metric==VectorMetric::kL2Squared){ const int delta=left-right; l2+=delta*delta; }
+                    else { dot+=left*right; if(metric==VectorMetric::kCosine){left_norm+=left*left;right_norm+=right*right;} }
+                }
+                float score=metric==VectorMetric::kL2Squared?float(l2):float(-dot);
+                if(metric==VectorMetric::kCosine) score=left_norm<=0||right_norm<=0?1.0F:
+                    1.0F-float(dot)/std::sqrt(float(left_norm)*float(right_norm));
+                scores[i]={score,positions[i]};
+            }
+        });
+        std::nth_element(scores.begin(),scores.begin()+shortlist_limit,scores.end());
+        positions.resize(shortlist_limit);
+        for(size_t i=0;i<shortlist_limit;++i) positions[i]=scores[i].second;
+    }
+    std::vector<uint32_t> rows; rows.reserve(positions.size());
+    for(uint32_t position:positions) rows.push_back(index->row_ids[position]);
+    const double shortlist_seconds=std::chrono::duration<double>(Clock::now()-shortlist_start).count();
+    const auto rerank_start=Clock::now();
+    bool ok=false;
+    if(use_shortlist) {
+        struct Worse { bool operator()(const VectorSearchHit& a,const VectorSearchHit& b) const {
+            return a.distance!=b.distance?a.distance<b.distance:a.row_id<b.row_id; } };
+        std::priority_queue<VectorSearchHit,std::vector<VectorSearchHit>,Worse> heap;
+        for(uint32_t position:positions) {
+            const VectorSearchHit hit{index->row_ids[position],VectorDistance(
+                index->packed_vectors.data()+size_t(position)*dimension,query,dimension,metric)};
+            if(heap.size()<top_k) heap.push(hit);
+            else if(hit.distance<heap.top().distance || (hit.distance==heap.top().distance&&hit.row_id<heap.top().row_id)) { heap.pop();heap.push(hit); }
+        }
+        std::vector<VectorSearchHit> active;
+        ok=VectorSearchCandidates(dataset,field,query,dimension,top_k,metric,{},&active,{});
+        for(const auto& hit:active) {
+            if(heap.size()<top_k) heap.push(hit);
+            else if(hit.distance<heap.top().distance || (hit.distance==heap.top().distance&&hit.row_id<heap.top().row_id)) { heap.pop();heap.push(hit); }
+        }
+        out->resize(heap.size()); for(size_t i=heap.size();i>0;--i){(*out)[i-1]=heap.top();heap.pop();}
+        std::sort(out->begin(),out->end(),[](auto a,auto b){return a.distance!=b.distance?a.distance<b.distance:a.row_id<b.row_id;});
+    } else ok=VectorSearchCandidates(dataset,field,query,dimension,top_k,metric,rows,out,predicates);
+    const double rerank_seconds=std::chrono::duration<double>(Clock::now()-rerank_start).count();
+    {
+        std::lock_guard lock(last_stats_mutex);
+        last_stats={}; last_stats.indexed_rows=index->rows; last_stats.centroid_count=index->centroids;
+        last_stats.probes=probes; last_stats.candidates=candidates; last_stats.routing_dimensions=index->routing_dimensions;
+        last_stats.builds=index->builds; last_stats.shortlisted=rows.size(); last_stats.lists_pruned=pruned;
+        last_stats.routing_seconds=routing_seconds; last_stats.shortlist_seconds=shortlist_seconds;
+        last_stats.rerank_seconds=rerank_seconds; last_stats.build_seconds=index->build_seconds;
+        last_key={&dataset,field,metric};
+    }
+    return ok;
+}
+
+IvfSearchStats GetVectorIvfStats(const Dataset& dataset,size_t field,VectorMetric metric) {
+    std::lock_guard lock(last_stats_mutex);
+    if(last_key==Key{&dataset,field,metric}) return last_stats;
+    return Store::Instance().Stats(dataset,field,metric);
+}
+void ReleaseVectorIvfDataset(const Dataset& dataset){ Store::Instance().Release(dataset); }
+} // namespace mimicdb
