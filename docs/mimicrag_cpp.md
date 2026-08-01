@@ -37,6 +37,10 @@ Copy its `local_embedding` object into `mimicrag.json`, then run:
 ./build/rag_cpp/mimicrag_server mimicrag.json
 ```
 
+Set `embedding.provider` to `local` when the local model is primary. This bypasses
+remote probing entirely; other provider values retain automatic remote-to-local
+failover.
+
 ## Failover safety
 
 Remote and local embeddings live in independent native vector spaces. With

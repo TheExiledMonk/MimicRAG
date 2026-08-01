@@ -17,6 +17,7 @@
 #include <unordered_map>
 
 #include "mimicdb/dataset.h"
+#include "mimicdb/compression.h"
 
 namespace mimicdb {
 bool VectorSearchCandidates(const Dataset&, size_t, const float*, size_t, size_t,
@@ -84,16 +85,9 @@ template <class F> void Parallel(size_t count, F function) {
     for (auto& thread : threads) thread.join();
 }
 
-bool Numeric(const FieldVector& field, size_t row, double* value) {
-    if (!field.IsValid(row)) return false;
-    switch (field.Type()) {
-        case FieldType::kInt32: *value = field.DataInt32()[row]; return true;
-        case FieldType::kInt64: *value = double(field.DataInt64()[row]); return true;
-        case FieldType::kFloat64: *value = field.DataFloat64()[row]; return true;
-        case FieldType::kBool: *value = field.DataBool()[row] ? 1.0 : 0.0; return true;
-        case FieldType::kDictInt32: *value = field.DictionaryValue(field.DataDictIds()[row]); return true;
-        default: return false;
-    }
+bool Numeric(const Segment& segment, size_t field, size_t row, double* value) {
+    if (field >= segment.CompressedColumns().size()) return false;
+    return ReadNumericValue(segment.CompressedColumns()[field], row, value);
 }
 
 float Distance(const float* vector, const float* center,
@@ -281,7 +275,7 @@ public:
                 if (source_cursor >= global_ids.size() || global_ids[source_cursor] != global) continue;
                 const uint32_t c = assignments[source_cursor++];
                 for (size_t f = 0; f < index->bounds.size(); ++f) if (index->bounds[f].numeric) {
-                    double value = 0; if (!Numeric(segment.Fields()[f], row, &value)) continue;
+                    double value = 0; if (!Numeric(segment, f, row, &value)) continue;
                     index->bounds[f].minimum[c] = std::min(index->bounds[f].minimum[c], value);
                     index->bounds[f].maximum[c] = std::max(index->bounds[f].maximum[c], value);
                 }

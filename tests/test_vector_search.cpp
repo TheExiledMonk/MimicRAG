@@ -139,6 +139,24 @@ int main() {
         assert(exact_all[i].row_id == ivf_all[i].row_id);
     unsetenv("MIMICDB_IVF_MAX_ASSIGNMENT_DISTANCE");
 
+    // IVF predicate bounds must read sealed constant columns through their compressed
+    // views: raw storage is intentionally released after segment compression.
+    mimicdb::Dataset compressed_predicates("compressed_predicates");
+    compressed_predicates.AddField(mimicdb::FieldVector("embedding", mimicdb::FieldType::kVectorFloat32));
+    compressed_predicates.AddField(mimicdb::FieldVector("tenant", mimicdb::FieldType::kInt64));
+    for (size_t row = 0; row < 4096; ++row) {
+        assert(compressed_predicates.Append({
+            mimicdb::FieldValue::VectorFloat32({1.0F, static_cast<float>(row % 7) / 7.0F}),
+            mimicdb::FieldValue::Int64(42)}));
+    }
+    assert(mimicdb::BuildVectorIvf(compressed_predicates, 0, mimicdb::VectorMetric::kCosine));
+    const std::vector<mimicdb::VectorSearchPredicate> compressed_filter = {
+        {1, mimicdb::CompareOp::kEq, 42.0}};
+    assert(mimicdb::VectorSearchIvf(compressed_predicates, 0, filtered_query, 2, 5,
+                                    mimicdb::VectorMetric::kCosine, 0, &hits,
+                                    compressed_filter));
+    assert(!hits.empty());
+
     const auto path = std::filesystem::temp_directory_path() / "mimicdb_vector_segment_test.bin";
     std::filesystem::remove(path);
     assert(mimicdb::SegmentWriter(path.string()).Write(filtered.Segments()[0]));

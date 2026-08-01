@@ -271,7 +271,9 @@ json RagEngine::Ingest(const json& request) {
     bool remote_indexed = false, local_indexed = false;
     std::vector<std::string> texts; for (const auto& chunk : created) texts.push_back(chunk.text);
     std::vector<std::vector<float>> remote_vectors, local_vectors;
-    if (request.value("remote_model_identity", "") == impl_->remote.identity && request.contains("remote_embeddings")) {
+    if (config_.embedding.provider == "local") {
+        impl_->remote_healthy = false;
+    } else if (request.value("remote_model_identity", "") == impl_->remote.identity && request.contains("remote_embeddings")) {
         remote_vectors = request.at("remote_embeddings").get<std::vector<std::vector<float>>>();
         remote_indexed = remote_vectors.size() == created.size();
     } else try { remote_vectors = impl_->remote_embedding.Embed(texts); remote_indexed = remote_vectors.size() == created.size(); impl_->remote_healthy = true; } catch (const std::exception&) { impl_->remote_healthy = false; }
@@ -311,7 +313,7 @@ json RagEngine::Retrieve(const json& request) {
     const std::string query = request.at("query"); if (query.size() > config_.server.max_query_chars) throw std::runtime_error("query too large");
     const std::string tenant = request.value("tenant_id", "default"), scope = request.value("access_scope", "public"); const size_t top_k = request.value("top_k", config_.server.top_k);
     std::string backend = "bm25"; bool use_local = false; std::vector<float> query_embedding;
-    try { query_embedding = impl_->remote_embedding.Embed({query}, true).at(0); impl_->remote_healthy = true; backend = "remote"; }
+    try { if (config_.embedding.provider == "local") throw std::runtime_error("local-only embedding mode"); query_embedding = impl_->remote_embedding.Embed({query}, true).at(0); impl_->remote_healthy = true; backend = "remote"; }
     catch (const std::exception&) {
         impl_->remote_healthy = false;
         if (impl_->local.Available()) {

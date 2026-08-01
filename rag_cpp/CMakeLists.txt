@@ -64,6 +64,17 @@ if(MIMICRAG_ENABLE_LLAMA)
 endif()
 target_compile_options(mimicrag_server PRIVATE -Wall -Wextra -Wpedantic)
 
+if(MIMICDB_BUILD_BENCHMARKS AND MIMICRAG_ENABLE_LLAMA)
+    add_executable(mimicrag_benchmark
+        ${PROJECT_SOURCE_DIR}/benchmarks/rag_cpp_benchmark.cpp
+        src/config.cpp src/provider.cpp src/local_embeddings.cpp src/rag_engine.cpp)
+    target_include_directories(mimicrag_benchmark PRIVATE include)
+    target_compile_definitions(mimicrag_benchmark PRIVATE MIMICRAG_HAVE_LLAMA=1)
+    target_link_libraries(mimicrag_benchmark PRIVATE
+        mimicdb_engine mimicdb_build_flags CURL::libcurl nlohmann_json::nlohmann_json Threads::Threads llama)
+    target_compile_options(mimicrag_benchmark PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 if(MIMICDB_BUILD_TESTS)
     add_test(NAME mimicrag_cpp_smoke
         COMMAND ${PROJECT_SOURCE_DIR}/scripts/mimicrag_cpp_smoke_test.sh
