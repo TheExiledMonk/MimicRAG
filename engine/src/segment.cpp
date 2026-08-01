@@ -561,7 +561,8 @@ void Segment::ComputeStats(bool build_compression) {
             }
             case FieldType::kString:
             case FieldType::kBytes:
-            case FieldType::kArray: {
+            case FieldType::kArray:
+            case FieldType::kVectorFloat32: {
                 for (size_t i = 0; i < count; ++i) {
                     if (!field.IsValid(i)) {
                         ++stats.null_count;
@@ -650,6 +651,7 @@ void Segment::BuildCompressionViews() {
                 case FieldType::kString:
                 case FieldType::kBytes:
                 case FieldType::kArray:
+                case FieldType::kVectorFloat32:
                     return field.BytesSize();
                 case FieldType::kObject:
                     return static_cast<size_t>(0);
@@ -658,7 +660,8 @@ void Segment::BuildCompressionViews() {
         }();
         const size_t raw_aux_bytes = (type == FieldType::kString ||
                                       type == FieldType::kBytes ||
-                                      type == FieldType::kArray)
+                                      type == FieldType::kArray ||
+                                      type == FieldType::kVectorFloat32)
             ? field.Size() * sizeof(uint32_t)
             : 0;
 
@@ -768,7 +771,8 @@ void Segment::BuildCompressionViews() {
             }
             case FieldType::kString:
             case FieldType::kBytes:
-            case FieldType::kArray: {
+            case FieldType::kArray:
+            case FieldType::kVectorFloat32: {
                 const size_t aux_bytes = field.Size() * sizeof(uint32_t);
                 if (kind == ColumnCompressionKind::kLz4) {
                     EncodeLz4Literal(reinterpret_cast<const uint8_t*>(field.DataLengths()),

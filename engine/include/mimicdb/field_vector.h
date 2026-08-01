@@ -29,6 +29,7 @@ public:
     bool AppendDictInt32(int32_t value);
     bool AppendString(const std::string& value);
     bool AppendBytes(const std::string& value);
+    bool AppendVectorFloat32(const float* values, size_t dimension);
     bool AppendNull();
     bool AppendBatchInt32(const int32_t* values, size_t count, const uint8_t* validity);
     bool AppendBatchInt64(const int64_t* values, size_t count, const uint8_t* validity);
@@ -54,6 +55,7 @@ public:
     const uint8_t* DataBytes() const;
     const uint32_t* DataLengths() const;
     size_t BytesSize() const;
+    const float* VectorFloat32(size_t index, size_t* dimension) const;
     const uint32_t* DataOffsets() const;
 
     int32_t* MutableInt32();

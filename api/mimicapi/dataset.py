@@ -18,6 +18,7 @@ _FIELD_TYPES: dict[str, type] = {
     "bool": bool,
     "string": str,
     "bytes": bytes,
+    "vector_float32": list,
 }
 _LOCK_MODES = {"append-only", "update-only", "full-crud"}
 
@@ -215,6 +216,16 @@ class Dataset:
         if kwargs:
             query = query._with_predicates(kwargs)
         return query.execute(debug=debug)
+
+    def vector_search(self, field: str, query: list[float], top_k: int = 10,
+                      metric: str = "cosine") -> list[dict[str, int | float]]:
+        if field not in self._fields or self._fields[field] != "vector_float32":
+            raise ValueError(f"field '{field}' is not vector_float32")
+        if self._net is None:
+            raise RuntimeError("vector_search currently requires the network backend")
+        field_index = list(self._fields).index(field)
+        return self._net.vector_search(self._name, field_index, query, top_k=top_k,
+                                       metric=metric, database=self._database)
 
     def _row_count(self) -> int:
         if self._cpp is not None:

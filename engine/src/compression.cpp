@@ -255,6 +255,7 @@ bool ReadInt64ValueInternal(const CompressedColumnView& column, size_t index, in
         case FieldType::kBytes:
         case FieldType::kArray:
         case FieldType::kObject:
+        case FieldType::kVectorFloat32:
             return false;
     }
     return false;
@@ -691,8 +692,10 @@ ColumnCompressionKind ChooseCompression(const SegmentColumnStats& stats, FieldTy
         case FieldType::kString:
         case FieldType::kBytes:
         case FieldType::kArray:
-        case FieldType::kObject:
             return ColumnCompressionKind::kLz4;
+        case FieldType::kObject:
+        case FieldType::kVectorFloat32:
+            return ColumnCompressionKind::kNone;
         case FieldType::kInt32:
         case FieldType::kInt64:
         case FieldType::kBool:
@@ -779,6 +782,7 @@ CompressedColumnView MakeUncompressedView(const FieldVector& field) {
         case FieldType::kString:
         case FieldType::kBytes:
         case FieldType::kArray:
+        case FieldType::kVectorFloat32:
             view.aux = reinterpret_cast<const uint8_t*>(field.DataLengths());
             view.aux_size = field.Size() * sizeof(uint32_t);
             view.data = reinterpret_cast<const uint8_t*>(field.DataBytes());

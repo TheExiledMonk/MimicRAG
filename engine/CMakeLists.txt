@@ -22,6 +22,7 @@ add_library(mimicdb_engine
     src/dictionary.cpp
     src/output_compaction.cpp
     src/simd_output.cpp
+    src/vector_search.cpp
 )
 
 target_include_directories(mimicdb_engine PUBLIC

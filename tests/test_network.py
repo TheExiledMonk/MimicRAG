@@ -96,6 +96,13 @@ class TestNetwork(unittest.TestCase):
                 )
                 self.assertEqual(pred_result["count"], 2)
                 self.assertEqual(pred_result["sum"], 400.0)
+                client.create_dataset("vectors", [("embedding", "vector_float32")])
+                client.append_batch(
+                    "vectors", [("embedding", "vector_float32")],
+                    {"embedding": [[1.0, 0.0], [0.0, 1.0], [0.9, 0.1]]},
+                )
+                vector_hits = client.vector_search("vectors", 0, [1.0, 0.0], top_k=2)
+                self.assertEqual([hit["row_id"] for hit in vector_hits], [0, 2])
                 client.close()
             finally:
                 proc.terminate()

@@ -31,6 +31,7 @@ OP_DROP_DATABASE = 9
 OP_DROP_DATASET = 10
 OP_HOST_KEY = 11
 OP_HOST_KEY_ROTATE = 12
+OP_VECTOR_SEARCH = 13
 OP_AUTH_INIT_ROOT = 100
 OP_AUTH_KEY_ADD = 101
 OP_AUTH_KEY_DISABLE = 102
@@ -63,6 +64,7 @@ FIELD_TYPES = {
     "dict_int32": 4,
     "string": 5,
     "bytes": 6,
+    "vector_float32": 9,
 }
 
 TYPE_SIZES = {
@@ -456,7 +458,7 @@ class MimicDBClient:
         for field_index, (name, field_type) in enumerate(fields):
             values = list(columns[name])
             type_id = FIELD_TYPES[field_type]
-            if field_type in ("string", "bytes"):
+            if field_type in ("string", "bytes", "vector_float32"):
                 validity_mode, validity_bytes, lengths, data = _pack_varlen(values, field_type)
                 packed = lengths + data
                 payload += struct.pack("<H", field_index)
@@ -525,6 +527,34 @@ class MimicDBClient:
             "segments": segment_count,
             "rows": row_count,
         }
+
+    def vector_search(
+        self, dataset: str, field_index: int, query: Iterable[float], top_k: int = 10,
+        metric: str = "cosine", database: str | None = None,
+    ) -> list[dict[str, int | float]]:
+        metrics = {"cosine": 0, "dot": 1, "l2": 2, "l2_squared": 2}
+        if metric not in metrics:
+            raise ValueError("metric must be cosine, dot, or l2")
+        values = [float(value) for value in query]
+        if not values or top_k <= 0:
+            raise ValueError("query must be non-empty and top_k must be positive")
+        db_name = self._default_db if database is None else database
+        payload = bytearray()
+        payload += struct.pack("<H", len(db_name)) + db_name.encode("utf-8")
+        payload += struct.pack("<H", len(dataset)) + dataset.encode("utf-8")
+        payload += struct.pack("<HBII", field_index, metrics[metric], len(values), top_k)
+        payload += struct.pack(f"<{len(values)}f", *values)
+        response = self._request(OP_VECTOR_SEARCH, bytes(payload))
+        if len(response) < 4:
+            raise ProtocolError("short vector search response")
+        count = struct.unpack_from("<I", response, 0)[0]
+        if len(response) != 4 + count * 12:
+            raise ProtocolError("invalid vector search response")
+        return [
+            {"row_id": struct.unpack_from("<Q", response, 4 + i * 12)[0],
+             "distance": struct.unpack_from("<f", response, 12 + i * 12)[0]}
+            for i in range(count)
+        ]
 
     def scan(
         self,
@@ -944,6 +974,14 @@ def _pack_varlen(values: list, field_type: str) -> tuple[int, bytes, bytes, byte
                 raise ValueError("bytes field requires bytes values")
             lengths += struct.pack("<I", len(value))
             data += bytes(value)
+        elif field_type == "vector_float32":
+            try:
+                vector = [float(item) for item in value]
+            except (TypeError, ValueError) as exc:
+                raise ValueError("vector_float32 field requires a numeric sequence") from exc
+            encoded = struct.pack(f"<{len(vector)}f", *vector)
+            lengths += struct.pack("<I", len(encoded))
+            data += encoded
         else:
             raise ValueError(f"unsupported field type {field_type}")
     if all(validity):

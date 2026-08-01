@@ -106,6 +106,11 @@ target_compile_options(mimicdb_test_compression PRIVATE -Wall -Wextra -Wpedantic
 
 add_test(NAME mimicdb_test_compression COMMAND mimicdb_test_compression)
 
+add_executable(mimicdb_test_vector_search test_vector_search.cpp)
+target_link_libraries(mimicdb_test_vector_search PRIVATE mimicdb_engine)
+target_compile_features(mimicdb_test_vector_search PRIVATE cxx_std_20)
+add_test(NAME mimicdb_test_vector_search COMMAND mimicdb_test_vector_search)
+
 add_test(NAME mimiccli_smoke_test COMMAND bash scripts/mimiccli_smoke_test.sh)
 
 set(TEST_WORKDIR ${CMAKE_SOURCE_DIR})

@@ -41,6 +41,7 @@
 #include "mimicdb/predicate.h"
 #include "mimicdb/scan.h"
 #include "mimicdb/types.h"
+#include "mimicdb/vector_search.h"
 
 bool IsLocalBind(const std::string& host);
 bool IsRootInitialized(const std::string& auth_db_path);
@@ -79,6 +80,7 @@ enum class OpCode : uint16_t {
     kDropDataset = 10,
     kHostKey = 11,
     kHostKeyRotate = 12,
+    kVectorSearch = 13,
     kAuthInitRoot = 100,
     kAuthKeyAdd = 101,
     kAuthKeyDisable = 102,
@@ -869,6 +871,7 @@ size_t TypeSize(FieldType type) {
             return 0;
         case FieldType::kArray:
         case FieldType::kObject:
+        case FieldType::kVectorFloat32:
             return 0;
     }
     return 0;
@@ -898,6 +901,8 @@ uint8_t EncodeFieldType(FieldType type) {
             return 7;
         case FieldType::kObject:
             return 8;
+        case FieldType::kVectorFloat32:
+            return 9;
     }
     return 0;
 }
@@ -2070,6 +2075,9 @@ private:
             case OpCode::kQueryAgg:
                 HandleQueryAgg(client, header, payload);
                 return;
+            case OpCode::kVectorSearch:
+                HandleVectorSearch(client, header, payload);
+                return;
             case OpCode::kScan:
                 HandleScan(client, header, payload);
                 return;
@@ -2367,12 +2375,14 @@ private:
                 required.push_back({"dataset.write", dataset_scope(db_name, dataset_name)});
                 break;
             case OpCode::kQueryAgg:
+            case OpCode::kVectorSearch:
                 if (!ReadName(payload, &cursor, &db_name) ||
                     !ReadName(payload, &cursor, &dataset_name)) {
                     SendStatus(client, header, Status::kBadRequest, {});
                     return false;
                 }
-                required.push_back({"query.aggregate", dataset_scope(db_name, dataset_name)});
+                required.push_back({opcode == OpCode::kVectorSearch ? "query.vector" : "query.aggregate",
+                                    dataset_scope(db_name, dataset_name)});
                 required.push_back({"dataset.read", dataset_scope(db_name, dataset_name)});
                 break;
             case OpCode::kScan:
@@ -2601,7 +2611,8 @@ private:
             }
             const FieldType type = DecodeFieldType(field_type);
             size_t data_bytes = 0;
-            if (type == FieldType::kString || type == FieldType::kBytes) {
+            if (type == FieldType::kString || type == FieldType::kBytes ||
+                type == FieldType::kVectorFloat32) {
                 uint32_t bytes_size = 0;
                 if (!ReadScalar(payload, &cursor, &bytes_size)) {
                     SendStatus(client, header, Status::kBadRequest, {});
@@ -2847,6 +2858,50 @@ private:
         std::memcpy(out.data() + out_cursor, &rows_scanned, sizeof(uint64_t));
 
         SendStatus(client, header, Status::kOk, out);
+    }
+
+    void HandleVectorSearch(int client, const MessageHeader& header,
+                            const std::vector<uint8_t>& payload) {
+        size_t cursor = 0;
+        std::string db_name;
+        std::string name;
+        uint16_t field_index = 0;
+        uint8_t metric_id = 0;
+        uint32_t dimension = 0;
+        uint32_t top_k = 0;
+        if (!ReadName(payload, &cursor, &db_name) || !ReadName(payload, &cursor, &name) ||
+            !ReadScalar(payload, &cursor, &field_index) ||
+            !ReadScalar(payload, &cursor, &metric_id) ||
+            !ReadScalar(payload, &cursor, &dimension) || !ReadScalar(payload, &cursor, &top_k) ||
+            dimension == 0 || top_k == 0 || metric_id > 2 ||
+            dimension > (payload.size() - cursor) / sizeof(float) ||
+            cursor + static_cast<size_t>(dimension) * sizeof(float) != payload.size()) {
+            SendStatus(client, header, Status::kBadRequest, {});
+            return;
+        }
+        auto db_it = databases_.find(db_name);
+        if (db_it == databases_.end()) { SendStatus(client, header, Status::kNotFound, {}); return; }
+        auto it = db_it->second.datasets.find(name);
+        if (it == db_it->second.datasets.end()) { SendStatus(client, header, Status::kNotFound, {}); return; }
+        std::vector<float> query(dimension);
+        std::memcpy(query.data(), payload.data() + cursor, query.size() * sizeof(float));
+        std::vector<VectorSearchHit> hits;
+        if (!VectorSearch(*it->second.dataset, field_index, query.data(), query.size(), top_k,
+                          static_cast<VectorMetric>(metric_id), &hits)) {
+            SendStatus(client, header, Status::kBadRequest, {});
+            return;
+        }
+        std::vector<uint8_t> response(sizeof(uint32_t) + hits.size() * 12);
+        const uint32_t count = static_cast<uint32_t>(hits.size());
+        std::memcpy(response.data(), &count, sizeof(count));
+        size_t out_cursor = sizeof(count);
+        for (const auto& hit : hits) {
+            std::memcpy(response.data() + out_cursor, &hit.row_id, sizeof(hit.row_id));
+            out_cursor += sizeof(hit.row_id);
+            std::memcpy(response.data() + out_cursor, &hit.distance, sizeof(hit.distance));
+            out_cursor += sizeof(hit.distance);
+        }
+        SendStatus(client, header, Status::kOk, response);
     }
 
     void HandleScan(int client, const MessageHeader& header,

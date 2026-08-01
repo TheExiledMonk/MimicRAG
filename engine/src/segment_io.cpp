@@ -108,6 +108,7 @@ bool SegmentWriter::Write(const Segment& segment) {
                 case FieldType::kString:
                 case FieldType::kBytes:
                 case FieldType::kArray:
+                case FieldType::kVectorFloat32:
                     col.aux_bytes = field.Size() * sizeof(uint32_t);
                     col.data_bytes = field.BytesSize();
                     break;
@@ -172,6 +173,7 @@ bool SegmentWriter::Write(const Segment& segment) {
                 case FieldType::kString:
                 case FieldType::kBytes:
                 case FieldType::kArray:
+                case FieldType::kVectorFloat32:
                     out.write(reinterpret_cast<const char*>(field.DataLengths()), columns[i].aux_bytes);
                     out.write(reinterpret_cast<const char*>(field.DataBytes()), columns[i].data_bytes);
                     break;
@@ -315,7 +317,8 @@ bool SegmentReader::Read(Segment* out_segment) {
         FieldVector field("col" + std::to_string(i), static_cast<FieldType>(col.type));
         const auto field_type = static_cast<FieldType>(col.type);
         const bool is_varlen = field_type == FieldType::kString ||
-            field_type == FieldType::kBytes || field_type == FieldType::kArray;
+            field_type == FieldType::kBytes || field_type == FieldType::kArray ||
+            field_type == FieldType::kVectorFloat32;
         if (!is_varlen) {
             field.Resize(static_cast<size_t>(col.value_count));
         }
@@ -346,7 +349,8 @@ bool SegmentReader::Read(Segment* out_segment) {
                     break;
                 case FieldType::kString:
                 case FieldType::kBytes:
-                case FieldType::kArray: {
+                case FieldType::kArray:
+                case FieldType::kVectorFloat32: {
                     const size_t length_bytes = static_cast<size_t>(col.aux_bytes);
                     if (offset + length_bytes + col.data_bytes > mapped_size) {
 #if defined(__unix__) || defined(__APPLE__)

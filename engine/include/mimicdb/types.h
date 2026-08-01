@@ -15,6 +15,7 @@ enum class FieldType : uint8_t {
     kBytes,
     kArray,
     kObject,
+    kVectorFloat32,
 };
 
 }  // namespace mimicdb

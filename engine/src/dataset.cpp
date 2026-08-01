@@ -108,6 +108,13 @@ FieldValue FieldValue::Object(const std::unordered_map<std::string, FieldValue>&
     return out;
 }
 
+FieldValue FieldValue::VectorFloat32(const std::vector<float>& value) {
+    FieldValue out;
+    out.type = FieldType::kVectorFloat32;
+    out.vector_f32 = value;
+    return out;
+}
+
 FieldValue FieldValue::Null(FieldType type) {
     FieldValue out;
     out.type = type;
@@ -164,6 +171,9 @@ bool Dataset::Append(const std::vector<FieldValue>& values) {
                 }
                 case FieldType::kObject:
                     ok = false;
+                    break;
+                case FieldType::kVectorFloat32:
+                    ok = field.AppendVectorFloat32(value.vector_f32.data(), value.vector_f32.size());
                     break;
             }
         }
@@ -244,7 +254,8 @@ bool Dataset::AppendBatch(const std::vector<FieldBatch>& batches) {
                     break;
                 case FieldType::kString:
                 case FieldType::kBytes:
-                case FieldType::kArray: {
+                case FieldType::kArray:
+                case FieldType::kVectorFloat32: {
                     if (!batch.lengths || !batch.bytes) {
                         return false;
                     }

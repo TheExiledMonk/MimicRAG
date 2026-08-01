@@ -94,21 +94,21 @@ int32_t FieldVector::DictionaryValue(uint32_t id) const {
 
 const uint8_t* FieldVector::DataBytes() const {
     return (type_ == FieldType::kString || type_ == FieldType::kBytes ||
-            type_ == FieldType::kArray)
+            type_ == FieldType::kArray || type_ == FieldType::kVectorFloat32)
                ? data_bytes_.data()
                : nullptr;
 }
 
 const uint32_t* FieldVector::DataLengths() const {
     return (type_ == FieldType::kString || type_ == FieldType::kBytes ||
-            type_ == FieldType::kArray)
+            type_ == FieldType::kArray || type_ == FieldType::kVectorFloat32)
                ? data_lengths_.data()
                : nullptr;
 }
 
 const uint32_t* FieldVector::DataOffsets() const {
     if (type_ != FieldType::kString && type_ != FieldType::kBytes &&
-        type_ != FieldType::kArray) {
+        type_ != FieldType::kArray && type_ != FieldType::kVectorFloat32) {
         return nullptr;
     }
     if (offsets_valid_) {
@@ -127,7 +127,7 @@ const uint32_t* FieldVector::DataOffsets() const {
 
 size_t FieldVector::BytesSize() const {
     return (type_ == FieldType::kString || type_ == FieldType::kBytes ||
-            type_ == FieldType::kArray)
+            type_ == FieldType::kArray || type_ == FieldType::kVectorFloat32)
                ? data_bytes_.size()
                : 0;
 }
@@ -161,7 +161,7 @@ bool FieldVector::LoadValidityWords(const uint64_t* words, size_t word_count,
 bool FieldVector::LoadVarlen(const uint32_t* lengths, size_t count, const uint8_t* bytes,
                              size_t bytes_size) {
     if (type_ != FieldType::kString && type_ != FieldType::kBytes &&
-        type_ != FieldType::kArray) {
+        type_ != FieldType::kArray && type_ != FieldType::kVectorFloat32) {
         return false;
     }
     data_lengths_.resize(count, 0);
@@ -259,7 +259,8 @@ bool FieldVector::AppendString(const std::string& value) {
 }
 
 bool FieldVector::AppendBytes(const std::string& value) {
-    if (type_ != FieldType::kBytes && type_ != FieldType::kArray) {
+    if (type_ != FieldType::kBytes && type_ != FieldType::kArray &&
+        type_ != FieldType::kVectorFloat32) {
         return false;
     }
     data_lengths_.push_back(static_cast<uint32_t>(value.size()));
@@ -275,6 +276,22 @@ bool FieldVector::AppendBytes(const std::string& value) {
     return true;
 }
 
+bool FieldVector::AppendVectorFloat32(const float* values, size_t dimension) {
+    if (type_ != FieldType::kVectorFloat32 || (!values && dimension != 0) ||
+        dimension > UINT32_MAX / sizeof(float)) return false;
+    return AppendBytes(std::string(reinterpret_cast<const char*>(values),
+                                   dimension * sizeof(float)));
+}
+
+const float* FieldVector::VectorFloat32(size_t index, size_t* dimension) const {
+    if (dimension) *dimension = 0;
+    if (type_ != FieldType::kVectorFloat32 || index >= size_ || !IsValid(index)) return nullptr;
+    const auto* offsets = DataOffsets();
+    if (!offsets || data_lengths_[index] % sizeof(float) != 0) return nullptr;
+    if (dimension) *dimension = data_lengths_[index] / sizeof(float);
+    return reinterpret_cast<const float*>(data_bytes_.data() + offsets[index]);
+}
+
 bool FieldVector::AppendNull() {
     if (!ResizeStorage(size_ + 1)) {
         return false;
@@ -288,7 +305,7 @@ bool FieldVector::AppendNull() {
     validity_.Resize(size_ + 1);
     validity_.Set(size_, false);
     if (type_ == FieldType::kString || type_ == FieldType::kBytes ||
-        type_ == FieldType::kArray) {
+        type_ == FieldType::kArray || type_ == FieldType::kVectorFloat32) {
         if (data_lengths_.size() == size_ + 1) {
             data_lengths_[size_] = 0;
         } else {
@@ -320,6 +337,7 @@ void FieldVector::Reserve(size_t size) {
         case FieldType::kString:
         case FieldType::kBytes:
         case FieldType::kArray:
+        case FieldType::kVectorFloat32:
             data_lengths_.reserve(size);
             break;
         case FieldType::kObject:
@@ -487,7 +505,8 @@ bool FieldVector::AppendBatchString(const uint32_t* lengths, const uint8_t* byte
 
 bool FieldVector::AppendBatchBytes(const uint32_t* lengths, const uint8_t* bytes,
                                    size_t count, const uint8_t* validity) {
-    if (type_ != FieldType::kBytes && type_ != FieldType::kArray) {
+    if (type_ != FieldType::kBytes && type_ != FieldType::kArray &&
+        type_ != FieldType::kVectorFloat32) {
         return false;
     }
     if (count == 0) {
@@ -535,6 +554,7 @@ bool FieldVector::ResizeStorage(size_t size) {
         case FieldType::kString:
         case FieldType::kBytes:
         case FieldType::kArray:
+        case FieldType::kVectorFloat32:
             data_lengths_.resize(size, 0);
             break;
         case FieldType::kObject:

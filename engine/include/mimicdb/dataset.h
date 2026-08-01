@@ -23,6 +23,7 @@ struct FieldValue {
     std::string bytes;
     std::vector<FieldValue> array;
     std::unordered_map<std::string, FieldValue> object;
+    std::vector<float> vector_f32;
 
     static FieldValue Int32(int32_t value);
     static FieldValue Int64(int64_t value);
@@ -32,6 +33,7 @@ struct FieldValue {
     static FieldValue Bytes(const std::string& value);
     static FieldValue Array(const std::vector<FieldValue>& value);
     static FieldValue Object(const std::unordered_map<std::string, FieldValue>& value);
+    static FieldValue VectorFloat32(const std::vector<float>& value);
     static FieldValue Null(FieldType type);
 };
 
