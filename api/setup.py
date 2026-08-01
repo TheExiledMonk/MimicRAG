@@ -1,4 +1,4 @@
-from setuptools import Extension, setup
+from setuptools import Extension, find_packages, setup
 from pathlib import Path
 
 root = Path(__file__).resolve().parent.parent
@@ -71,6 +71,6 @@ ext_mongo = Extension(
 setup(
     name="mimicapi",
     version="0.0.0",
-    packages=["mimicapi"],
+    packages=find_packages(),
     ext_modules=[ext, ext_core, ext_mongo],
 )

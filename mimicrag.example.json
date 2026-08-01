@@ -1,0 +1,15 @@
+{
+  "database": "mimicrag",
+  "tenant_id": "default",
+  "chat": {
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-5",
+    "api_key_env": "ANTHROPIC_API_KEY"
+  },
+  "embedding": {
+    "provider": "openai_compatible",
+    "model": "text-embedding-model",
+    "base_url": "http://127.0.0.1:8000/v1",
+    "api_key_env": "LOCAL_MODEL_API_KEY"
+  }
+}

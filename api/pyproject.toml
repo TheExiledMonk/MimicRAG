@@ -7,5 +7,6 @@ name = "mimicapi"
 version = "0.0.0"
 description = "MimicDB API"
 requires-python = ">=3.10"
-[tool.setuptools]
-packages = ["mimicapi"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mimicapi*", "mimicrag*"]
