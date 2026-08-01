@@ -1,4 +1,5 @@
 #include "mimicrag/rag_engine.h"
+#include "mimicrag/catalog.h"
 
 #include "mimicdb/dataset.h"
 #include "mimicdb/vector_ivf.h"
@@ -337,11 +338,28 @@ struct RagEngine::Impl {
 };
 
 RagEngine::RagEngine(Config config) : config_(std::move(config)), impl_(std::make_unique<Impl>(config_)) {
-    const auto catalog = impl_->data_path / "catalog.jsonl";
-    std::ifstream input(catalog); std::string line;
-    while (std::getline(input, line)) {
-        try { auto row = json::parse(line); row["_replay"] = true; Ingest(row); } catch (const std::exception&) {}
+    const auto binary_path = impl_->data_path / "catalog.mrg";
+    BinaryCatalog binary(binary_path);
+    if (binary.Exists()) {
+        binary.Replay([&](CatalogRecord&& record) {
+            if (!record.remote_embeddings.empty()) record.document["remote_embeddings"] = std::move(record.remote_embeddings);
+            if (!record.local_embeddings.empty()) record.document["local_embeddings"] = std::move(record.local_embeddings);
+            record.document["_replay"] = true; Ingest(record.document);
+        });
+        return;
     }
+    const auto legacy_path = impl_->data_path / "catalog.jsonl";
+    std::ifstream input(legacy_path); if (!input) return;
+    const auto migration_path = impl_->data_path / "catalog.mrg.migrating";
+    if (std::filesystem::exists(migration_path)) std::filesystem::remove(migration_path);
+    BinaryCatalog migration(migration_path); std::string line; size_t migrated = 0;
+    while (std::getline(input, line)) {
+        auto row = json::parse(line); CatalogRecord record; record.document = row;
+        if (row.contains("remote_embeddings")) { record.remote_embeddings = row.at("remote_embeddings").get<std::vector<std::vector<float>>>(); record.document.erase("remote_embeddings"); }
+        if (row.contains("local_embeddings")) { record.local_embeddings = row.at("local_embeddings").get<std::vector<std::vector<float>>>(); record.document.erase("local_embeddings"); }
+        row["_replay"] = true; Ingest(row); migration.Append(record); ++migrated;
+    }
+    input.close(); if (migrated) std::filesystem::rename(migration_path, binary_path);
 }
 RagEngine::~RagEngine() = default;
 
@@ -424,10 +442,10 @@ json RagEngine::Ingest(const json& request) {
         if (!request.value("_replay", false)) {
             auto persisted = request;
             persisted["document_id"] = document_id;
-            if (remote_indexed) { persisted["remote_model_identity"] = impl_->remote.identity; persisted["remote_embeddings"] = remote_vectors; }
-            if (local_indexed) { persisted["local_model_identity"] = impl_->local_space.identity; persisted["local_embeddings"] = local_vectors; }
-            std::ofstream out(impl_->data_path / "catalog.jsonl", std::ios::app);
-            out << persisted.dump() << '\n';
+            persisted.erase("remote_embeddings"); persisted.erase("local_embeddings");
+            if (remote_indexed) persisted["remote_model_identity"] = impl_->remote.identity;
+            if (local_indexed) persisted["local_model_identity"] = impl_->local_space.identity;
+            BinaryCatalog(impl_->data_path / "catalog.mrg").Append({std::move(persisted), remote_indexed ? remote_vectors : std::vector<std::vector<float>>{}, local_indexed ? local_vectors : std::vector<std::vector<float>>{}});
         }
     }
     return {{"document_id", document_id}, {"version_id", version_id}, {"generation", generation}, {"chunk_count", created.size()}, {"remote_indexed", remote_indexed}, {"local_indexed", local_indexed}, {"unchanged", false}};
@@ -579,10 +597,16 @@ json RagEngine::Evaluate(const json& request) {
 json RagEngine::Health() const {
     std::shared_lock state_lock(impl_->state_mutex);
     std::lock_guard runtime_lock(impl_->mutex);
+    const auto binary_catalog = impl_->data_path / "catalog.mrg";
+    const auto legacy_catalog = impl_->data_path / "catalog.jsonl";
+    const bool binary = std::filesystem::exists(binary_catalog);
+    const uint64_t catalog_bytes = binary ? std::filesystem::file_size(binary_catalog)
+        : (std::filesystem::exists(legacy_catalog) ? std::filesystem::file_size(legacy_catalog) : 0);
     return {{"status", "ok"}, {"ready", true}, {"implementation", "c++"}, {"chunks", impl_->chunks.size()}, {"pending_jobs", impl_->job_queue.size()},
         {"embedding_model_key", impl_->remote.identity}, {"remote_embedding_healthy", impl_->remote_healthy.load()},
         {"graph_documents", impl_->graphs.size()}, {"graph_edges", impl_->graph_edges},
         {"local_embedding_available", impl_->local.Available()}, {"local_embedding_device", impl_->local.UsingGpu() ? "gpu" : "cpu"},
+        {"catalog_format", binary ? "mrg1_zstd_float32" : "legacy_jsonl"}, {"catalog_bytes", catalog_bytes},
         {"remote_vector_rows", impl_->remote.dataset.RowCount()}, {"local_vector_rows", impl_->local_space.dataset.RowCount()}};
 }
 }  // namespace mimicrag

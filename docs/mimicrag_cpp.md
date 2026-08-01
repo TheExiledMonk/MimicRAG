@@ -49,9 +49,17 @@ remote embeddings while healthy, switch to the matching pre-populated local spac
 failure, and use BM25 if no compatible vector space is ready. Vectors from different
 models or prefix configurations are never mixed.
 
-The append-only `catalog.jsonl` is replayed on restart and rebuilds both configured
-spaces. Tenant and access-scope predicates are applied by the MimicDB engine before
-vectors are loaded and scored; superseded document versions are removed before fusion.
+The append-only `catalog.mrg` stores Zstd-compressed document metadata/text followed
+by contiguous float32 vector blocks. Every versioned record carries dimensions,
+lengths, and a checksum; replay truncates a partially written final record to the last
+verified boundary. If only the former `catalog.jsonl` exists, startup converts it to a
+temporary binary catalog and atomically publishes `catalog.mrg` after every legacy
+record has replayed successfully. The legacy file is left untouched for explicit
+operator removal after verification.
+
+Catalog replay rebuilds both configured spaces. Tenant and access-scope predicates are
+applied by the MimicDB engine before vectors are loaded and scored; superseded document
+versions are removed before fusion.
 
 Endpoints are `/health`, `/ready`, `/v1/documents`, `/v1/retrieve`, `/v1/answers`, and
 OpenAI-compatible `/v1/chat/completions`. The HTTP server uses a bounded native worker
