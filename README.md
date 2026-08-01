@@ -170,3 +170,25 @@ Final assessment:
 - MongoDB layer: ~60M rows/sec.
 - API overhead: effectively zero.
 
+## Hybrid CPU/Vulkan vector execution
+
+Vector search keeps immutable sealed segments resident in device-local GPU memory when
+Vulkan and shaderc are available. The automatic router retains small or selective searches
+on the SIMD CPU path and sends sufficiently large scoring workloads to Vulkan. Active rows
+remain immediately searchable on CPU and are merged with GPU results.
+
+Runtime controls:
+
+- `MIMICDB_VECTOR_BACKEND=auto` (default), `cpu`, or `vulkan`
+- `MIMICDB_VECTOR_GPU_MIN_ELEMENTS`: optional fixed crossover override measured as
+  `candidate_count * dimension`; without it, MimicDB benchmarks CPU and Vulkan on the
+  first resident vector workload and learns the crossover for that process
+- `MIMICDB_VECTOR_GPU_MAX_BYTES`: process-wide residency budget (default: 4 GiB);
+  fields that do not fit transparently stay on CPU
+- `MIMICDB_VECTOR_CPU_THREADS`: bounded CPU vector worker count (defaults to detected
+  hardware concurrency)
+
+The server preloads new sealed vector segments during append processing, outside query
+latency. Embedded users can call `PreloadVectorField()` explicitly during warm-up.
+Vector-bearing server datasets currently retain their sealed CPU segments as well, ensuring
+the normal segment-cache eviction policy cannot remove rows from exact search results.

@@ -59,6 +59,7 @@ struct DatasetCompressionStats {
 class Dataset {
 public:
     explicit Dataset(std::string name);
+    ~Dataset();
 
     const std::string& Name() const;
     size_t RowCount() const;

@@ -2,17 +2,96 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <queue>
-#include <future>
+#include <atomic>
+#include <chrono>
+#include <mutex>
+#include <string>
+#include <thread>
 #if defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>
 #endif
 
 #include "mimicdb/dataset.h"
 #include "mimicdb/compression.h"
+#include "mimicdb/vector_gpu.h"
+
+namespace mimicdb {
+bool VectorGpuScore(const Dataset&, size_t, const float*, size_t, VectorMetric,
+                    const std::vector<uint32_t>&, std::vector<float>*);
+}
 
 namespace mimicdb {
 namespace {
+struct AutoRoutingState {
+    std::mutex mutex;
+    size_t crossover_elements = 500000000ULL;
+    size_t max_tested_elements = 0;
+    bool calibrated = false;
+};
+
+AutoRoutingState& RoutingState() {
+    static AutoRoutingState state;
+    return state;
+}
+
+thread_local int route_override = -1;  // -1 automatic, 0 CPU, 1 Vulkan
+
+size_t CpuThreadCount() {
+    size_t threads = std::max(1U, std::thread::hardware_concurrency());
+    if (const char* value = std::getenv("MIMICDB_VECTOR_CPU_THREADS")) {
+        const unsigned long long parsed = std::strtoull(value, nullptr, 10);
+        if (parsed != 0) threads = static_cast<size_t>(parsed);
+    }
+    return threads;
+}
+
+template <typename Function>
+void ParallelFor(size_t count, Function function) {
+    const size_t thread_count = std::min(count, CpuThreadCount());
+    if (thread_count <= 1) {
+        for (size_t i = 0; i < count; ++i) function(i);
+        return;
+    }
+    std::atomic<size_t> next{0};
+    std::vector<std::thread> workers;
+    workers.reserve(thread_count);
+    for (size_t worker = 0; worker < thread_count; ++worker) {
+        workers.emplace_back([&] {
+            for (;;) {
+                const size_t i = next.fetch_add(1, std::memory_order_relaxed);
+                if (i >= count) break;
+                function(i);
+            }
+        });
+    }
+    for (auto& worker : workers) worker.join();
+}
+
+bool IsAutoMode() {
+    const char* value = std::getenv("MIMICDB_VECTOR_BACKEND");
+    return !value || std::string(value) == "auto";
+}
+
+bool WantsGpu(size_t candidates, size_t dimension) {
+    if (route_override == 0) return false;
+    if (route_override == 1) return true;
+    const char* mode_value = std::getenv("MIMICDB_VECTOR_BACKEND");
+    const std::string mode = mode_value ? mode_value : "auto";
+    if (mode == "cpu" || mode == "off") return false;
+    if (mode == "vulkan" || mode == "gpu") return true;
+    size_t threshold = 0;
+    if (const char* value = std::getenv("MIMICDB_VECTOR_GPU_MIN_ELEMENTS")) {
+        const unsigned long long parsed = std::strtoull(value, nullptr, 10);
+        if (parsed != 0) threshold = static_cast<size_t>(parsed);
+    }
+    if (threshold == 0) {
+        std::lock_guard lock(RoutingState().mutex);
+        threshold = RoutingState().crossover_elements;
+    }
+    return candidates != 0 && dimension <= SIZE_MAX / candidates && candidates * dimension >= threshold;
+}
 float Dot(const float* a, const float* b, size_t n) {
     float sum = 0.0F;
     for (size_t i = 0; i < n; ++i) sum += a[i] * b[i];
@@ -100,22 +179,44 @@ void SearchField(const std::vector<FieldVector>& fields, size_t vector_field,
                  size_t dimension, size_t top_k, VectorMetric metric,
                  const std::vector<CompressedColumnView>* compressed,
                  const std::vector<VectorSearchPredicate>& predicates,
+                 const std::vector<size_t>* precomputed_candidates,
                  std::priority_queue<VectorSearchHit, std::vector<VectorSearchHit>, Worse>* heap) {
     const auto& field = fields[vector_field];
-    for (size_t row = 0; row < field.Size(); ++row) {
-        if (!predicates.empty() && !Matches(fields, row, compressed, predicates)) continue;
+    auto score_row = [&](size_t row) {
         size_t stored_dimension = 0;
         const float* vector = field.VectorFloat32(row, &stored_dimension);
-        if (!vector || stored_dimension != dimension) continue;
+        if (!vector || stored_dimension != dimension) return;
         VectorSearchHit hit{base_row + row, VectorDistance(vector, query, dimension, metric)};
-        if (!std::isfinite(hit.distance)) continue;
+        if (!std::isfinite(hit.distance)) return;
         if (heap->size() < top_k) heap->push(hit);
         else if (hit.distance < heap->top().distance ||
                  (hit.distance == heap->top().distance && hit.row_id < heap->top().row_id)) {
             heap->pop();
             heap->push(hit);
         }
+    };
+
+    if (precomputed_candidates) {
+        for (const size_t row : *precomputed_candidates) score_row(row);
+        return;
     }
+
+    if (predicates.empty()) {
+        for (size_t row = 0; row < field.Size(); ++row) score_row(row);
+        return;
+    }
+
+    // Resolve structured predicates completely before touching vector storage. Besides
+    // keeping rejected vectors out of cache, the candidate list gives selective queries
+    // a sparse iteration path with work proportional to the number of matching rows.
+    std::vector<size_t> candidates;
+    candidates.reserve(std::min<size_t>(field.Size(), 1024));
+    for (size_t row = 0; row < field.Size(); ++row) {
+        if (Matches(fields, row, compressed, predicates)) {
+            candidates.push_back(row);
+        }
+    }
+    for (const size_t row : candidates) score_row(row);
 }
 }  // namespace
 
@@ -137,6 +238,45 @@ float VectorDistance(const float* left, const float* right, size_t dimension,
     return sum;
 }
 
+namespace {
+void CalibrateGpuCrossover(const Dataset& dataset, size_t field_index,
+                           const float* query, size_t dimension, VectorMetric metric,
+                           size_t top_k, size_t sealed_rows) {
+    if (route_override != -1 || !IsAutoMode() || sealed_rows < 16384 || dimension == 0) return;
+    const size_t elements = sealed_rows > SIZE_MAX / dimension
+        ? SIZE_MAX : sealed_rows * dimension;
+    auto& state = RoutingState();
+    std::unique_lock state_lock(state.mutex);
+    if (state.calibrated && elements <= state.max_tested_elements * 2) return;
+
+    if (!PreloadVectorField(dataset, field_index)) return;
+    std::vector<VectorSearchHit> calibration_hits;
+    route_override = 0;
+    const auto cpu_start = std::chrono::steady_clock::now();
+    const bool cpu_ok = VectorSearch(dataset, field_index, query, dimension, top_k,
+                                     metric, &calibration_hits);
+    const double cpu_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - cpu_start).count();
+
+    route_override = 1;
+    const auto gpu_start = std::chrono::steady_clock::now();
+    const bool gpu_ok = VectorSearch(dataset, field_index, query, dimension, top_k,
+                                     metric, &calibration_hits);
+    const double gpu_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - gpu_start).count();
+    route_override = -1;
+    const size_t tested = sealed_rows * dimension;
+    const bool gpu_wins = cpu_ok && gpu_ok && gpu_seconds < cpu_seconds * 0.90;
+
+    state.calibrated = true;
+    state.max_tested_elements = std::max(state.max_tested_elements, tested);
+    if (gpu_wins)
+        state.crossover_elements = tested;
+    else
+        state.crossover_elements = tested > SIZE_MAX / 2 ? SIZE_MAX : tested * 2;
+}
+}  // namespace
+
 bool VectorSearch(const Dataset& dataset, size_t field_index, const float* query,
                   size_t dimension, size_t top_k, VectorMetric metric,
                   std::vector<VectorSearchHit>* out,
@@ -150,30 +290,91 @@ bool VectorSearch(const Dataset& dataset, size_t field_index, const float* query
     for (const auto& predicate : predicates) {
         if (predicate.field_index >= dataset.Fields().size()) return false;
     }
-    struct Work { const std::vector<FieldVector>* fields; const std::vector<CompressedColumnView>* compressed; uint64_t base; };
+    size_t sealed_rows = 0;
+    for (const auto& segment : dataset.Segments()) sealed_rows += segment.RowCount();
+
+    CalibrateGpuCrossover(dataset, field_index, query, dimension, metric, top_k, sealed_rows);
+
+    const bool gpu_may_run = sealed_rows <= UINT32_MAX && WantsGpu(sealed_rows, dimension);
+    std::vector<uint32_t> gpu_candidates;
+    if (gpu_may_run && !predicates.empty()) {
+        uint32_t base_row = 0;
+        for (const auto& segment : dataset.Segments()) {
+            const auto& fields = segment.Fields();
+            const auto* compressed = &segment.CompressedColumns();
+            for (size_t row = 0; row < segment.RowCount(); ++row) {
+                if (Matches(fields, row, compressed, predicates))
+                    gpu_candidates.push_back(base_row + static_cast<uint32_t>(row));
+            }
+            base_row += static_cast<uint32_t>(segment.RowCount());
+        }
+    }
+    const size_t gpu_candidate_count = predicates.empty() ? sealed_rows : gpu_candidates.size();
+    bool gpu_used = false;
+    std::vector<VectorSearchHit> gpu_hits;
+    if (gpu_may_run && WantsGpu(gpu_candidate_count, dimension) &&
+        PreloadVectorField(dataset, field_index)) {
+        std::vector<float> distances;
+        if (VectorGpuScore(dataset, field_index, query, dimension, metric, gpu_candidates, &distances)) {
+            gpu_used = true;
+            gpu_hits.reserve(distances.size());
+            for (size_t i = 0; i < distances.size(); ++i) {
+                if (!std::isfinite(distances[i])) continue;
+                const uint64_t row = gpu_candidates.empty() ? i : gpu_candidates[i];
+                gpu_hits.push_back({row, distances[i]});
+            }
+        }
+    }
+    struct Work {
+        const std::vector<FieldVector>* fields;
+        const std::vector<CompressedColumnView>* compressed;
+        uint64_t base;
+        std::vector<size_t> candidates;
+        bool candidates_precomputed = false;
+    };
     std::vector<Work> work;
     uint64_t base = 0;
     for (const auto& segment : dataset.Segments()) {
         if (field_index >= segment.Fields().size()) return false;
-        work.push_back({&segment.Fields(), &segment.CompressedColumns(), base});
+        if (!gpu_used) {
+            Work item{&segment.Fields(), &segment.CompressedColumns(), base, {}, false};
+            if (gpu_may_run && !predicates.empty()) {
+                item.candidates_precomputed = true;
+                const uint64_t end = base + segment.RowCount();
+                auto first = std::lower_bound(gpu_candidates.begin(), gpu_candidates.end(), base);
+                auto last = std::lower_bound(first, gpu_candidates.end(), end);
+                item.candidates.reserve(static_cast<size_t>(last - first));
+                for (; first != last; ++first) item.candidates.push_back(*first - base);
+            }
+            work.push_back(std::move(item));
+        }
         base += segment.RowCount();
     }
-    if (dataset.ActiveRowCount() != 0) work.push_back({&dataset.ActiveFields(), nullptr, base});
+    if (dataset.ActiveRowCount() != 0)
+        work.push_back({&dataset.ActiveFields(), nullptr, base, {}, false});
     auto search_one = [&](Work item) {
         std::priority_queue<VectorSearchHit, std::vector<VectorSearchHit>, Worse> local;
         SearchField(*item.fields, field_index, item.base, query, dimension, top_k, metric,
                     item.compressed,
-                    predicates, &local);
+                    predicates, item.candidates_precomputed ? &item.candidates : nullptr, &local);
         std::vector<VectorSearchHit> hits;
         while (!local.empty()) { hits.push_back(local.top()); local.pop(); }
         return hits;
     };
-    std::vector<std::future<std::vector<VectorSearchHit>>> futures;
-    futures.reserve(work.size());
-    for (const auto item : work) futures.push_back(std::async(std::launch::async, search_one, item));
+    std::vector<std::vector<VectorSearchHit>> partial_hits(work.size());
+    ParallelFor(work.size(), [&](size_t index) {
+        partial_hits[index] = search_one(std::move(work[index]));
+    });
     std::priority_queue<VectorSearchHit, std::vector<VectorSearchHit>, Worse> heap;
-    for (auto& future : futures) {
-        for (const auto& hit : future.get()) {
+    for (const auto& hit : gpu_hits) {
+        if (heap.size() < top_k) heap.push(hit);
+        else if (hit.distance < heap.top().distance ||
+                 (hit.distance == heap.top().distance && hit.row_id < heap.top().row_id)) {
+            heap.pop(); heap.push(hit);
+        }
+    }
+    for (const auto& partial : partial_hits) {
+        for (const auto& hit : partial) {
             if (heap.size() < top_k) heap.push(hit);
             else if (hit.distance < heap.top().distance ||
                      (hit.distance == heap.top().distance && hit.row_id < heap.top().row_id)) {
@@ -187,6 +388,13 @@ bool VectorSearch(const Dataset& dataset, size_t field_index, const float* query
         return a.distance != b.distance ? a.distance < b.distance : a.row_id < b.row_id;
     });
     return true;
+}
+
+VectorSearchRuntimeStats GetVectorSearchRuntimeStats() {
+    auto& state = RoutingState();
+    std::lock_guard lock(state.mutex);
+    return {CpuThreadCount(), state.crossover_elements,
+            state.max_tested_elements, state.calibrated};
 }
 
 }  // namespace mimicdb

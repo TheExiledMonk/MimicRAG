@@ -23,6 +23,7 @@ add_library(mimicdb_engine
     src/output_compaction.cpp
     src/simd_output.cpp
     src/vector_search.cpp
+    src/vector_gpu.cpp
 )
 
 target_include_directories(mimicdb_engine PUBLIC
@@ -33,3 +34,16 @@ target_compile_features(mimicdb_engine PUBLIC cxx_std_20)
 
 target_compile_options(mimicdb_engine PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(mimicdb_engine PUBLIC mimicdb_build_flags)
+
+find_package(Vulkan QUIET)
+find_package(PkgConfig QUIET)
+if(Vulkan_FOUND AND PkgConfig_FOUND)
+    pkg_check_modules(SHADERC QUIET IMPORTED_TARGET shaderc)
+endif()
+if(Vulkan_FOUND AND TARGET PkgConfig::SHADERC)
+    target_compile_definitions(mimicdb_engine PRIVATE MIMICDB_HAS_VULKAN=1)
+    target_link_libraries(mimicdb_engine PRIVATE Vulkan::Vulkan PkgConfig::SHADERC)
+else()
+    target_compile_definitions(mimicdb_engine PRIVATE MIMICDB_HAS_VULKAN=0)
+    message(STATUS "MimicDB Vulkan vector backend disabled (Vulkan and shaderc required)")
+endif()

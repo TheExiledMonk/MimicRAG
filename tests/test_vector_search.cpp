@@ -2,10 +2,12 @@
 #include <cmath>
 #include <vector>
 #include <filesystem>
+#include <cstdlib>
 
 #include "mimicdb/dataset.h"
 #include "mimicdb/vector_search.h"
 #include "mimicdb/segment_io.h"
+#include "mimicdb/vector_gpu.h"
 
 int main() {
     mimicdb::Dataset dataset("vectors");
@@ -38,6 +40,20 @@ int main() {
     assert(mimicdb::VectorSearch(filtered, 0, filtered_query, 2, 1,
                                  mimicdb::VectorMetric::kCosine, &hits, predicates));
     assert(hits.size() == 1 && hits[0].row_id == 4099);
+
+    predicates[0].value = 99.0;
+    assert(mimicdb::VectorSearch(filtered, 0, filtered_query, 2, 1,
+                                 mimicdb::VectorMetric::kCosine, &hits, predicates));
+    assert(hits.empty());
+
+    predicates[0].value = 7.0;
+    setenv("MIMICDB_VECTOR_BACKEND", "vulkan", 1);
+    assert(mimicdb::PreloadVectorField(filtered, 0) ||
+           !mimicdb::GetVectorGpuStats().available);
+    assert(mimicdb::VectorSearch(filtered, 0, filtered_query, 2, 1,
+                                 mimicdb::VectorMetric::kCosine, &hits, predicates));
+    assert(hits.size() == 1 && hits[0].row_id == 4099);
+    unsetenv("MIMICDB_VECTOR_BACKEND");
 
     const auto path = std::filesystem::temp_directory_path() / "mimicdb_vector_segment_test.bin";
     std::filesystem::remove(path);

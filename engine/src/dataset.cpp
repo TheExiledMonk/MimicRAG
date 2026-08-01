@@ -3,11 +3,16 @@
 #include "mimicdb/array_codec.h"
 #include "mimicdb/hash.h"
 #include "mimicdb/config.h"
+#include "mimicdb/vector_gpu.h"
 
 namespace mimicdb {
 
 Dataset::Dataset(std::string name)
     : name_(std::move(name)), segment_capacity_(Config::kDefaultSegmentRows) {}
+
+Dataset::~Dataset() {
+    ReleaseVectorGpuDataset(*this);
+}
 
 const std::string& Dataset::Name() const {
     return name_;

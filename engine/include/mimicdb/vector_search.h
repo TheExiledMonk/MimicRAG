@@ -23,12 +23,20 @@ struct VectorSearchPredicate {
     double value = 0.0;
 };
 
+struct VectorSearchRuntimeStats {
+    size_t cpu_threads = 1;
+    size_t gpu_crossover_elements = 0;
+    size_t calibration_max_elements = 0;
+    bool gpu_calibrated = false;
+};
+
 float VectorDistance(const float* left, const float* right, size_t dimension,
                      VectorMetric metric);
 bool VectorSearch(const Dataset& dataset, size_t field_index, const float* query,
                   size_t dimension, size_t top_k, VectorMetric metric,
                   std::vector<VectorSearchHit>* out,
                   const std::vector<VectorSearchPredicate>& predicates = {});
+VectorSearchRuntimeStats GetVectorSearchRuntimeStats();
 
 }  // namespace mimicdb
 

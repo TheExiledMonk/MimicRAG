@@ -42,6 +42,7 @@
 #include "mimicdb/scan.h"
 #include "mimicdb/types.h"
 #include "mimicdb/vector_search.h"
+#include "mimicdb/vector_gpu.h"
 
 bool IsLocalBind(const std::string& host);
 bool IsRootInitialized(const std::string& auth_db_path);
@@ -2686,6 +2687,10 @@ private:
             SendStatus(client, header, Status::kInternalError, {});
             return;
         }
+        for (size_t field = 0; field < it->second.dataset->Fields().size(); ++field) {
+            if (it->second.dataset->Fields()[field].Type() == FieldType::kVectorFloat32)
+                PreloadVectorField(*it->second.dataset, field);
+        }
         if (batch_id != 0) {
             it->second.seen_batches.insert(batch_id);
         }
@@ -4972,6 +4977,12 @@ private:
     }
 
     void EnforceSegmentCacheLimits(DatasetState& state) {
+        // Exact and GPU vector search currently address sealed segments through Dataset.
+        // Keep vector-bearing segments resident so cache eviction cannot silently remove
+        // rows from the search domain; the GPU copy is maintained separately.
+        for (const auto& field : state.dataset->Fields()) {
+            if (field.Type() == FieldType::kVectorFloat32) return;
+        }
         if (segment_cache_max_ > 0 &&
             state.dataset->Segments().size() > segment_cache_max_) {
             const size_t drop = state.dataset->Segments().size() - segment_cache_max_;
@@ -5992,6 +6003,10 @@ private:
                 state.persisted_segments += 1;
                 state.cached_bytes += SegmentBytes(state.dataset->Segments().back());
                 EnforceSegmentCacheLimits(state);
+            }
+            for (size_t field = 0; field < state.dataset->Fields().size(); ++field) {
+                if (state.dataset->Fields()[field].Type() == FieldType::kVectorFloat32)
+                    PreloadVectorField(*state.dataset, field);
             }
             db_state.datasets[dataset_name] = std::move(state);
         }
