@@ -131,13 +131,32 @@ class MimicDBRagStore(RagStore):
 
     def __init__(self, *, host: str | None = None, port: int | None = None, database: str = "mimicrag", use_cpp: bool = True, identity_key_path: str | None = None) -> None:
         from mimicapi import Dataset
-        options = {"host": host, "port": port, "database": database, "use_cpp": use_cpp, "identity_key_path": identity_key_path}
+        if host is not None or port is not None:
+            self._ensure_network_schema(host or "127.0.0.1", port or 9000, database, identity_key_path)
+        options = {"host": host, "port": port, "database": database, "use_cpp": use_cpp, "identity_key_path": identity_key_path, "create": not (host is not None or port is not None)}
         self.documents = Dataset("rag_documents", DOCUMENT_FIELDS, **options)
         self.versions = Dataset("rag_versions", VERSION_FIELDS, **options)
         self.chunks = Dataset("rag_chunks", CHUNK_FIELDS, **options)
         self.publications = Dataset("rag_publications", PUBLICATION_FIELDS, **options)
         self.embeddings = Dataset("rag_embeddings", EMBEDDING_FIELDS, **options)
         self._lock = threading.RLock()
+
+    @staticmethod
+    def _ensure_network_schema(host: str, port: int, database: str, identity_key_path: str | None) -> None:
+        from client.mimicdb_client import MimicDBClient, ProtocolError
+        client = MimicDBClient(host=host, port=port, default_db=database, identity_key_path=identity_key_path)
+        try:
+            if database not in client.list_databases():
+                client.create_database(database)
+            for name, fields in (("rag_documents", DOCUMENT_FIELDS), ("rag_versions", VERSION_FIELDS), ("rag_chunks", CHUNK_FIELDS), ("rag_publications", PUBLICATION_FIELDS), ("rag_embeddings", EMBEDDING_FIELDS)):
+                try:
+                    client.create_dataset(name, list(fields.items()), database=database)
+                except ProtocolError:
+                    # The protocol has no list-datasets operation; duplicate creation is
+                    # the expected restart path and the existing schema is used below.
+                    pass
+        finally:
+            client.close()
 
     def _rows(self, dataset) -> list[dict]:
         return dataset.scan(limit=0)

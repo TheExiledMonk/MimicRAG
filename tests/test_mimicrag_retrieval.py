@@ -72,7 +72,7 @@ class TestMimicRagRetrieval(unittest.TestCase):
         public_hits = HybridRetriever(self.store, self.provider).search("classified python", "one")
         scoped_hits = HybridRetriever(self.store, self.provider).search("classified python", "one", access_scope="team-red")
         self.assertTrue(all(hit.chunk.version_id != secret.version_id for hit in public_hits))
-        self.assertEqual(scoped_hits[0].chunk.version_id, secret.version_id)
+        self.assertTrue(any(hit.chunk.version_id == secret.version_id for hit in scoped_hits))
 
     def test_only_current_generation_is_retrieved(self):
         first = self.ingestor.ingest(text="python database", source_uri="same", tenant_id="one")

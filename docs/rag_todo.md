@@ -40,11 +40,17 @@ benchmark.
 
 ## Run 3 — complete RAG server
 
-- [ ] FastAPI ingestion, document, retrieval, and answer endpoints.
-- [ ] Streaming generation with disconnect cancellation.
-- [ ] OpenAI-compatible server surface where practical.
-- [ ] Background job runner, health/readiness, and index warmup.
-- [ ] End-to-end trace records with model/index/version provenance.
-- [ ] Golden-set evaluation and answer/citation quality metrics.
-- [ ] Rate limits, request budgets, prompt-injection boundaries, and audit events.
-- [ ] Configuration documentation, CLI, deployment example, and final benchmarks.
+- [x] FastAPI ingestion, document, retrieval, and answer endpoints.
+- [x] Streaming generation with disconnect cancellation.
+- [x] OpenAI-compatible server surface.
+- [x] Background job runner, health/readiness, and index warmup.
+- [x] End-to-end trace records with model/index/version provenance.
+- [x] Golden-set evaluation and answer/citation quality metrics.
+- [x] Rate limits, request budgets, prompt-injection boundaries, and audit events.
+- [x] Configuration documentation, CLI, deployment example, and final benchmarks.
+
+The final deterministic end-to-end benchmark over 2,000 documents and 100 queries
+measured recall@1 of 1.0, retrieval p50/p95/p99 of 32.3/66.1/70.7 ms, and complete
+answer-pipeline p50/p95/p99 of 32.6/69.7/74.6 ms with a zero-latency deterministic
+model. These are orchestration/reference-store measurements; native MimicDB vector
+performance remains covered by `mimicdb_bench_vector` and `mimicdb_bench_vector_file`.

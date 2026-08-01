@@ -1,6 +1,23 @@
 {
   "database": "mimicrag",
   "tenant_id": "default",
+  "storage": {
+    "backend": "network",
+    "host": "127.0.0.1",
+    "port": 9000,
+    "identity_key_path": "/etc/mimicdb/client.key"
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8080,
+    "api_key_env": "MIMICRAG_API_KEY",
+    "requests_per_minute": 120,
+    "max_query_chars": 16000,
+    "max_document_chars": 10000000,
+    "context_token_budget": 4000,
+    "answer_max_tokens": 1024,
+    "trace_path": "data/mimicrag/traces.jsonl"
+  },
   "chat": {
     "provider": "anthropic",
     "model": "claude-sonnet-4-5",

@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from mimicrag import InMemoryRagStore, Ingestor, ModelConfig, TextChunker, ChunkingConfig, create_provider, load_config
-from mimicrag.providers import AnthropicProvider, OpenAICompatibleProvider
+from mimicrag.providers import AnthropicProvider, AzureOpenAIProvider, OpenAICompatibleProvider
 
 
 class TestMimicRagRunOne(unittest.TestCase):
@@ -50,6 +50,12 @@ class TestMimicRagRunOne(unittest.TestCase):
             config = load_config(handle.name)
         self.assertEqual(config.chat.base_url, "https://api.groq.com/openai/v1")
         self.assertIsInstance(create_provider(config.chat), OpenAICompatibleProvider)
+
+    def test_azure_uses_deployment_endpoint_adapter(self):
+        provider = create_provider(ModelConfig("azure_openai", "deployment", api_key="key", base_url="https://example.openai.azure.com/openai/deployments/demo", api_version="test-version"))
+        self.assertIsInstance(provider, AzureOpenAIProvider)
+        self.assertEqual(provider._path("/embeddings"), "/embeddings?api-version=test-version")
+        self.assertEqual(provider._azure_headers(), {"api-key": "key"})
 
     def test_load_config_requires_selected_environment_secret(self):
         raw = {"chat": {"provider": "openai", "model": "chat", "api_key_env": "TEST_CHAT_KEY"}, "embedding": {"provider": "ollama", "model": "embed"}}
