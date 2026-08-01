@@ -218,3 +218,7 @@ The final server exposes native ingestion/retrieval/answer APIs and an OpenAI-co
 `/v1/chat/completions` endpoint with SSE streaming. Run it with
 `PYTHONPATH=api python -m mimicrag --config mimicrag.json serve`; configuration,
 evaluation, security, and deployment details are in `docs/mimicrag_server.md`.
+
+For deployments that require no Python runtime, build the native C++
+`mimicrag_server`. It embeds llama.cpp directly for GPU/CPU local embedding fallback;
+see `docs/mimicrag_cpp.md`.

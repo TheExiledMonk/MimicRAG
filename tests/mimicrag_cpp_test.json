@@ -1,0 +1,6 @@
+{
+  "chat": {"provider": "openai_compatible", "model": "test", "base_url": "http://127.0.0.1:1/v1", "timeout_seconds": 1},
+  "embedding": {"provider": "openai_compatible", "model": "test", "base_url": "http://127.0.0.1:1/v1", "timeout_seconds": 1},
+  "local_embedding": {"enabled": false},
+  "server": {"host": "127.0.0.1", "port": 18081, "data_path": "/tmp/mimicrag_cpp_test_data", "top_k": 10}
+}

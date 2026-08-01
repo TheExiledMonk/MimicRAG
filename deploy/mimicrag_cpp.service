@@ -1,0 +1,18 @@
+[Unit]
+Description=Native C++ MimicRAG server
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/mimicdb
+EnvironmentFile=-/etc/mimicdb/mimicrag.env
+ExecStart=/opt/mimicdb/build/rag_cpp/mimicrag_server /etc/mimicdb/mimicrag.json
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/mimicdb
+
+[Install]
+WantedBy=multi-user.target
