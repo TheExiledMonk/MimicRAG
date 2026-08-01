@@ -188,6 +188,10 @@ Runtime controls:
 - `MIMICDB_VECTOR_CPU_THREADS`: bounded CPU vector worker count (defaults to detected
   hardware concurrency)
 
+The server's existing `query_threads` setting configures the same persistent vector worker
+pool. Embedded applications can call `ConfigureVectorSearchThreads()` before their first
+vector query.
+
 The server preloads new sealed vector segments during append processing, outside query
 latency. Embedded users can call `PreloadVectorField()` explicitly during warm-up.
 Vector-bearing server datasets currently retain their sealed CPU segments as well, ensuring

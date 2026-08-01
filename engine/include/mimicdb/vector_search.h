@@ -37,6 +37,8 @@ bool VectorSearch(const Dataset& dataset, size_t field_index, const float* query
                   std::vector<VectorSearchHit>* out,
                   const std::vector<VectorSearchPredicate>& predicates = {});
 VectorSearchRuntimeStats GetVectorSearchRuntimeStats();
+// Call before the first vector search; zero selects hardware concurrency.
+void ConfigureVectorSearchThreads(size_t threads);
 
 }  // namespace mimicdb
 

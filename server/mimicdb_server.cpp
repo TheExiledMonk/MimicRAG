@@ -1076,7 +1076,9 @@ public:
           segment_cache_max_(segment_cache_max),
           segment_cache_bytes_(segment_cache_bytes),
           query_threads_(query_threads),
-          compression_metrics_(compression_metrics) {}
+          compression_metrics_(compression_metrics) {
+        ConfigureVectorSearchThreads(query_threads_);
+    }
 
     int Run() {
         running_.store(true);

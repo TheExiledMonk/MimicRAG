@@ -27,22 +27,22 @@ layout(set=0,binding=1,std430) readonly buffer Query { float query[]; };
 layout(set=0,binding=2,std430) readonly buffer Candidates { uint candidates[]; };
 layout(set=0,binding=3,std430) readonly buffer Valid { uint valid[]; };
 layout(set=0,binding=4,std430) writeonly buffer Output { float distances[]; };
-layout(push_constant) uniform Params { uint dimension; uint count; uint metric; uint sparse; uint rows; } p;
+layout(push_constant) uniform Params { uint dimension; uint count; uint metric; uint sparse; uint rows; float query_norm; } p;
 void main() {
     uint out_id = gl_GlobalInvocationID.x;
     if (out_id >= p.count) return;
     uint row = p.sparse != 0 ? candidates[out_id] : out_id;
     if (valid[row] == 0) { distances[out_id] = uintBitsToFloat(0x7f800000); return; }
-    float dot = 0.0, ln = 0.0, rn = 0.0, l2 = 0.0;
+    float dot = 0.0, ln = 0.0, l2 = 0.0;
     for (uint i = 0; i < p.dimension; ++i) {
         // Dimension-major storage makes adjacent invocations read adjacent floats.
         float a = vectors[i * p.rows + row], b = query[i];
         if (p.metric == 2) { float d = a - b; l2 += d * d; }
-        else { dot += a * b; if (p.metric == 0) { ln += a * a; rn += b * b; } }
+        else { dot += a * b; if (p.metric == 0) ln += a * a; }
     }
     if (p.metric == 2) distances[out_id] = l2;
     else if (p.metric == 1) distances[out_id] = -dot;
-    else distances[out_id] = (ln <= 0.0 || rn <= 0.0) ? 1.0 : 1.0 - dot * inversesqrt(ln * rn);
+    else distances[out_id] = (ln <= 0.0 || p.query_norm <= 0.0) ? 1.0 : 1.0 - dot * inversesqrt(ln * p.query_norm);
 }
 )glsl";
 
@@ -150,9 +150,12 @@ public:
         if (!cmd) return false;
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout_, 0, 1, &descriptor_, 0, nullptr);
-        struct Params { uint32_t dimension, count, metric, sparse, rows; } params{
+        float query_norm = 0.0F;
+        if (metric == VectorMetric::kCosine)
+            for (size_t i = 0; i < dimension; ++i) query_norm += query[i] * query[i];
+        struct Params { uint32_t dimension, count, metric, sparse, rows; float query_norm; } params{
             static_cast<uint32_t>(dimension), count, static_cast<uint32_t>(metric),
-            candidates.empty() ? 0U : 1U, static_cast<uint32_t>(it->second.rows)};
+            candidates.empty() ? 0U : 1U, static_cast<uint32_t>(it->second.rows), query_norm};
         vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
         vkCmdDispatch(cmd, (count + 127) / 128, 1, 1);
         const bool ok = Submit(cmd);
@@ -233,7 +236,7 @@ private:
         for (uint32_t i = 0; i < bindings.size(); ++i) bindings[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         VkDescriptorSetLayoutCreateInfo lci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, static_cast<uint32_t>(bindings.size()), bindings.data()};
         if (vkCreateDescriptorSetLayout(device_, &lci, nullptr, &set_layout_) != VK_SUCCESS) return false;
-        VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, 20};
+        VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, 24};
         VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 1, &set_layout_, 1, &range};
         if (vkCreatePipelineLayout(device_, &plci, nullptr, &pipeline_layout_) != VK_SUCCESS) return false;
         shaderc::Compiler compiler; shaderc::CompileOptions options;

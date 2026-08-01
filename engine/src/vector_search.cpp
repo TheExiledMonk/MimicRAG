@@ -6,6 +6,11 @@
 #include <queue>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <exception>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -37,9 +42,12 @@ AutoRoutingState& RoutingState() {
 }
 
 thread_local int route_override = -1;  // -1 automatic, 0 CPU, 1 Vulkan
+std::atomic<size_t> configured_cpu_threads{0};
 
 size_t CpuThreadCount() {
     size_t threads = std::max(1U, std::thread::hardware_concurrency());
+    const size_t configured = configured_cpu_threads.load(std::memory_order_relaxed);
+    if (configured != 0) threads = configured;
     if (const char* value = std::getenv("MIMICDB_VECTOR_CPU_THREADS")) {
         const unsigned long long parsed = std::strtoull(value, nullptr, 10);
         if (parsed != 0) threads = static_cast<size_t>(parsed);
@@ -47,26 +55,106 @@ size_t CpuThreadCount() {
     return threads;
 }
 
+class VectorWorkerPool {
+public:
+    static VectorWorkerPool& Instance() {
+        static VectorWorkerPool pool(CpuThreadCount());
+        return pool;
+    }
+
+    ~VectorWorkerPool() {
+        {
+            std::lock_guard lock(mutex_);
+            stopping_ = true;
+        }
+        ready_.notify_all();
+        for (auto& worker : workers_) worker.join();
+    }
+
+    size_t Size() const { return workers_.size(); }
+
+    template <typename Function>
+    void Run(size_t count, Function function) {
+        if (count == 0) return;
+        const size_t task_count = std::min(count, workers_.size());
+        if (task_count <= 1 || is_worker_) {
+            for (size_t i = 0; i < count; ++i) function(i);
+            return;
+        }
+        struct Batch {
+            std::atomic<size_t> next{0};
+            std::atomic<size_t> remaining{0};
+            std::mutex mutex;
+            std::condition_variable done;
+            std::exception_ptr error;
+        };
+        auto batch = std::make_shared<Batch>();
+        batch->remaining = task_count;
+        auto shared_function = std::make_shared<Function>(std::move(function));
+        for (size_t task = 0; task < task_count; ++task) {
+            Enqueue([batch, shared_function, count] {
+                try {
+                    for (;;) {
+                        const size_t index = batch->next.fetch_add(1, std::memory_order_relaxed);
+                        if (index >= count) break;
+                        (*shared_function)(index);
+                    }
+                } catch (...) {
+                    std::lock_guard lock(batch->mutex);
+                    if (!batch->error) batch->error = std::current_exception();
+                }
+                if (batch->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1)
+                    batch->done.notify_one();
+            });
+        }
+        std::unique_lock lock(batch->mutex);
+        batch->done.wait(lock, [&] { return batch->remaining.load(std::memory_order_acquire) == 0; });
+        if (batch->error) std::rethrow_exception(batch->error);
+    }
+
+private:
+    explicit VectorWorkerPool(size_t count) {
+        workers_.reserve(std::max<size_t>(1, count));
+        for (size_t i = 0; i < std::max<size_t>(1, count); ++i) {
+            workers_.emplace_back([this] {
+                is_worker_ = true;
+                for (;;) {
+                    std::function<void()> task;
+                    {
+                        std::unique_lock lock(mutex_);
+                        ready_.wait(lock, [&] { return stopping_ || !tasks_.empty(); });
+                        if (stopping_ && tasks_.empty()) break;
+                        task = std::move(tasks_.front());
+                        tasks_.pop_front();
+                    }
+                    task();
+                }
+                is_worker_ = false;
+            });
+        }
+    }
+
+    void Enqueue(std::function<void()> task) {
+        {
+            std::lock_guard lock(mutex_);
+            tasks_.push_back(std::move(task));
+        }
+        ready_.notify_one();
+    }
+
+    static thread_local bool is_worker_;
+    std::vector<std::thread> workers_;
+    std::deque<std::function<void()>> tasks_;
+    std::mutex mutex_;
+    std::condition_variable ready_;
+    bool stopping_ = false;
+};
+
+thread_local bool VectorWorkerPool::is_worker_ = false;
+
 template <typename Function>
 void ParallelFor(size_t count, Function function) {
-    const size_t thread_count = std::min(count, CpuThreadCount());
-    if (thread_count <= 1) {
-        for (size_t i = 0; i < count; ++i) function(i);
-        return;
-    }
-    std::atomic<size_t> next{0};
-    std::vector<std::thread> workers;
-    workers.reserve(thread_count);
-    for (size_t worker = 0; worker < thread_count; ++worker) {
-        workers.emplace_back([&] {
-            for (;;) {
-                const size_t i = next.fetch_add(1, std::memory_order_relaxed);
-                if (i >= count) break;
-                function(i);
-            }
-        });
-    }
-    for (auto& worker : workers) worker.join();
+    VectorWorkerPool::Instance().Run(count, std::move(function));
 }
 
 bool IsAutoMode() {
@@ -135,6 +223,23 @@ struct Worse {
     }
 };
 
+float PreparedDistance(const float* left, const float* right, size_t dimension,
+                       VectorMetric metric, float query_norm_squared) {
+    if (metric == VectorMetric::kDot) return -FastDot(left, right, dimension);
+    if (metric == VectorMetric::kCosine) {
+        const float dot = FastDot(left, right, dimension);
+        const float left_norm_squared = FastDot(left, left, dimension);
+        if (left_norm_squared <= 0.0F || query_norm_squared <= 0.0F) return 1.0F;
+        return 1.0F - dot / std::sqrt(left_norm_squared * query_norm_squared);
+    }
+    float sum = 0.0F;
+    for (size_t i = 0; i < dimension; ++i) {
+        const float delta = left[i] - right[i];
+        sum += delta * delta;
+    }
+    return sum;
+}
+
 bool Compare(double left, CompareOp op, double right) {
     switch (op) {
         case CompareOp::kEq: return left == right;
@@ -177,6 +282,7 @@ bool Matches(const std::vector<FieldVector>& fields, size_t row,
 void SearchField(const std::vector<FieldVector>& fields, size_t vector_field,
                  uint64_t base_row, const float* query,
                  size_t dimension, size_t top_k, VectorMetric metric,
+                 float query_norm_squared,
                  const std::vector<CompressedColumnView>* compressed,
                  const std::vector<VectorSearchPredicate>& predicates,
                  const std::vector<size_t>* precomputed_candidates,
@@ -186,7 +292,9 @@ void SearchField(const std::vector<FieldVector>& fields, size_t vector_field,
         size_t stored_dimension = 0;
         const float* vector = field.VectorFloat32(row, &stored_dimension);
         if (!vector || stored_dimension != dimension) return;
-        VectorSearchHit hit{base_row + row, VectorDistance(vector, query, dimension, metric)};
+        VectorSearchHit hit{base_row + row,
+                            PreparedDistance(vector, query, dimension, metric,
+                                             query_norm_squared)};
         if (!std::isfinite(hit.distance)) return;
         if (heap->size() < top_k) heap->push(hit);
         else if (hit.distance < heap->top().distance ||
@@ -222,20 +330,9 @@ void SearchField(const std::vector<FieldVector>& fields, size_t vector_field,
 
 float VectorDistance(const float* left, const float* right, size_t dimension,
                      VectorMetric metric) {
-    if (metric == VectorMetric::kDot) return -FastDot(left, right, dimension);
-    if (metric == VectorMetric::kCosine) {
-        const float dot = FastDot(left, right, dimension);
-        const float ln = FastDot(left, left, dimension);
-        const float rn = FastDot(right, right, dimension);
-        if (ln <= 0.0F || rn <= 0.0F) return 1.0F;
-        return 1.0F - dot / std::sqrt(ln * rn);
-    }
-    float sum = 0.0F;
-    for (size_t i = 0; i < dimension; ++i) {
-        const float delta = left[i] - right[i];
-        sum += delta * delta;
-    }
-    return sum;
+    const float query_norm_squared = metric == VectorMetric::kCosine
+        ? FastDot(right, right, dimension) : 0.0F;
+    return PreparedDistance(left, right, dimension, metric, query_norm_squared);
 }
 
 namespace {
@@ -287,6 +384,8 @@ bool VectorSearch(const Dataset& dataset, size_t field_index, const float* query
         (dataset.VectorDimension(field_index) != 0 &&
          dataset.VectorDimension(field_index) != dimension)) return false;
     for (size_t i = 0; i < dimension; ++i) if (!std::isfinite(query[i])) return false;
+    const float query_norm_squared = metric == VectorMetric::kCosine
+        ? FastDot(query, query, dimension) : 0.0F;
     for (const auto& predicate : predicates) {
         if (predicate.field_index >= dataset.Fields().size()) return false;
     }
@@ -355,6 +454,7 @@ bool VectorSearch(const Dataset& dataset, size_t field_index, const float* query
     auto search_one = [&](Work item) {
         std::priority_queue<VectorSearchHit, std::vector<VectorSearchHit>, Worse> local;
         SearchField(*item.fields, field_index, item.base, query, dimension, top_k, metric,
+                    query_norm_squared,
                     item.compressed,
                     predicates, item.candidates_precomputed ? &item.candidates : nullptr, &local);
         std::vector<VectorSearchHit> hits;
@@ -393,8 +493,12 @@ bool VectorSearch(const Dataset& dataset, size_t field_index, const float* query
 VectorSearchRuntimeStats GetVectorSearchRuntimeStats() {
     auto& state = RoutingState();
     std::lock_guard lock(state.mutex);
-    return {CpuThreadCount(), state.crossover_elements,
+    return {VectorWorkerPool::Instance().Size(), state.crossover_elements,
             state.max_tested_elements, state.calibrated};
+}
+
+void ConfigureVectorSearchThreads(size_t threads) {
+    configured_cpu_threads.store(threads, std::memory_order_relaxed);
 }
 
 }  // namespace mimicdb

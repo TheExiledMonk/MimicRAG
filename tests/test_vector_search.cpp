@@ -3,6 +3,7 @@
 #include <vector>
 #include <filesystem>
 #include <cstdlib>
+#include <future>
 
 #include "mimicdb/dataset.h"
 #include "mimicdb/vector_search.h"
@@ -53,6 +54,20 @@ int main() {
     assert(mimicdb::VectorSearch(filtered, 0, filtered_query, 2, 1,
                                  mimicdb::VectorMetric::kCosine, &hits, predicates));
     assert(hits.size() == 1 && hits[0].row_id == 4099);
+    unsetenv("MIMICDB_VECTOR_BACKEND");
+
+    setenv("MIMICDB_VECTOR_BACKEND", "cpu", 1);
+    std::vector<std::future<bool>> concurrent;
+    for (size_t task = 0; task < 4; ++task) {
+        concurrent.push_back(std::async(std::launch::async, [&] {
+            std::vector<mimicdb::VectorSearchHit> local_hits;
+            return mimicdb::VectorSearch(filtered, 0, filtered_query, 2, 1,
+                                          mimicdb::VectorMetric::kCosine,
+                                          &local_hits, predicates) &&
+                   local_hits.size() == 1 && local_hits[0].row_id == 4099;
+        }));
+    }
+    for (auto& result : concurrent) assert(result.get());
     unsetenv("MIMICDB_VECTOR_BACKEND");
 
     const auto path = std::filesystem::temp_directory_path() / "mimicdb_vector_segment_test.bin";
