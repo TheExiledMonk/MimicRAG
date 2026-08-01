@@ -14,6 +14,10 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#if defined(__linux__)
+#include <pthread.h>
+#include <sched.h>
+#endif
 #if defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>
 #endif
@@ -116,7 +120,15 @@ private:
     explicit VectorWorkerPool(size_t count) {
         workers_.reserve(std::max<size_t>(1, count));
         for (size_t i = 0; i < std::max<size_t>(1, count); ++i) {
-            workers_.emplace_back([this] {
+            workers_.emplace_back([this, i] {
+#if defined(__linux__)
+                if (const char* pin = std::getenv("MIMICDB_VECTOR_PIN_THREADS");
+                    pin && std::string(pin) != "0") {
+                    cpu_set_t cpus; CPU_ZERO(&cpus);
+                    CPU_SET(i % std::max(1U, std::thread::hardware_concurrency()), &cpus);
+                    pthread_setaffinity_np(pthread_self(), sizeof(cpus), &cpus);
+                }
+#endif
                 is_worker_ = true;
                 for (;;) {
                     std::function<void()> task;

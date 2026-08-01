@@ -187,6 +187,10 @@ Runtime controls:
   fields that do not fit transparently stay on CPU
 - `MIMICDB_VECTOR_CPU_THREADS`: bounded CPU vector worker count (defaults to detected
   hardware concurrency)
+- `MIMICDB_VECTOR_PIN_THREADS=1`: pin persistent vector workers to logical CPUs; useful
+  on dedicated hosts, but disabled by default because container/NUMA topology varies
+- `MIMICDB_IVF_MAX_ASSIGNMENT_DISTANCE`: cosine clusterability cutoff for automatic IVF
+  (default: `0.35`); fields above it use exact CPU/Vulkan search unless probes are explicit
 
 The server's existing `query_threads` setting configures the same persistent vector worker
 pool. Embedded applications can call `ConfigureVectorSearchThreads()` before their first

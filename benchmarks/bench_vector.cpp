@@ -128,6 +128,8 @@ int main(int argc, char** argv) {
               << " shortlist_limit=" << ivf.shortlist_limit
               << " lists_pruned=" << ivf.lists_pruned
               << " routing_confidence=" << ivf.routing_confidence
+              << " mean_assignment_distance=" << ivf.mean_assignment_distance
+              << " exact_fallback=" << ivf.exact_fallback
               << " routing_seconds=" << ivf.routing_seconds
               << " shortlist_seconds=" << ivf.shortlist_seconds
               << " rerank_seconds=" << ivf.rerank_seconds

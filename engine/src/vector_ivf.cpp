@@ -53,6 +53,7 @@ struct Index {
     std::vector<Bounds> bounds;
     uint64_t builds = 0;
     double build_seconds = 0.0;
+    double mean_assignment_distance = 0.0;
 };
 struct ActiveIndex {
     size_t rows=0, dimension=0;
@@ -218,6 +219,7 @@ public:
         }
 
         std::vector<uint32_t> assignments(vectors.size());
+        std::vector<float> assignment_distances(vectors.size());
         index->offsets.assign(index->centroids + 1, 0);
         Parallel(vectors.size(), [&](size_t row) {
             float best = std::numeric_limits<float>::infinity(); uint32_t selected = 0;
@@ -227,7 +229,10 @@ public:
                 if (distance < best) { best = distance; selected = c; }
             }
             assignments[row] = selected;
+            assignment_distances[row] = best;
         });
+        index->mean_assignment_distance=std::accumulate(
+            assignment_distances.begin(),assignment_distances.end(),0.0) / assignment_distances.size();
         for (uint32_t assignment : assignments) ++index->offsets[assignment+1];
         std::partial_sum(index->offsets.begin(), index->offsets.end(), index->offsets.begin());
         std::vector<uint32_t> positions = index->offsets;
@@ -326,7 +331,8 @@ public:
         if (found == indexes_.end()) return {};
         IvfSearchStats result; result.indexed_rows=found->second->rows;
         result.centroid_count=found->second->centroids; result.routing_dimensions=found->second->routing_dimensions;
-        result.builds=found->second->builds; result.build_seconds=found->second->build_seconds; return result;
+        result.builds=found->second->builds; result.build_seconds=found->second->build_seconds;
+        result.mean_assignment_distance=found->second->mean_assignment_distance; return result;
     }
     void Release(const Dataset& dataset) {
         std::lock_guard lock(mutex_);
@@ -373,6 +379,22 @@ bool VectorSearchIvf(const Dataset& dataset, size_t field, const float* query,
         return VectorSearchCandidates(dataset,field,query,dimension,top_k,metric,{},out,predicates);
     }
     if (!query || dimension != index->dimension || !out || !top_k) return false;
+    double maximum_assignment_distance=0.35;
+    if(const char* value=std::getenv("MIMICDB_IVF_MAX_ASSIGNMENT_DISTANCE")){
+        const double parsed=std::strtod(value,nullptr);if(parsed>0)maximum_assignment_distance=parsed;
+    }
+    if(probes==0 && metric==VectorMetric::kCosine &&
+       index->mean_assignment_distance>maximum_assignment_distance) {
+        const auto started=Clock::now();
+        const bool ok=VectorSearch(dataset,field,query,dimension,top_k,metric,out,predicates);
+        std::lock_guard lock(last_stats_mutex); last_stats={};
+        last_stats.indexed_rows=index->rows;last_stats.centroid_count=index->centroids;
+        last_stats.routing_dimensions=index->routing_dimensions;last_stats.builds=index->builds;
+        last_stats.build_seconds=index->build_seconds;
+        last_stats.mean_assignment_distance=index->mean_assignment_distance;
+        last_stats.exact_fallback=true;last_stats.rerank_seconds=std::chrono::duration<double>(Clock::now()-started).count();
+        last_key={&dataset,field,metric};return ok;
+    }
     const auto route_start=Clock::now();
     std::vector<std::pair<float,uint32_t>> ranked;
     ranked.reserve(index->centroids); size_t pruned=0;
@@ -499,6 +521,7 @@ bool VectorSearchIvf(const Dataset& dataset, size_t field, const float* query,
         last_stats.shortlist_limit=shortlist_limit; last_stats.routing_confidence=routing_confidence;
         last_stats.routing_seconds=routing_seconds; last_stats.shortlist_seconds=shortlist_seconds;
         last_stats.rerank_seconds=rerank_seconds; last_stats.build_seconds=index->build_seconds;
+        last_stats.mean_assignment_distance=index->mean_assignment_distance;
         last_key={&dataset,field,metric};
     }
     return ok;

@@ -26,6 +26,8 @@ struct IvfSearchStats {
     double shortlist_seconds = 0.0;
     double rerank_seconds = 0.0;
     double build_seconds = 0.0;
+    double mean_assignment_distance = 0.0;
+    bool exact_fallback = false;
 };
 
 bool BuildVectorIvf(const Dataset& dataset, size_t field_index, VectorMetric metric);

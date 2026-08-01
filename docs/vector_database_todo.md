@@ -51,6 +51,8 @@
 - [x] Benchmark recall across a query suite instead of relying on a single query.
 - [x] Reduce learned routing to 32 dimensions after a recall-gated projection sweep.
 - [x] Scale broad-probe shortlist capacity by probe pressure, candidate volume, and routing confidence.
+- [x] Detect poorly clustered cosine fields and route automatic IVF requests to exact CPU/Vulkan search.
+- [x] Add opt-in vector-worker CPU affinity for latency-sensitive dedicated hosts.
 - [ ] Persist a versioned per-segment IVF sidecar and load it during recovery.
 - [ ] Rebuild changed sealed indexes in the background rather than on the first ANN query.
 - [ ] Add representative-dataset recall calibration for automatic default probe selection.

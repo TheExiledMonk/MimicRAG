@@ -113,6 +113,27 @@ int main() {
             assert(exact_all[i].row_id == ivf_all[i].row_id);
     }
 
+    mimicdb::Dataset noisy("noisy");
+    noisy.AddField(mimicdb::FieldVector("embedding", mimicdb::FieldType::kVectorFloat32));
+    for (size_t row = 0; row < 4100; ++row) {
+        std::vector<float> vector(8);
+        for (size_t d = 0; d < vector.size(); ++d)
+            vector[d] = std::sin(static_cast<float>((row + 1) * (d + 3)));
+        assert(noisy.Append({mimicdb::FieldValue::VectorFloat32(std::move(vector))}));
+    }
+    const float noisy_query[] = {0.2F, -0.7F, 0.4F, 0.1F, -0.3F, 0.8F, -0.5F, 0.6F};
+    setenv("MIMICDB_IVF_MAX_ASSIGNMENT_DISTANCE", "0.01", 1);
+    assert(mimicdb::VectorSearch(noisy, 0, noisy_query, 8, 10,
+                                 mimicdb::VectorMetric::kCosine, &exact_all));
+    assert(mimicdb::VectorSearchIvf(noisy, 0, noisy_query, 8, 10,
+                                    mimicdb::VectorMetric::kCosine, 0, &ivf_all));
+    assert(mimicdb::GetVectorIvfStats(noisy, 0, mimicdb::VectorMetric::kCosine)
+               .exact_fallback);
+    assert(exact_all.size() == ivf_all.size());
+    for (size_t i = 0; i < exact_all.size(); ++i)
+        assert(exact_all[i].row_id == ivf_all[i].row_id);
+    unsetenv("MIMICDB_IVF_MAX_ASSIGNMENT_DISTANCE");
+
     const auto path = std::filesystem::temp_directory_path() / "mimicdb_vector_segment_test.bin";
     std::filesystem::remove(path);
     assert(mimicdb::SegmentWriter(path.string()).Write(filtered.Segments()[0]));
