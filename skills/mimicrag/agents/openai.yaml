@@ -1,0 +1,4 @@
+interface:
+  display_name: "MimicRAG"
+  short_description: "Integrate agents with native MimicRAG retrieval"
+  default_prompt: "Use $mimicrag to ingest knowledge, retrieve evidence, answer with citations, or explore related graph nodes."

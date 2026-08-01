@@ -81,7 +81,8 @@ query vector. Full methodology is in
 
 ## Status
 
-MimicRAG is suitable for evaluation and controlled single-node commercial deployments.
+MimicRAG is suitable for evaluation and, with a commercial license, controlled single-node
+commercial deployments.
 It is not yet a distributed or high-availability database. Before using it for a
 mission-critical public service, put TLS in front of it and establish backups,
 monitoring, capacity limits, relevance tests, and recovery drills.
@@ -401,14 +402,34 @@ vector search, adaptive multicore execution, and optional Vulkan residency. See
 
 ## License
 
-No open-source license has been selected yet. Until a `LICENSE` file is added, the
-source is publicly visible but normal copyright restrictions apply. Choose and add a
-license before inviting external reuse or contributions.
+MimicDB and MimicRAG are source-available under the
+[PolyForm Noncommercial License 1.0.0](LICENSE). Non-commercial use, modification, and
+distribution are permitted under its terms. **Commercial use requires a separate license.**
+See [COMMERCIAL_LICENSE.md](COMMERCIAL_LICENSE.md) for commercial licensing inquiries.
+
+This is a source-available license, not an OSI-approved open-source license.
+Third-party dependencies and the `llama.cpp` submodule remain under their respective licenses.
 
 ## Further documentation
 
 - [`docs/mimicrag_cpp.md`](docs/mimicrag_cpp.md): native runtime details
+- [`docs/agent-integration.md`](docs/agent-integration.md): OpenClaw, Hermes, and generic agent integration
 - [`docs/design.md`](docs/design.md): MimicDB architecture and durability
 - [`docs/security_v1.md`](docs/security_v1.md): database protocol security
 - [`docs/security_setup_howto.md`](docs/security_setup_howto.md): security setup
 - [`benchmarks/results/`](benchmarks/results/): reproducible benchmark records
+
+## Agent skill
+
+The portable [`skills/mimicrag/SKILL.md`](skills/mimicrag/SKILL.md) teaches compatible agents how
+to retrieve evidence, generate cited answers, ingest approved documents, and perform bounded graph
+deep dives. Install the complete `skills/mimicrag` directory so its HTTP reference is included.
+
+For Hermes Agent after this repository is public:
+
+```bash
+hermes skills install YOUR_ACCOUNT/YOUR_REPOSITORY/skills/mimicrag
+```
+
+For OpenClaw, copy `skills/mimicrag` beneath a configured workspace or global skills root. See the
+[agent integration guide](docs/agent-integration.md) for credentials, tool boundaries, and testing.
