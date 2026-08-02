@@ -64,21 +64,21 @@ cite the sources.” OpenClaw's current skill discovery and configuration behavi
 Once this repository is public, install the skill directly from its GitHub path:
 
 ```bash
-hermes skills install OWNER/REPOSITORY/skills/mimicrag
+hermes skills install TheExiledMonk/MimicRAG/skills/mimicrag
 ```
 
 Alternatively, add the repository as a tap; Hermes uses `skills/` as the default tap path:
 
 ```bash
-hermes skills tap add OWNER/REPOSITORY
-hermes skills install OWNER/REPOSITORY/mimicrag
+hermes skills tap add TheExiledMonk/MimicRAG
+hermes skills install TheExiledMonk/MimicRAG/mimicrag
 ```
 
 Pass the two environment variables into Hermes terminal execution using its secure configuration;
 do not paste the API key into a chat. Inspect and audit the installed community skill before use:
 
 ```bash
-hermes skills inspect OWNER/REPOSITORY/skills/mimicrag
+hermes skills inspect TheExiledMonk/MimicRAG/skills/mimicrag
 hermes skills audit
 ```
 

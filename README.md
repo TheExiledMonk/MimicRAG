@@ -112,8 +112,8 @@ packages (commonly `libvulkan-dev`, `glslc`, and `libshaderc-dev`).
 Clone with the pinned `llama.cpp` submodule:
 
 ```bash
-git clone --recurse-submodules https://github.com/YOUR_ACCOUNT/YOUR_REPOSITORY.git
-cd YOUR_REPOSITORY
+git clone --recurse-submodules https://github.com/TheExiledMonk/MimicRAG.git
+cd MimicRAG
 ```
 
 If the repository was cloned without submodules:
@@ -429,7 +429,7 @@ deep dives. Install the complete `skills/mimicrag` directory so its HTTP referen
 For Hermes Agent after this repository is public:
 
 ```bash
-hermes skills install YOUR_ACCOUNT/YOUR_REPOSITORY/skills/mimicrag
+hermes skills install TheExiledMonk/MimicRAG/skills/mimicrag
 ```
 
 For OpenClaw, copy `skills/mimicrag` beneath a configured workspace or global skills root. See the
