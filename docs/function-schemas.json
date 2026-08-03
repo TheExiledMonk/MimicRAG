@@ -1,9 +1,26 @@
 {
   "version": "1.5",
+  "description": "Portable tool schemas for trusted wrappers. Hosts should inject tenant/scope and authentication from policy where possible.",
   "functions": [
-    {"name": "mimicrag_retrieve", "description": "Retrieve evidence passages.", "parameters": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "tenant_id": {"type": "string", "default": "default"}, "access_scope": {"type": "string", "default": "public"}, "top_k": {"type": "integer", "minimum": 1, "maximum": 100}}}},
-    {"name": "mimicrag_expand", "description": "Expand graph neighbors.", "parameters": {"type": "object", "required": ["node_id"], "properties": {"node_id": {"type": "string"}, "tenant_id": {"type": "string"}, "max_neighbors": {"type": "integer", "minimum": 1, "maximum": 256}}}},
-    {"name": "mimicrag_ingest", "description": "Ingest approved text.", "parameters": {"type": "object", "required": ["text", "source_uri"], "properties": {"text": {"type": "string"}, "source_uri": {"type": "string"}, "tenant_id": {"type": "string"}}}},
-    {"name": "mimicrag_trace", "description": "Inspect a trace.", "parameters": {"type": "object", "required": ["trace_id"], "properties": {"trace_id": {"type": "string"}}}}
+    {
+      "name": "mimicrag_retrieve",
+      "description": "Retrieve ranked evidence passages without generating an answer.",
+      "parameters": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "tenant_id": {"type": "string", "default": "default"}, "access_scope": {"type": "string", "default": "public"}, "top_k": {"type": "integer", "minimum": 1, "maximum": 100}, "filter": {"type": "object"}}}
+    },
+    {
+      "name": "mimicrag_expand",
+      "description": "Expand bounded document-graph neighbors from a retrieved node.",
+      "parameters": {"type": "object", "required": ["node_id"], "properties": {"node_id": {"type": "string"}, "tenant_id": {"type": "string", "default": "default"}, "access_scope": {"type": "string", "default": "public"}, "max_neighbors": {"type": "integer", "minimum": 1, "maximum": 256}}}
+    },
+    {
+      "name": "mimicrag_ingest",
+      "description": "Ingest approved text. Expose only behind a host approval boundary.",
+      "parameters": {"type": "object", "required": ["text", "source_uri"], "properties": {"text": {"type": "string"}, "source_uri": {"type": "string"}, "tenant_id": {"type": "string", "default": "default"}, "access_scope": {"type": "string", "default": "public"}, "title": {"type": "string"}, "format": {"enum": ["text", "markdown", "html"]}, "mode": {"enum": ["fast", "structured", "semantic"]}, "metadata": {"type": "object"}}}
+    },
+    {
+      "name": "mimicrag_trace",
+      "description": "Inspect one retrieval or answer trace by identifier.",
+      "parameters": {"type": "object", "required": ["trace_id"], "properties": {"trace_id": {"type": "string"}}}
+    }
   ]
 }

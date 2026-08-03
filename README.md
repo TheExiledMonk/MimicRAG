@@ -5,9 +5,11 @@ vector engine. One executable handles document ingestion, chunking, local or rem
 embeddings, hybrid BM25/vector retrieval, metadata filtering, document-graph
 navigation, cited answer generation, tracing, and evaluation.
 
-It does not require a Python runtime, separate vector database, search engine, graph
-database, or embedding server. Remote model APIs remain optional: embeddings can run
-in-process through the pinned `llama.cpp` submodule with Vulkan, CUDA, Metal, or CPU.
+The native server does not require a Python runtime, separate vector database, search engine,
+graph database, or embedding server. Optional Python packages provide the V1.4 connector
+ecosystem, V1.5 SDK/MCP/developer tools, and V1.6 embedded agent memory. Remote model APIs remain
+optional: embeddings can run in-process through the pinned `llama.cpp` submodule with Vulkan,
+CUDA, Metal, or CPU.
 
 MimicDB, the underlying engine, is also available as a standalone columnar database
 with a native server, C++ API, compatibility layers, and management UI.
@@ -27,6 +29,10 @@ with a native server, C++ API, compatibility layers, and management UI.
 - Citations, bounded traces, background ingestion jobs, and golden-set evaluation
 - Disk-backed content and memory-mapped vector and lexical indexes
 - Append-only, checksummed binary catalog with partial-tail recovery
+- Optional document connectors for files, web, Git, object storage, Drive, and SharePoint
+- OpenAPI, MCP, portable function schemas, and lightweight C++/Go/Rust/JavaScript/Python clients
+- Optional evidence-bound working, episodic, semantic, procedural, preference, prospective, and
+  negative agent memory
 
 ## Architecture
 
@@ -95,6 +101,7 @@ monitoring, capacity limits, relevance tests, and recovery drills.
 - Git and `pkg-config`
 - libcurl, BZip2, Zstandard, and nlohmann-json development packages
 - Optional Vulkan/CUDA/Metal development stack for GPU embeddings
+- Optional Python 3.10 or newer for connectors, SDK/MCP tooling, and unified agent memory
 
 Example Ubuntu/Debian CPU build dependencies:
 
@@ -106,6 +113,31 @@ sudo apt install -y build-essential cmake git pkg-config curl \
 
 For Vulkan builds, also install your vendor driver and distribution Vulkan development
 packages (commonly `libvulkan-dev`, `glslc`, and `libshaderc-dev`).
+
+## Optional Python packages
+
+Install the repository packages in an isolated environment when using V1.4–V1.6 companion
+features:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e ./api
+```
+
+The base packages use only the Python standard library. Install format and connector SDKs only
+when needed:
+
+```bash
+python -m pip install pypdf python-docx boto3
+# Google Drive example client:
+python -m pip install google-api-python-client google-auth
+# SharePoint uses an authenticated Microsoft Graph client supplied by your application.
+```
+
+PDF OCR is callback-based and does not mandate an OCR engine. Your application may integrate
+Tesseract, a cloud OCR provider, or another local implementation. Optional SDKs are deliberately
+not runtime dependencies of the native query server.
 
 ## Clone and build
 
@@ -168,6 +200,7 @@ cp mimicrag.example.json mimicrag.json
 ```
 
 Edit `mimicrag.json` so `local_embedding.model_path` matches the downloaded model.
+The complete field reference is [`docs/configuration.md`](docs/configuration.md).
 Keep secrets in environment variables, not JSON or Git:
 
 ```bash
@@ -205,6 +238,15 @@ Check readiness:
 curl -fsS http://127.0.0.1:8080/health \
   -H "Authorization: Bearer $MIMICRAG_API_KEY"
 ```
+
+## V1 feature guides
+
+- [V1.1 operations, recovery, observability, and tenancy](docs/operations_v1_1.md)
+- [V1.2 normalized and semantic ingestion](docs/semantic_ingestion_v1_2.md)
+- [V1.3 retrieval quality and evaluation](docs/retrieval_quality_v1_3.md)
+- [V1.4 adapters, connectors, synchronization, and manifests](docs/ingestion_ecosystem_v1_4.md)
+- [V1.5 OpenAPI, clients, MCP, sessions, and developer tooling](docs/developer_experience_v1_5.md)
+- [V1.6 evidence-bound unified agent memory](docs/unified_agent_memory_v1_6.md)
 
 ## Ingest and retrieve
 
@@ -313,6 +355,7 @@ graph construction.
 | Method | Route | Purpose |
 |---|---|---|
 | `GET` | `/health`, `/ready` | Readiness and index/storage state |
+| `GET` | `/openapi.json` | Runtime OpenAPI route summary |
 | `POST` | `/v1/documents` | Versioned document ingestion |
 | `DELETE` | `/v1/documents/{id}` | Tenant-bound document deletion |
 | `GET` | `/v1/storage` | Live and reclaimable storage statistics |
@@ -341,6 +384,12 @@ The configured `server.data_path` contains all runtime state:
 - `lexical.idx`: compact memory-mapped BM25 dictionary, lengths, and postings
 - trace JSONL and optional Wikipedia checkpoint
 - restart-safe ingestion checkpoints and content/config keyed semantic-analysis cache
+
+V1.4 synchronization manifests and the V1.6 SQLite memory ledger are companion state, not native
+catalog files. They are included in native snapshots only when you deliberately place them as
+regular files directly inside `server.data_path`; SQLite `-wal` and `-shm` files require a
+coordinated checkpoint or stopped writer. The safer default is to back them up separately while
+their owning process is stopped. See the [deployment guide](docs/deployment.md#companion-state).
 
 Back up the whole directory as one consistency unit while ingestion is stopped. The
 catalog can recover a truncated final append and stale derived indexes are rebuilt, but
@@ -384,7 +433,12 @@ legacy CLI/API tests require the optional Python dependencies in `requirements.t
 - `engine/`: MimicDB columnar, SIMD, vector, IVF, and Vulkan engine
 - `server/`: MimicDB binary-protocol database server
 - `api_cpp/`: C++ API and compatibility helpers
-- `client/`, `api/`: legacy/reference Python clients and adapters
+- `client/`: legacy/reference MimicDB binary-protocol client
+- `api/mimicrag_ingestion/`: optional document adapters, connectors, and synchronization
+- `api/mimicrag_dev/`: Python SDK, bounded sessions, MCP server, and developer CLI
+- `api/mimicrag_memory/`: embedded evidence ledger and agent-memory manager
+- `clients/`: lightweight C++, Go, Rust, and JavaScript MimicRAG HTTP clients
+- `api/`: installable Python packages and legacy MimicDB APIs
 - `management_ui/`: optional management service and desktop/web UI
 - `benchmarks/`: engine and RAG benchmarks with recorded results
 - `docs/`: design, security, API, and operational documentation
@@ -406,7 +460,7 @@ vector search, adaptive multicore execution, and optional Vulkan residency. See
 - Append/version model rather than general transactions and arbitrary updates
 - Native HTTP API supports bearer authentication but does not terminate TLS
 - Large-corpus recall and performance still require workload-specific validation
-- Index formats are versioned but rolling-upgrade tooling is not yet complete
+- Single-node snapshot, restore, and migration tooling exists; multi-node rolling upgrades do not
 - Not a general-purpose graph-query engine
 
 ## License
@@ -424,6 +478,15 @@ Third-party dependencies and the `llama.cpp` submodule remain under their respec
 - [`roadmap.md`](roadmap.md): prioritized post-V1 development roadmap
 - [`docs/mimicrag_cpp.md`](docs/mimicrag_cpp.md): native runtime details
 - [`docs/agent-integration.md`](docs/agent-integration.md): OpenClaw, Hermes, and generic agent integration
+- [`docs/configuration.md`](docs/configuration.md): native and companion configuration reference
+- [`docs/operations_v1_1.md`](docs/operations_v1_1.md): lifecycle, backup, recovery, and operations
+- [`docs/semantic_ingestion_v1_2.md`](docs/semantic_ingestion_v1_2.md): normalized/semantic ingestion
+- [`docs/retrieval_quality_v1_3.md`](docs/retrieval_quality_v1_3.md): retrieval planning and evaluation
+- [`docs/ingestion_ecosystem_v1_4.md`](docs/ingestion_ecosystem_v1_4.md): adapters and connectors
+- [`docs/developer_experience_v1_5.md`](docs/developer_experience_v1_5.md): clients, OpenAPI, MCP, and tooling
+- [`docs/unified_agent_memory_v1_6.md`](docs/unified_agent_memory_v1_6.md): embedded agent memory
+- [`docs/openapi.json`](docs/openapi.json): complete published HTTP contract
+- [`docs/function-schemas.json`](docs/function-schemas.json): portable agent tool schemas
 - [`docs/design.md`](docs/design.md): MimicDB architecture and durability
 - [`docs/security_v1.md`](docs/security_v1.md): database protocol security
 - [`docs/security_setup_howto.md`](docs/security_setup_howto.md): security setup

@@ -1,27 +1,53 @@
 {
   "openapi": "3.1.0",
-  "info": {"title": "MimicRAG HTTP API", "version": "1.5.0"},
+  "info": {
+    "title": "MimicRAG HTTP API",
+    "version": "1.6.0",
+    "description": "Native single-node retrieval, ingestion, answer, graph, evaluation, trace, and lifecycle API. Optional connector and memory packages are separate Python APIs."
+  },
   "servers": [{"url": "http://127.0.0.1:8080"}],
   "security": [{"bearerAuth": []}],
   "paths": {
-    "/health": {"get": {"operationId": "health", "responses": {"200": {"description": "Health status"}}}},
-    "/ready": {"get": {"operationId": "ready", "responses": {"200": {"description": "Readiness status"}}}},
-    "/openapi.json": {"get": {"operationId": "openapi", "responses": {"200": {"description": "OpenAPI document"}}}},
-    "/v1/documents": {"post": {"operationId": "ingestDocument", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/IngestRequest"}}}}, "responses": {"200": {"description": "Ingestion result"}}}},
-    "/v1/documents/{document_id}": {"delete": {"operationId": "deleteDocument", "parameters": [{"name": "document_id", "in": "path", "required": true, "schema": {"type": "string"}}], "responses": {"200": {"description": "Deletion result"}}}},
-    "/v1/retrieve": {"post": {"operationId": "retrieve", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/QueryRequest"}}}}, "responses": {"200": {"description": "Ranked evidence"}}}},
-    "/v1/answers": {"post": {"operationId": "answer", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/QueryRequest"}}}}, "responses": {"200": {"description": "Cited answer"}}}},
-    "/v1/graph/expand": {"post": {"operationId": "expandGraph", "responses": {"200": {"description": "Related nodes"}}}},
-    "/v1/feedback": {"post": {"operationId": "recordFeedback", "responses": {"200": {"description": "Feedback result"}}}},
-    "/v1/evaluations": {"post": {"operationId": "evaluate", "responses": {"200": {"description": "Evaluation metrics"}}}},
-    "/v1/storage": {"get": {"operationId": "storage", "responses": {"200": {"description": "Storage statistics"}}}},
-    "/v1/traces": {"get": {"operationId": "listTraces", "responses": {"200": {"description": "Recent traces"}}}},
-    "/v1/traces/{trace_id}": {"get": {"operationId": "getTrace", "parameters": [{"name": "trace_id", "in": "path", "required": true, "schema": {"type": "string"}}], "responses": {"200": {"description": "Trace"}}}},
-    "/v1/jobs/{job_id}": {"get": {"operationId": "getJob", "responses": {"200": {"description": "Job"}}}, "delete": {"operationId": "cancelJob", "responses": {"200": {"description": "Cancellation result"}}}},
-    "/v1/chat/completions": {"post": {"operationId": "createChatCompletion", "responses": {"200": {"description": "OpenAI-compatible chat completion"}}}}
+    "/health": {"get": {"operationId": "health", "responses": {"200": {"description": "Health and index state", "content": {"application/json": {"schema": {"type": "object"}}}}}}},
+    "/ready": {"get": {"operationId": "ready", "responses": {"200": {"description": "Readiness and index state", "content": {"application/json": {"schema": {"type": "object"}}}}}}},
+    "/openapi.json": {"get": {"operationId": "runtimeOpenapiSummary", "responses": {"200": {"description": "Runtime-generated route summary"}}}},
+    "/metrics": {"get": {"operationId": "metrics", "responses": {"200": {"description": "Prometheus text exposition", "content": {"text/plain": {"schema": {"type": "string"}}}}}}},
+    "/v1/documents": {"post": {"operationId": "ingestDocument", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/IngestRequest"}}}}, "responses": {"200": {"description": "Ingestion result", "content": {"application/json": {"schema": {"type": "object"}}}}, "400": {"$ref": "#/components/responses/Error"}}}},
+    "/v1/documents/{document_id}": {"delete": {"operationId": "deleteDocument", "parameters": [{"$ref": "#/components/parameters/DocumentId"}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TenantRequest"}}}}, "responses": {"200": {"description": "Deletion result"}, "404": {"$ref": "#/components/responses/Error"}}}},
+    "/v1/storage": {"get": {"operationId": "storage", "responses": {"200": {"description": "Live and reclaimable storage statistics"}}}},
+    "/v1/jobs/{job_id}": {
+      "get": {"operationId": "getJob", "parameters": [{"$ref": "#/components/parameters/JobId"}], "responses": {"200": {"description": "Background ingestion job"}, "404": {"$ref": "#/components/responses/Error"}}},
+      "delete": {"operationId": "cancelJob", "parameters": [{"$ref": "#/components/parameters/JobId"}], "responses": {"200": {"description": "Cooperative cancellation result"}, "404": {"$ref": "#/components/responses/Error"}}}
+    },
+    "/v1/traces": {"get": {"operationId": "listTraces", "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100}}], "responses": {"200": {"description": "Recent traces"}}}},
+    "/v1/traces/{trace_id}": {"get": {"operationId": "getTrace", "parameters": [{"$ref": "#/components/parameters/TraceId"}], "responses": {"200": {"description": "Retrieval or answer trace"}, "404": {"$ref": "#/components/responses/Error"}}}},
+    "/v1/tenants/{tenant_id}": {"delete": {"operationId": "eraseTenant", "parameters": [{"$ref": "#/components/parameters/TenantId"}], "responses": {"200": {"description": "Verified tenant erasure result"}}}},
+    "/v1/maintenance/retention": {"post": {"operationId": "applyRetention", "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {"tenant_id": {"type": "string"}, "max_age_days": {"type": "integer", "minimum": 1}}}}}}, "responses": {"200": {"description": "Retention result"}}}},
+    "/v1/maintenance/compact": {"post": {"operationId": "compact", "responses": {"200": {"description": "Online atomic compaction result"}}}},
+    "/v1/retrieve": {"post": {"operationId": "retrieve", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/QueryRequest"}}}}, "responses": {"200": {"description": "Ranked evidence and query plan"}}}},
+    "/v1/answers": {"post": {"operationId": "answer", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/QueryRequest"}}}}, "responses": {"200": {"description": "Cited answer or SSE stream"}}}},
+    "/v1/graph/expand": {"post": {"operationId": "expandGraph", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/GraphRequest"}}}}, "responses": {"200": {"description": "Related document, section, and chunk nodes"}}}},
+    "/v1/feedback": {"post": {"operationId": "recordFeedback", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/FeedbackRequest"}}}}, "responses": {"200": {"description": "Persisted relevance feedback"}}}},
+    "/v1/evaluations": {"post": {"operationId": "evaluate", "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object"}}}}, "responses": {"200": {"description": "Golden-set evaluation metrics"}}}},
+    "/v1/chat/completions": {"post": {"operationId": "createChatCompletion", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ChatRequest"}}}}, "responses": {"200": {"description": "OpenAI-compatible response or SSE stream"}}}}
   },
-  "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}, "schemas": {
-    "IngestRequest": {"type": "object", "required": ["text", "source_uri"], "properties": {"text": {"type": "string"}, "source_uri": {"type": "string"}, "tenant_id": {"type": "string"}, "metadata": {"type": "object"}}},
-    "QueryRequest": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "tenant_id": {"type": "string"}, "access_scope": {"type": "string"}, "top_k": {"type": "integer", "minimum": 1, "maximum": 100}}}
-  }}
+  "components": {
+    "securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}},
+    "parameters": {
+      "DocumentId": {"name": "document_id", "in": "path", "required": true, "schema": {"type": "string"}},
+      "JobId": {"name": "job_id", "in": "path", "required": true, "schema": {"type": "string"}},
+      "TraceId": {"name": "trace_id", "in": "path", "required": true, "schema": {"type": "string"}},
+      "TenantId": {"name": "tenant_id", "in": "path", "required": true, "schema": {"type": "string"}}
+    },
+    "schemas": {
+      "TenantRequest": {"type": "object", "required": ["tenant_id"], "properties": {"tenant_id": {"type": "string"}}},
+      "IngestRequest": {"type": "object", "required": ["text", "source_uri"], "properties": {"text": {"type": "string"}, "source_uri": {"type": "string"}, "tenant_id": {"type": "string", "default": "default"}, "access_scope": {"type": "string", "default": "public"}, "title": {"type": "string"}, "format": {"enum": ["text", "markdown", "html"]}, "mode": {"enum": ["fast", "structured", "semantic"]}, "metadata": {"type": "object"}, "background": {"type": "boolean"}}},
+      "QueryRequest": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "tenant_id": {"type": "string", "default": "default"}, "access_scope": {"type": "string", "default": "public"}, "access_scopes": {"type": "array", "items": {"type": "string"}}, "top_k": {"type": "integer", "minimum": 1, "maximum": 100}, "filter": {"type": "object"}, "stream": {"type": "boolean"}}},
+      "GraphRequest": {"type": "object", "required": ["node_id"], "properties": {"node_id": {"type": "string"}, "tenant_id": {"type": "string"}, "access_scope": {"type": "string"}, "max_neighbors": {"type": "integer", "minimum": 1, "maximum": 256}}},
+      "FeedbackRequest": {"type": "object", "required": ["chunk_id", "relevant"], "properties": {"chunk_id": {"type": "string"}, "relevant": {"type": "boolean"}, "tenant_id": {"type": "string"}, "trace_id": {"type": "string"}, "query": {"type": "string"}}},
+      "ChatRequest": {"type": "object", "required": ["messages"], "properties": {"messages": {"type": "array", "items": {"type": "object", "required": ["role", "content"], "properties": {"role": {"type": "string"}, "content": {"type": "string"}}}}, "tenant_id": {"type": "string"}, "access_scope": {"type": "string"}, "top_k": {"type": "integer"}, "stream": {"type": "boolean"}}},
+      "Error": {"type": "object", "required": ["error"], "properties": {"error": {"type": "string"}}}
+    },
+    "responses": {"Error": {"description": "Request error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}}
+  }
 }

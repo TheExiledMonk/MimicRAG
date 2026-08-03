@@ -9,9 +9,9 @@ from .client import Client
 
 
 TOOLS = [
-    {"name": "mimicrag_retrieve", "description": "Retrieve evidence passages", "inputSchema": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "tenant_id": {"type": "string"}, "access_scope": {"type": "string"}, "top_k": {"type": "integer", "minimum": 1, "maximum": 100}}}},
-    {"name": "mimicrag_expand", "description": "Expand related graph context", "inputSchema": {"type": "object", "required": ["node_id"], "properties": {"node_id": {"type": "string"}, "tenant_id": {"type": "string"}, "max_neighbors": {"type": "integer", "minimum": 1, "maximum": 256}}}},
-    {"name": "mimicrag_ingest", "description": "Ingest approved text", "inputSchema": {"type": "object", "required": ["text", "source_uri"], "properties": {"text": {"type": "string"}, "source_uri": {"type": "string"}, "tenant_id": {"type": "string"}}}},
+    {"name": "mimicrag_retrieve", "description": "Retrieve evidence passages", "inputSchema": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "tenant_id": {"type": "string"}, "access_scope": {"type": "string"}, "top_k": {"type": "integer", "minimum": 1, "maximum": 100}, "filter": {"type": "object"}}}},
+    {"name": "mimicrag_expand", "description": "Expand related graph context", "inputSchema": {"type": "object", "required": ["node_id"], "properties": {"node_id": {"type": "string"}, "tenant_id": {"type": "string"}, "access_scope": {"type": "string"}, "max_neighbors": {"type": "integer", "minimum": 1, "maximum": 256}}}},
+    {"name": "mimicrag_ingest", "description": "Ingest approved text", "inputSchema": {"type": "object", "required": ["text", "source_uri"], "properties": {"text": {"type": "string"}, "source_uri": {"type": "string"}, "tenant_id": {"type": "string"}, "access_scope": {"type": "string"}, "title": {"type": "string"}, "format": {"enum": ["text", "markdown", "html"]}, "mode": {"enum": ["fast", "structured", "semantic"]}, "metadata": {"type": "object"}}}},
     {"name": "mimicrag_trace", "description": "Inspect a retrieval trace", "inputSchema": {"type": "object", "required": ["trace_id"], "properties": {"trace_id": {"type": "string"}}}},
 ]
 

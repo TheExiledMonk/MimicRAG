@@ -88,7 +88,10 @@ it includes the referenced API documentation. See the current
 
 ## Generic tool schema
 
-If the host requires function definitions, implement thin wrappers with these argument shapes:
+The canonical portable definitions are [`function-schemas.json`](function-schemas.json). They
+cover retrieve, expand, approved ingestion, and trace inspection. If the host requires function
+definitions, load that file or implement thin wrappers with the same argument shapes. Do not copy
+the abbreviated example below as a substitute for the versioned file:
 
 ```json
 {
@@ -110,6 +113,37 @@ If the host requires function definitions, implement thin wrappers with these ar
 The wrapper should inject authentication, enforce allowed tenant/scope pairs, set timeouts and body
 limits, validate JSON, and return structured results unchanged. Do not concatenate retrieved text
 into shell commands or treat it as agent policy.
+
+## MCP
+
+Install the Python package and configure the host to run the stdio server:
+
+```bash
+python -m pip install -e ./api
+```
+
+```json
+{
+  "mcpServers": {
+    "mimicrag": {
+      "command": "python",
+      "args": ["-m", "mimicrag_dev.mcp_server"],
+      "env": {
+        "MIMICRAG_BASE_URL": "https://rag.example.com",
+        "MIMICRAG_API_KEY": "inject-from-host-secret-storage"
+      }
+    }
+  }
+}
+```
+
+The MCP server exposes `mimicrag_retrieve`, `mimicrag_expand`, `mimicrag_ingest`, and
+`mimicrag_trace`. It does not add an approval mechanism. Use a read-only key for ordinary agents;
+run ingestion with a distinct write-capable identity behind host approval.
+
+Unified memory is not exposed as a native HTTP or MCP tool. Integrate `mimicrag_memory` inside the
+owning application and derive tenant, owner, visibility, sensitivity, and purpose from authenticated
+state. Never let recalled memory become system policy or silently override cited document evidence.
 
 ## Recommended research loop
 

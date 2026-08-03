@@ -167,15 +167,18 @@ std::string Lower(std::string value) { for (char& c : value) c = static_cast<cha
 json OpenApiSpec() {
     const std::vector<std::pair<std::string, std::string>> routes{
         {"/health", "get"}, {"/ready", "get"}, {"/openapi.json", "get"},
+        {"/metrics", "get"},
         {"/v1/documents", "post"}, {"/v1/documents/{document_id}", "delete"},
         {"/v1/retrieve", "post"}, {"/v1/answers", "post"}, {"/v1/graph/expand", "post"},
         {"/v1/feedback", "post"}, {"/v1/evaluations", "post"}, {"/v1/storage", "get"},
         {"/v1/traces", "get"}, {"/v1/traces/{trace_id}", "get"},
-        {"/v1/jobs/{job_id}", "get"}, {"/v1/chat/completions", "post"}};
+        {"/v1/jobs/{job_id}", "get"}, {"/v1/tenants/{tenant_id}", "delete"},
+        {"/v1/maintenance/retention", "post"}, {"/v1/maintenance/compact", "post"},
+        {"/v1/chat/completions", "post"}};
     json paths = json::object();
     for (const auto& [path, method] : routes) paths[path][method] = {{"responses", {{"200", {{"description", "Successful response"}}}}}};
     paths["/v1/jobs/{job_id}"]["delete"] = {{"responses", {{"200", {{"description", "Cancellation result"}}}}}};
-    return {{"openapi", "3.1.0"}, {"info", {{"title", "MimicRAG HTTP API"}, {"version", "1.5.0"}}},
+    return {{"openapi", "3.1.0"}, {"info", {{"title", "MimicRAG HTTP API"}, {"version", "1.6.0"}}},
         {"paths", std::move(paths)}, {"components", {{"securitySchemes", {{"bearerAuth", {{"type", "http"}, {"scheme", "bearer"}}}}}}}};
 }
 

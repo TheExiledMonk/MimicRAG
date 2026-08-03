@@ -5,6 +5,12 @@ chunking, BM25, reciprocal-rank fusion, context assembly, catalog replay, access
 filtering, and vector search all execute in C++. Vector scoring uses the existing
 MimicDB SIMD/multicore/IVF/Vulkan engine.
 
+Optional V1.4 connector, V1.5 SDK/MCP, and V1.6 memory packages are Python companions. They call the
+native HTTP API but are not required to build or run this executable. See
+[`ingestion_ecosystem_v1_4.md`](ingestion_ecosystem_v1_4.md),
+[`developer_experience_v1_5.md`](developer_experience_v1_5.md), and
+[`unified_agent_memory_v1_6.md`](unified_agent_memory_v1_6.md).
+
 ## Clone and build
 
 ```bash
@@ -66,8 +72,11 @@ applied by the MimicDB engine before vectors are loaded and scored; superseded d
 versions are removed before fusion. Newly appended BM25 rows use a small heap delta
 until the next persisted-index rebuild.
 
-Endpoints are `/health`, `/ready`, `/v1/documents`, `/v1/retrieve`, `/v1/answers`, and
-OpenAI-compatible `/v1/chat/completions`. The HTTP server uses a bounded native worker
+Primary endpoints are `/health`, `/ready`, `/openapi.json`, `/v1/documents`, `/v1/retrieve`,
+`/v1/answers`, and OpenAI-compatible `/v1/chat/completions`. Administration and lifecycle routes
+include `/metrics`, `/v1/storage`, `/v1/jobs/{id}`, `/v1/traces`, `/v1/traces/{id}`,
+`/v1/feedback`, `/v1/evaluations`, `/v1/graph/expand`, `/v1/tenants/{id}`, and
+`/v1/maintenance/{retention,compact}`. The HTTP server uses a bounded native worker
 pool, request-size limits, bearer authentication, constant-time key comparison, and
 rate limiting.
 

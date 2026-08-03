@@ -14,6 +14,8 @@ A conventional installation uses:
 /etc/mimicdb/mimicrag.env            API keys, mode 0600
 /var/lib/mimicdb/mimicrag/           catalog, content, indexes, traces
 /var/lib/mimicdb/models/              local GGUF embedding model
+/var/lib/mimicdb/ingestion/           optional synchronization manifests
+/var/lib/mimicdb/memory/              optional SQLite memory ledger
 ```
 
 Create a dedicated unprivileged account:
@@ -123,6 +125,28 @@ Restore into an empty data directory while the service is stopped, fix ownership
 start the service, wait for `/ready`, and run the golden-query evaluation suite. Test
 this procedure before relying on it.
 
+## Companion state
+
+The V1.4 ingestion package and V1.6 memory package are separate Python processes/libraries, not
+native server subsystems:
+
+- Back up each ingestion manifest after a successful synchronization. Use one manifest per source
+  and tenant; it is the change/rename/delete detection state.
+- Keep the memory ledger in a mode-0700 directory. Stop memory writers or use SQLite's backup API
+  so committed WAL pages are included. Copying only `memory.db` while writers are active is not a
+  consistent backup.
+- The native snapshot copies regular files directly under `server.data_path`, but it does not
+  checkpoint SQLite or recursively include external companion directories. Back up companion state
+  explicitly even if it resides near the native data directory.
+- Test restoration of the server snapshot, ingestion manifests, memory ledger, configuration,
+  model files, and secret references as one disaster-recovery exercise.
+- A verifiable memory-forget operation cannot rewrite immutable historical backups. Apply documented
+  backup retention and secure destruction so forgotten material ages out within the promised period.
+
+If connectors or the MCP server run as services, use separate unprivileged identities and API keys
+with only the required permissions. Keep Google, Microsoft Graph, S3, web, and model-provider
+credentials in their process secret stores, not in manifests or the native configuration.
+
 ## Upgrades
 
 Before upgrading:
@@ -147,6 +171,8 @@ At minimum monitor:
 - Request rate, p50/p95/p99 latency, HTTP error rate, and rate-limit responses
 - Provider errors/timeouts and local embedding fallback rate
 - Ingestion job failures and backlog
+- Connector synchronization failures, rejected manifest entries, and source API quotas
+- Memory ledger/WAL growth, quarantined proposals, model-processing failures, and backup age
 - Catalog/content/index file growth
 - Trace volume and filesystem capacity
 - Golden-query recall, answer terms, and citation rate across releases
