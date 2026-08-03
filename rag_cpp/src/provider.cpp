@@ -37,7 +37,7 @@ void ParseStreamLine(StreamState& state, std::string line) {
     try {
         const auto event = nlohmann::json::parse(line);
         std::string token;
-        if (state.provider == "anthropic" && event.value("type", "") == "content_block_delta") token = event.value("delta", nlohmann::json::object()).value("text", "");
+        if ((state.provider == "anthropic" || state.provider == "minimax") && event.value("type", "") == "content_block_delta") token = event.value("delta", nlohmann::json::object()).value("text", "");
         else if (state.provider == "ollama") token = event.value("message", nlohmann::json::object()).value("content", "");
         else if (state.provider == "cohere") token = event.value("delta", nlohmann::json::object()).value("message", nlohmann::json::object()).value("content", nlohmann::json::object()).value("text", "");
         else if (state.provider == "google") {
@@ -70,7 +70,7 @@ nlohmann::json RemoteProvider::PostJson(const std::string& path, const nlohmann:
     headers.Add("Content-Type: application/json");
     for (const auto& item : config_.headers) headers.Add(item.first + ": " + item.second);
     const auto key = ResolveApiKey(config_);
-    if (config_.provider == "anthropic") {
+    if (config_.provider == "anthropic" || config_.provider == "minimax") {
         headers.Add("x-api-key: " + key);
         headers.Add("anthropic-version: 2023-06-01");
     } else if (config_.provider == "azure_openai") {
@@ -113,7 +113,7 @@ std::string RemoteProvider::StreamJson(const std::string& path, const nlohmann::
     CurlHeaders headers; headers.Add("Content-Type: application/json"); headers.Add("Accept: text/event-stream");
     for (const auto& item : config_.headers) headers.Add(item.first + ": " + item.second);
     const auto key = ResolveApiKey(config_);
-    if (config_.provider == "anthropic") { headers.Add("x-api-key: " + key); headers.Add("anthropic-version: 2023-06-01"); }
+    if (config_.provider == "anthropic" || config_.provider == "minimax") { headers.Add("x-api-key: " + key); headers.Add("anthropic-version: 2023-06-01"); }
     else if (config_.provider == "azure_openai") headers.Add("api-key: " + key);
     else if (!key.empty()) headers.Add("Authorization: Bearer " + key);
     std::string request_path = path;
@@ -148,6 +148,7 @@ std::vector<std::vector<float>> RemoteProvider::Embed(const std::vector<std::str
         std::vector<std::vector<float>> result; for (const auto& item : response.at("embeddings")) result.push_back(item.at("values").get<std::vector<float>>()); return result;
     }
     if (config_.provider == "anthropic") throw std::runtime_error("Anthropic has no embeddings API; enable local_embedding");
+    if (config_.provider == "minimax") throw std::runtime_error("MiniMax chat models do not provide embeddings here; enable local_embedding");
     nlohmann::json body = {{"input", texts}};
     if (config_.provider != "azure_openai") body["model"] = config_.model;
     response = PostJson("/embeddings", body);
@@ -160,7 +161,7 @@ std::vector<std::vector<float>> RemoteProvider::Embed(const std::vector<std::str
 
 std::string RemoteProvider::Chat(const nlohmann::json& messages, const nlohmann::json& options,
                                  const std::function<void(const std::string&)>& stream) const {
-    if (config_.provider == "anthropic") {
+    if (config_.provider == "anthropic" || config_.provider == "minimax") {
         std::string system;
         nlohmann::json filtered = nlohmann::json::array();
         for (const auto& message : messages) {
@@ -169,6 +170,7 @@ std::string RemoteProvider::Chat(const nlohmann::json& messages, const nlohmann:
         }
         auto body = nlohmann::json{{"model", config_.model}, {"messages", filtered}, {"max_tokens", options.value("max_tokens", 1024)}};
         for (const auto& key : {"temperature", "top_p", "stop"}) if (options.contains(key)) body[key] = options[key];
+        if (config_.provider == "minimax" && body.contains("temperature") && body["temperature"].get<double>() <= 0) body["temperature"] = 0.01;
         if (!system.empty()) body["system"] = system;
         if (stream) { body["stream"] = true; return StreamJson("/messages", body, stream); }
         const auto response = PostJson("/messages", body);

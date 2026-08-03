@@ -34,6 +34,15 @@ public:
     nlohmann::json Evaluate(const nlohmann::json& request);
     nlohmann::json RecordFeedback(const nlohmann::json& request);
     nlohmann::json GraphExpand(const nlohmann::json& request) const;
+    nlohmann::json MemoryRemember(const nlohmann::json& request);
+    nlohmann::json MemoryRecall(const nlohmann::json& request);
+    nlohmann::json MemoryInspect(const nlohmann::json& request) const;
+    nlohmann::json MemoryCorrect(const nlohmann::json& request);
+    nlohmann::json MemoryForget(const nlohmann::json& request);
+    nlohmann::json MemoryReview(const nlohmann::json& request) const;
+    nlohmann::json MemoryConfirm(const nlohmann::json& request);
+    nlohmann::json MemoryExport(const nlohmann::json& request) const;
+    nlohmann::json RetrieveCombined(const nlohmann::json& request);
     nlohmann::json Health() const;
     const Config& GetConfig() const { return config_; }
 private:

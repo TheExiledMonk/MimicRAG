@@ -1,0 +1,10 @@
+{
+  "chat": {"provider": "openai_compatible", "model": "test", "base_url": "http://127.0.0.1:1/v1", "timeout_seconds": 1, "max_retries": 0},
+  "embedding": {"provider": "openai_compatible", "model": "test", "base_url": "http://127.0.0.1:1/v1", "timeout_seconds": 1, "max_retries": 0},
+  "local_embedding": {"enabled": false},
+  "server": {"host": "127.0.0.1", "port": 18087, "data_path": "__DATA_PATH__", "requests_per_minute": 0,
+    "keys": [
+      {"id": "agent-a", "key": "secret-a", "permissions": ["read", "write", "admin"], "tenants": ["memory"], "scopes": ["public"]},
+      {"id": "agent-b", "key": "secret-b", "permissions": ["read", "write"], "tenants": ["memory"], "scopes": ["public"]}
+    ]}
+}

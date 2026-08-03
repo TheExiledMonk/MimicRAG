@@ -27,7 +27,8 @@ ModelConfig ReadModel(const json& value) {
             {"google", "https://generativelanguage.googleapis.com/v1beta"}, {"cohere", "https://api.cohere.com/v2"},
             {"ollama", "http://127.0.0.1:11434"}, {"groq", "https://api.groq.com/openai/v1"},
             {"mistral", "https://api.mistral.ai/v1"}, {"xai", "https://api.x.ai/v1"},
-            {"deepseek", "https://api.deepseek.com/v1"}, {"together", "https://api.together.xyz/v1"}};
+            {"deepseek", "https://api.deepseek.com/v1"}, {"together", "https://api.together.xyz/v1"},
+            {"minimax", "https://api.minimax.io/anthropic/v1"}};
         auto found = defaults.find(out.provider);
         if (found != defaults.end()) out.base_url = found->second;
     }

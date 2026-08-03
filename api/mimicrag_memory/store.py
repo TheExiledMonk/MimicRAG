@@ -54,6 +54,10 @@ class MemoryStore:
           mutation_ids TEXT NOT NULL, transmission TEXT NOT NULL, cache_key TEXT NOT NULL UNIQUE, created_at_ms INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS quarantined(id TEXT PRIMARY KEY, tenant TEXT NOT NULL, reason TEXT NOT NULL,
           proposal TEXT NOT NULL, created_at_ms INTEGER NOT NULL, resolved_at_ms INTEGER);
+        CREATE TABLE IF NOT EXISTS memory_jobs(id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL,
+          request TEXT NOT NULL, status TEXT NOT NULL, result TEXT NOT NULL, error TEXT NOT NULL,
+          created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS memory_jobs_scope ON memory_jobs(tenant,owner,created_at_ms);
         """); self.db.commit()
 
     def _audit(self, tenant: str, owner: str, action: str, object_id: str, reason: str, detail: Any = None) -> None:
@@ -266,5 +270,15 @@ class MemoryStore:
 
     def audit(self, *, tenant: str, owner: str, limit: int = 100) -> list[dict[str, Any]]:
         return [dict(row) for row in self.db.execute("SELECT * FROM audit WHERE tenant=? AND owner=? ORDER BY id DESC LIMIT ?", (tenant, owner, min(max(limit, 1), 1000)))]
+
+    def memory_job(self, job_id: str, *, tenant: str, owner: str) -> dict[str, Any]:
+        row = self.db.execute("SELECT * FROM memory_jobs WHERE id=? AND tenant=? AND owner=?", (job_id, tenant, owner)).fetchone()
+        if not row: raise ValueError("memory job not found")
+        value = dict(row); value["request"] = json.loads(value["request"]); value["result"] = json.loads(value["result"] or "{}")
+        return value
+
+    def pending_memory_jobs(self) -> list[tuple[str, dict[str, Any]]]:
+        rows = self.db.execute("SELECT id,request FROM memory_jobs WHERE status IN ('queued','running') ORDER BY created_at_ms").fetchall()
+        return [(row["id"], json.loads(row["request"])) for row in rows]
 
     def close(self) -> None: self.db.close()

@@ -267,6 +267,15 @@ imported documents.
   user explicitly invokes a synchronous memory operation.
 - [x] Require no meaningful regression in existing RAG throughput, startup, or ready-state memory.
 
+## V1.7: native memory integration
+
+- [x] Persist memory records in the native MimicRAG catalog and indexes with a separate logical partition.
+- [x] Bind memory ownership to authenticated API identities and enforce tenant, scope, purpose, and lifecycle filters.
+- [x] Add native semantic recall and combined RAG-plus-memory coordination with document-first trust ordering.
+- [x] Add safe SDK, CLI, MCP, review, confirmation, correction, export, reminder, quarantine, and forgetting surfaces.
+- [x] Persist asynchronous memory-model jobs and provide local heuristic and OpenAI-compatible adapters.
+- [x] Verify tenant isolation, lifecycle changes, deletion, restart persistence, fallback behavior, and recall metrics.
+
 ## V2 candidates: scale and availability
 
 These are larger architectural projects and should be driven by demonstrated demand rather than

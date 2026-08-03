@@ -3,6 +3,9 @@
 from .models import MemoryNamespace, MemoryPolicy, MemoryProposal, MemoryRecord, Visibility
 from .store import MemoryStore
 from .manager import MemoryManager, MemoryModel
+from .providers import AnthropicCompatibleMemoryModel, LocalHeuristicMemoryModel, MiniMaxMemoryModel, MiniMaxOpenAICompatibleMemoryModel, OpenAICompatibleMemoryModel
 
 __all__ = ["MemoryManager", "MemoryModel", "MemoryNamespace", "MemoryPolicy",
-           "MemoryProposal", "MemoryRecord", "MemoryStore", "Visibility"]
+           "MemoryProposal", "MemoryRecord", "MemoryStore", "Visibility",
+           "LocalHeuristicMemoryModel", "OpenAICompatibleMemoryModel"]
+__all__ += ["AnthropicCompatibleMemoryModel", "MiniMaxMemoryModel", "MiniMaxOpenAICompatibleMemoryModel"]

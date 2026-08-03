@@ -117,6 +117,9 @@ and process access accordingly.
 `MemoryManager` accepts a provider-independent object with `provider`, `model`, `local`, and a
 `propose(request, temperature, timeout)` method. It is separate from the native `chat` provider
 configuration; applications may wrap the same provider or choose a cheaper/local specialist.
+V1.7 includes local heuristic, generic OpenAI-compatible, Anthropic-compatible, and MiniMax
+adapters. MiniMax defaults to its recommended Anthropic-compatible API; an OpenAI-compatible
+MiniMax adapter remains available explicitly.
 
 ```python
 from mimicrag_memory import MemoryManager, MemoryPolicy
@@ -170,11 +173,11 @@ does not include a ledger stored elsewhere. If the ledger is placed directly und
 `server.data_path`, native snapshots copy regular files only and still do not coordinate SQLite
 WAL checkpoints, so a separate SQLite-aware backup remains recommended.
 
-## Current integration limits
+## Historical V1.6 integration limits
 
-- There are no native `/v1/memory/*` HTTP routes; use the Python API/CLI in the owning application.
-- Recall is lexical/metadata-based unless the optional RAG client is used for indexing.
-- The manager protocol is supplied by the application; no provider SDK is bundled.
+- V1.6 had no native `/v1/memory/*` routes; V1.7 adds authenticated native routes.
+- V1.6 recall was lexical/metadata-based unless the optional RAG client was used; V1.7 adds native semantic recall.
+- Adapters use the Python standard library and do not require provider SDK packages.
 - Visibility values are stored and audited, but the application remains responsible for mapping
   authenticated principals to allowed visibility levels.
 - Backup erasure is governed by external retention/rotation policy rather than immediate mutation

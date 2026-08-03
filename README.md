@@ -21,7 +21,7 @@ with a native server, C++ API, compatibility layers, and management UI.
 - Custom IVF routing with adaptive shortlist and exact noise fallback
 - Predicate filtering before vector values are loaded and scored
 - Local GGUF embeddings on GPU with CPU fallback
-- OpenAI, Anthropic, Google, Cohere, Ollama, Azure OpenAI, and OpenAI-compatible chat
+- OpenAI, Anthropic-compatible, MiniMax, Google, Cohere, Ollama, Azure OpenAI, and OpenAI-compatible chat
 - Custom provider URLs, model names, headers, and environment-based API keys
 - Tenant and access-scope filtering
 - Document, section, and chunk graph traversal for iterative research
@@ -214,10 +214,10 @@ separate compatible vector spaces and automatically falls back to the local mode
 Anthropic does not provide embeddings, so use the local fallback or another embedding
 provider with Anthropic chat.
 
-Recognized provider defaults include `openai`, `anthropic`, `google`, `cohere`,
-`ollama`, `groq`, `mistral`, `xai`, `deepseek`, and `together`. Use
-`openai_compatible` plus `base_url` for vLLM, llama.cpp server, MiniMax-compatible
-gateways, or other compatible services. Azure OpenAI uses `azure_openai` and
+Recognized provider defaults include `openai`, `anthropic`, `minimax`, `google`, `cohere`,
+`ollama`, `groq`, `mistral`, `xai`, `deepseek`, and `together`. `minimax` uses MiniMax's recommended
+Anthropic-compatible endpoint. Use `openai_compatible` plus `base_url` for vLLM, llama.cpp server,
+MiniMax's optional OpenAI-compatible endpoint, or other compatible services. Azure OpenAI uses `azure_openai` and
 `api_version`.
 
 ## Run
@@ -485,6 +485,7 @@ Third-party dependencies and the `llama.cpp` submodule remain under their respec
 - [`docs/ingestion_ecosystem_v1_4.md`](docs/ingestion_ecosystem_v1_4.md): adapters and connectors
 - [`docs/developer_experience_v1_5.md`](docs/developer_experience_v1_5.md): clients, OpenAPI, MCP, and tooling
 - [`docs/unified_agent_memory_v1_6.md`](docs/unified_agent_memory_v1_6.md): embedded agent memory
+- [`docs/native_memory_integration_v1_7.md`](docs/native_memory_integration_v1_7.md): native memory persistence, recall, and agent integration
 - [`docs/openapi.json`](docs/openapi.json): complete published HTTP contract
 - [`docs/function-schemas.json`](docs/function-schemas.json): portable agent tool schemas
 - [`docs/design.md`](docs/design.md): MimicDB architecture and durability

@@ -2,9 +2,10 @@ import json
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
-from mimicrag_memory import MemoryManager, MemoryNamespace, MemoryPolicy, MemoryRecord, MemoryStore, Visibility
+from mimicrag_memory import AnthropicCompatibleMemoryModel, LocalHeuristicMemoryModel, MemoryManager, MemoryNamespace, MemoryPolicy, MemoryRecord, MemoryStore, MiniMaxMemoryModel, MiniMaxOpenAICompatibleMemoryModel, Visibility
 from mimicrag_memory.evaluation import evaluate_cases
 
 
@@ -18,6 +19,13 @@ class FakeModel:
 
 class LocalFakeModel(FakeModel):
     provider = "local"; model = "local-memory"; local = True
+
+
+class FakeHttpResponse:
+    def __init__(self, payload): self.payload = json.dumps(payload).encode()
+    def __enter__(self): return self
+    def __exit__(self, *_): return False
+    def read(self, *_): return self.payload
 
 
 class MemoryV16Tests(unittest.TestCase):
@@ -139,5 +147,39 @@ class MemoryV16Tests(unittest.TestCase):
         self.assertEqual(combined["ordering"][0], "authoritative_documents")
         report = evaluate_cases(self.store, [{"query": "response style", "tenant": self.tenant, "owner": self.owner, "expected_ids": [memory["id"]]}])
         self.assertEqual(report["useful_recall_rate"], 1.0); self.assertTrue(report["acceptance"]["zero_cross_tenant_leakage"])
+
+    def test_durable_job_and_default_local_adapter(self):
+        event = self.evidence("I prefer short release notes.")
+        manager = MemoryManager(self.store, LocalHeuristicMemoryModel())
+        try:
+            job_id = manager.submit_boundary(tenant=self.tenant, owner=self.owner, evidence_ids=[event])
+            deadline = time.time() + 3
+            while time.time() < deadline and self.store.memory_job(job_id, tenant=self.tenant, owner=self.owner)["status"] not in {"complete", "failed"}: time.sleep(.01)
+            job = self.store.memory_job(job_id, tenant=self.tenant, owner=self.owner)
+            self.assertEqual(job["status"], "complete"); self.assertTrue(job["result"]["accepted"])
+            self.assertTrue(self.store.recall("release notes", tenant=self.tenant, owner=self.owner, purpose="conversation")["memories"])
+        finally: manager.shutdown()
+
+    def test_anthropic_compatible_memory_adapter(self):
+        payload = {"content": [{"type": "text", "text": '{"schema_version":1,"proposals":[]}'}]}
+        with patch("urllib.request.urlopen", return_value=FakeHttpResponse(payload)) as opened:
+            result = AnthropicCompatibleMemoryModel("claude-test", "secret", base_url="https://gateway.test/v1").propose({"schema_version": 1})
+        request = opened.call_args.args[0]
+        self.assertEqual(result["proposals"], []); self.assertEqual(request.full_url, "https://gateway.test/v1/messages")
+        self.assertEqual(request.get_header("X-api-key"), "secret"); self.assertEqual(request.get_header("Anthropic-version"), "2023-06-01")
+
+    def test_minimax_preferred_anthropic_adapter(self):
+        payload = {"base_resp": {"status_code": 0}, "content": [{"type": "thinking", "thinking": "internal"}, {"type": "text", "text": '{"schema_version":1,"proposals":[]}'}]}
+        with patch("urllib.request.urlopen", return_value=FakeHttpResponse(payload)) as opened:
+            result = MiniMaxMemoryModel("MiniMax-M2.7", "secret").propose({"schema_version": 1})
+        request = opened.call_args.args[0]; body = json.loads(request.data)
+        self.assertEqual(result["proposals"], []); self.assertEqual(request.full_url, "https://api.minimax.io/anthropic/v1/messages")
+        self.assertEqual(body["max_tokens"], 4096); self.assertEqual(body["temperature"], .01); self.assertEqual(request.get_header("X-api-key"), "secret")
+
+    def test_minimax_openai_compatible_alternative(self):
+        payload = {"base_resp": {"status_code": 0}, "choices": [{"message": {"content": '<think>internal</think>{"schema_version":1,"proposals":[]}'}}]}
+        with patch("urllib.request.urlopen", return_value=FakeHttpResponse(payload)) as opened:
+            result = MiniMaxOpenAICompatibleMemoryModel("MiniMax-M2.7", "secret").propose({"schema_version": 1})
+        self.assertEqual(result["proposals"], []); self.assertEqual(opened.call_args.args[0].full_url, "https://api.minimax.io/v1/chat/completions")
 
 if __name__ == "__main__": unittest.main()

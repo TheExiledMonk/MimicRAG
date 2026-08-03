@@ -21,7 +21,13 @@ Both `chat` and `embedding` accept:
 | `headers` | Additional string-valued HTTP headers |
 
 Known URL defaults include OpenAI, Anthropic, Google, Cohere, Ollama, Groq, Mistral, xAI,
-DeepSeek, and Together. Azure and arbitrary gateways should specify `base_url` explicitly.
+DeepSeek, Together, and MiniMax. `provider: "minimax"` uses MiniMax's recommended
+Anthropic-compatible endpoint at `https://api.minimax.io/anthropic/v1`. Use
+`provider: "openai_compatible"` with `base_url: "https://api.minimax.io/v1"` when OpenAI format is
+specifically required. Azure and arbitrary gateways should
+specify `base_url` explicitly. Anthropic-compatible gateways use `provider: "anthropic"` with a
+custom `base_url` and optional headers. Anthropic and MiniMax chat models require local or another
+provider's embeddings.
 
 ## `server`
 

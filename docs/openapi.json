@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "MimicRAG HTTP API",
-    "version": "1.6.0",
-    "description": "Native single-node retrieval, ingestion, answer, graph, evaluation, trace, and lifecycle API. Optional connector and memory packages are separate Python APIs."
+    "version": "1.7.0",
+    "description": "Native single-node retrieval, ingestion, answer, graph, evaluation, trace, lifecycle, and authenticated agent-memory API."
   },
   "servers": [{"url": "http://127.0.0.1:8080"}],
   "security": [{"bearerAuth": []}],
@@ -29,6 +29,15 @@
     "/v1/graph/expand": {"post": {"operationId": "expandGraph", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/GraphRequest"}}}}, "responses": {"200": {"description": "Related document, section, and chunk nodes"}}}},
     "/v1/feedback": {"post": {"operationId": "recordFeedback", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/FeedbackRequest"}}}}, "responses": {"200": {"description": "Persisted relevance feedback"}}}},
     "/v1/evaluations": {"post": {"operationId": "evaluate", "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object"}}}}, "responses": {"200": {"description": "Golden-set evaluation metrics"}}}},
+    "/v1/memory/remember": {"post": {"operationId": "remember", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MemoryRememberRequest"}}}}, "responses": {"200": {"description": "Stored, pending, or quarantined native memory"}}}},
+    "/v1/memory/recall": {"post": {"operationId": "recallMemory", "responses": {"200": {"description": "Purpose-filtered semantic memory recall"}}}},
+    "/v1/memory/inspect": {"post": {"operationId": "inspectMemory", "responses": {"200": {"description": "Memory, metadata, and lifecycle state"}}}},
+    "/v1/memory/correct": {"post": {"operationId": "correctMemory", "responses": {"200": {"description": "Explicit correction and supersession result"}}}},
+    "/v1/memory/confirm": {"post": {"operationId": "confirmMemory", "responses": {"200": {"description": "Sensitive-memory confirmation result"}}}},
+    "/v1/memory/review": {"post": {"operationId": "reviewMemories", "responses": {"200": {"description": "Owner-scoped lifecycle review queue"}}}},
+    "/v1/memory/export": {"post": {"operationId": "exportMemories", "responses": {"200": {"description": "Portable owner-scoped memory export"}}}},
+    "/v1/memory/{memory_id}": {"delete": {"operationId": "forgetMemory", "responses": {"200": {"description": "Verified memory deletion"}}}},
+    "/v1/retrieve/combined": {"post": {"operationId": "retrieveCombined", "responses": {"200": {"description": "Separate authoritative document and lower-trust memory tiers"}}}},
     "/v1/chat/completions": {"post": {"operationId": "createChatCompletion", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ChatRequest"}}}}, "responses": {"200": {"description": "OpenAI-compatible response or SSE stream"}}}}
   },
   "components": {
@@ -41,6 +50,7 @@
     },
     "schemas": {
       "TenantRequest": {"type": "object", "required": ["tenant_id"], "properties": {"tenant_id": {"type": "string"}}},
+      "MemoryRememberRequest": {"type": "object", "required": ["subject", "statement"], "properties": {"tenant_id": {"type": "string"}, "subject": {"type": "string"}, "statement": {"type": "string"}, "namespace": {"enum": ["working", "episodic", "semantic", "procedural", "preference", "prospective", "negative"]}, "evidence": {"type": "array"}, "evidence_ids": {"type": "array", "items": {"type": "string"}}, "allowed_purposes": {"type": "array", "items": {"type": "string"}}, "sensitivity": {"type": "string"}, "confirmed": {"type": "boolean"}}},
       "IngestRequest": {"type": "object", "required": ["text", "source_uri"], "properties": {"text": {"type": "string"}, "source_uri": {"type": "string"}, "tenant_id": {"type": "string", "default": "default"}, "access_scope": {"type": "string", "default": "public"}, "title": {"type": "string"}, "format": {"enum": ["text", "markdown", "html"]}, "mode": {"enum": ["fast", "structured", "semantic"]}, "metadata": {"type": "object"}, "background": {"type": "boolean"}}},
       "QueryRequest": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "tenant_id": {"type": "string", "default": "default"}, "access_scope": {"type": "string", "default": "public"}, "access_scopes": {"type": "array", "items": {"type": "string"}}, "top_k": {"type": "integer", "minimum": 1, "maximum": 100}, "filter": {"type": "object"}, "stream": {"type": "boolean"}}},
       "GraphRequest": {"type": "object", "required": ["node_id"], "properties": {"node_id": {"type": "string"}, "tenant_id": {"type": "string"}, "access_scope": {"type": "string"}, "max_neighbors": {"type": "integer", "minimum": 1, "maximum": 256}}},

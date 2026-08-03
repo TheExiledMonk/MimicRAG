@@ -30,6 +30,9 @@ class MemoryManager:
         self.budgets: dict[str, dict[str, int]] = {}
         self.queue: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue(maxsize=128); self.stop_event = threading.Event()
         self.worker = threading.Thread(target=self._run, name="mimicrag-memory", daemon=True); self.worker.start()
+        for job in self.store.pending_memory_jobs():
+            try: self.queue.put_nowait(job)
+            except queue.Full: break
 
     def _redact(self, content: str) -> str:
         for pattern in self.policy.secret_patterns: content = re.sub(pattern, "[REDACTED]", content)
@@ -52,16 +55,24 @@ class MemoryManager:
                         operation: str = "extract") -> str:
         if operation not in {"extract", "consolidate", "reflect", "associate", "decay"}: raise ValueError("unsupported memory job")
         identifier = "mjob-" + uuid.uuid4().hex
-        self.queue.put_nowait((identifier, {"tenant": tenant, "owner": owner, "evidence_ids": evidence_ids, "purpose": purpose, "operation": operation}))
+        request = {"tenant": tenant, "owner": owner, "evidence_ids": evidence_ids, "purpose": purpose, "operation": operation}
+        now = int(time.time() * 1000)
+        with self.store.db:
+            self.store.db.execute("INSERT INTO memory_jobs VALUES(?,?,?,?,?,?,?,?,?)", (identifier, tenant, owner, json.dumps(request, sort_keys=True), "queued", "{}", "", now, now))
+        self.queue.put_nowait((identifier, request))
         return identifier
 
     def _run(self) -> None:
         while not self.stop_event.is_set():
             try: identifier, request = self.queue.get(timeout=0.1)
             except queue.Empty: continue
-            try: self.process(**request)
+            with self.store.db: self.store.db.execute("UPDATE memory_jobs SET status='running',updated_at_ms=? WHERE id=?", (int(time.time() * 1000), identifier))
+            try:
+                result = self.process(**request)
+                with self.store.db: self.store.db.execute("UPDATE memory_jobs SET status='complete',result=?,updated_at_ms=? WHERE id=?", (json.dumps(result, sort_keys=True), int(time.time() * 1000), identifier))
             except Exception as exc:
                 with self.store.db:
+                    self.store.db.execute("UPDATE memory_jobs SET status='failed',error=?,updated_at_ms=? WHERE id=?", (str(exc), int(time.time() * 1000), identifier))
                     self.store._audit(request["tenant"], request["owner"], "memory.job_failed", identifier, str(exc))
             finally: self.queue.task_done()
 

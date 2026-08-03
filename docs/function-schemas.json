@@ -1,5 +1,5 @@
 {
-  "version": "1.5",
+  "version": "1.7",
   "description": "Portable tool schemas for trusted wrappers. Hosts should inject tenant/scope and authentication from policy where possible.",
   "functions": [
     {
@@ -21,6 +21,26 @@
       "name": "mimicrag_trace",
       "description": "Inspect one retrieval or answer trace by identifier.",
       "parameters": {"type": "object", "required": ["trace_id"], "properties": {"trace_id": {"type": "string"}}}
+    },
+    {
+      "name": "mimicrag_memory_recall",
+      "description": "Recall active purpose-authorized memories owned by the authenticated identity.",
+      "parameters": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "tenant_id": {"type": "string"}, "purpose": {"type": "string"}, "namespace": {"type": "string"}, "top_k": {"type": "integer", "minimum": 1, "maximum": 100}}}
+    },
+    {
+      "name": "mimicrag_memory_remember",
+      "description": "Store evidence-bound memory only after an explicit user request; sensitive records require separate confirmation.",
+      "parameters": {"type": "object", "required": ["subject", "statement", "evidence"], "properties": {"subject": {"type": "string"}, "statement": {"type": "string"}, "evidence": {"type": "array", "minItems": 1}, "tenant_id": {"type": "string"}, "namespace": {"type": "string"}, "sensitivity": {"type": "string"}, "allowed_purposes": {"type": "array", "items": {"type": "string"}}}}
+    },
+    {
+      "name": "mimicrag_memory_inspect",
+      "description": "Inspect one memory owned by the authenticated identity.",
+      "parameters": {"type": "object", "required": ["memory_id"], "properties": {"memory_id": {"type": "string"}, "tenant_id": {"type": "string"}}}
+    },
+    {
+      "name": "mimicrag_retrieve_combined",
+      "description": "Retrieve separate authoritative-document and lower-trust memory tiers.",
+      "parameters": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "tenant_id": {"type": "string"}, "purpose": {"type": "string"}, "top_k": {"type": "integer", "minimum": 1, "maximum": 100}, "memory_top_k": {"type": "integer", "minimum": 1, "maximum": 100}}}
     }
   ]
 }

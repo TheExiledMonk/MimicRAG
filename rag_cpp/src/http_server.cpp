@@ -174,11 +174,14 @@ json OpenApiSpec() {
         {"/v1/traces", "get"}, {"/v1/traces/{trace_id}", "get"},
         {"/v1/jobs/{job_id}", "get"}, {"/v1/tenants/{tenant_id}", "delete"},
         {"/v1/maintenance/retention", "post"}, {"/v1/maintenance/compact", "post"},
+        {"/v1/memory/remember", "post"}, {"/v1/memory/recall", "post"}, {"/v1/memory/inspect", "post"},
+        {"/v1/memory/correct", "post"}, {"/v1/memory/confirm", "post"}, {"/v1/memory/review", "post"},
+        {"/v1/memory/export", "post"}, {"/v1/memory/{memory_id}", "delete"}, {"/v1/retrieve/combined", "post"},
         {"/v1/chat/completions", "post"}};
     json paths = json::object();
     for (const auto& [path, method] : routes) paths[path][method] = {{"responses", {{"200", {{"description", "Successful response"}}}}}};
     paths["/v1/jobs/{job_id}"]["delete"] = {{"responses", {{"200", {{"description", "Cancellation result"}}}}}};
-    return {{"openapi", "3.1.0"}, {"info", {{"title", "MimicRAG HTTP API"}, {"version", "1.6.0"}}},
+    return {{"openapi", "3.1.0"}, {"info", {{"title", "MimicRAG HTTP API"}, {"version", "1.7.0"}}},
         {"paths", std::move(paths)}, {"components", {{"securitySchemes", {{"bearerAuth", {{"type", "http"}, {"scheme", "bearer"}}}}}}}};
 }
 
@@ -205,7 +208,9 @@ void Handle(int socket, RagEngine& engine, std::shared_mutex& engine_gate) {
         if (!authenticated) { Reply(socket, 401, {{"error", "invalid API key"}}); return; }
         const std::string identity = auth.key ? auth.id : (supplied.empty() ? fields["x-forwarded-for"] : "legacy");
         if (!RateAllowed(identity, server_config.requests_per_minute)) { Reply(socket, 429, {{"error", "rate limit exceeded"}}); return; }
-        const std::string permission = (method == "POST" && (path == "/v1/documents" || path == "/v1/feedback")) || (method == "DELETE" && path.rfind("/v1/documents/", 0) == 0) ? "write" :
+        const bool memory_write = (method == "POST" && (path == "/v1/memory/remember" || path == "/v1/memory/correct" || path == "/v1/memory/confirm")) ||
+            (method == "DELETE" && path.rfind("/v1/memory/", 0) == 0);
+        const std::string permission = (method == "POST" && (path == "/v1/documents" || path == "/v1/feedback")) || (method == "DELETE" && path.rfind("/v1/documents/", 0) == 0) || memory_write ? "write" :
             (path == "/metrics" || path == "/v1/storage" || path.rfind("/v1/jobs", 0) == 0 || path.rfind("/v1/traces", 0) == 0 || path.rfind("/v1/tenants", 0) == 0 || path.rfind("/v1/maintenance", 0) == 0 || path == "/v1/evaluations") ? "admin" : "read";
         if (!HasPermission(auth, permission)) { Audit(server_config, auth, permission, "", false, fields["x-request-id"]); Reply(socket, 403, {{"error", "permission denied"}}); return; }
         std::unique_lock<std::shared_mutex> maintenance_lock;
@@ -221,11 +226,13 @@ void Handle(int socket, RagEngine& engine, std::shared_mutex& engine_gate) {
         if (method == "GET" && path.rfind("/v1/traces", 0) == 0) { size_t limit = 100; const auto marker = path.find("limit="); if (marker != std::string::npos) limit = std::stoull(path.substr(marker + 6)); Reply(socket, 200, {{"traces", engine.RecentTraces(std::min<size_t>(limit, 1000))}}); return; }
         json input = body.empty() ? json::object() : json::parse(body);
         input["_request_id"] = fields["x-request-id"].empty() ? "req-" + std::to_string(requests_total.load()) : fields["x-request-id"];
+        if (path.rfind("/v1/memory", 0) == 0 || path == "/v1/retrieve/combined") input["owner"] = auth.id;
         const std::string tenant = path.rfind("/v1/tenants/", 0) == 0 ? path.substr(12) : input.value("tenant_id", "default");
         const std::string scope = input.value("access_scope", input.value("metadata", json::object()).value("access_scope", "public"));
         const bool tenant_scoped = path.rfind("/v1/documents", 0) == 0 || path.rfind("/v1/retrieve", 0) == 0 ||
             path.rfind("/v1/answers", 0) == 0 || path.rfind("/v1/chat/completions", 0) == 0 || path.rfind("/v1/graph", 0) == 0 ||
-            path.rfind("/v1/evaluations", 0) == 0 || path.rfind("/v1/feedback", 0) == 0 || path.rfind("/v1/tenants", 0) == 0 || path == "/v1/maintenance/retention";
+            path.rfind("/v1/evaluations", 0) == 0 || path.rfind("/v1/feedback", 0) == 0 || path.rfind("/v1/tenants", 0) == 0 ||
+            path.rfind("/v1/memory", 0) == 0 || path == "/v1/retrieve/combined" || path == "/v1/maintenance/retention";
         bool scopes_allowed = Contains(auth.key ? auth.key->scopes : std::vector<std::string>{}, scope);
         if (auth.key && input.contains("access_scopes")) for (const auto& requested : input["access_scopes"])
             scopes_allowed &= requested.is_string() && Contains(auth.key->scopes, requested.get<std::string>());
@@ -258,10 +265,22 @@ void Handle(int socket, RagEngine& engine, std::shared_mutex& engine_gate) {
         }
         else if (method == "POST" && path == "/v1/maintenance/retention") Reply(socket, 200, engine.ApplyRetention(input));
         else if (method == "POST" && path == "/v1/maintenance/compact") Reply(socket, 200, engine.CompactOnline());
-        else if (method == "POST" && path == "/v1/retrieve") Reply(socket, 200, engine.Retrieve(input));
+        else if (method == "POST" && path == "/v1/retrieve") { json sanitized = input; sanitized.erase("_include_memory"); Reply(socket, 200, engine.Retrieve(sanitized)); }
         else if (method == "POST" && path == "/v1/feedback") Reply(socket, 200, engine.RecordFeedback(input));
         else if (method == "POST" && path == "/v1/evaluations") Reply(socket, 200, engine.Evaluate(input));
         else if (method == "POST" && path == "/v1/graph/expand") Reply(socket, 200, engine.GraphExpand(input));
+        else if (method == "POST" && path == "/v1/memory/remember") Reply(socket, 200, engine.MemoryRemember(input));
+        else if (method == "POST" && path == "/v1/memory/recall") Reply(socket, 200, engine.MemoryRecall(input));
+        else if (method == "POST" && path == "/v1/memory/correct") Reply(socket, 200, engine.MemoryCorrect(input));
+        else if (method == "POST" && path == "/v1/memory/confirm") Reply(socket, 200, engine.MemoryConfirm(input));
+        else if (method == "POST" && path == "/v1/memory/inspect") Reply(socket, 200, engine.MemoryInspect(input));
+        else if (method == "POST" && path == "/v1/memory/review") Reply(socket, 200, engine.MemoryReview(input));
+        else if (method == "POST" && path == "/v1/memory/export") Reply(socket, 200, engine.MemoryExport(input));
+        else if (method == "GET" && path == "/v1/memory/review") Reply(socket, 200, engine.MemoryReview(input));
+        else if (method == "GET" && path == "/v1/memory/export") Reply(socket, 200, engine.MemoryExport(input));
+        else if (method == "GET" && path.rfind("/v1/memory/", 0) == 0) { json request = input; request["memory_id"] = path.substr(11); Reply(socket, 200, engine.MemoryInspect(request)); }
+        else if (method == "DELETE" && path.rfind("/v1/memory/", 0) == 0) { json request = input; request["memory_id"] = path.substr(11); Reply(socket, 200, engine.MemoryForget(request)); }
+        else if (method == "POST" && path == "/v1/retrieve/combined") Reply(socket, 200, engine.RetrieveCombined(input));
         else if (method == "POST" && path == "/v1/answers") {
             if (input.value("stream", false)) { StartSse(socket); try { auto result = engine.AnswerStream(input, [&](const std::string& token) { SendAll(socket, "data: " + json({{"type", "token"}, {"token", token}}).dump() + "\n\n"); }); SendAll(socket, "data: " + json({{"type", "complete"}, {"trace_id", result["trace_id"]}, {"citations", result["citations"]}}).dump() + "\n\ndata: [DONE]\n\n"); } catch (const std::exception& error) { SendAll(socket, "data: " + json({{"type", "error"}, {"error", error.what()}}).dump() + "\n\ndata: [DONE]\n\n"); } }
             else Reply(socket, 200, engine.Answer(input));

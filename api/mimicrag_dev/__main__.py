@@ -31,6 +31,7 @@ def main() -> int:
     export = sub.add_parser("export"); export.add_argument("directory"); export.add_argument("--binary", default="mimicrag_server"); export.add_argument("--config", default="mimicrag.json")
     restore = sub.add_parser("import"); restore.add_argument("snapshot"); restore.add_argument("--binary", default="mimicrag_server"); restore.add_argument("--config", default="mimicrag.json"); restore.add_argument("--destination", default="")
     migrate = sub.add_parser("migrate"); migrate.add_argument("--binary", default="mimicrag_server"); migrate.add_argument("--config", default="mimicrag.json")
+    memory = sub.add_parser("memory"); memory.add_argument("action", choices=("recall", "inspect", "review", "export", "confirm", "forget")); memory.add_argument("value", nargs="?", default=""); memory.add_argument("--tenant", default="default"); memory.add_argument("--purpose", default="conversation"); memory.add_argument("--status", default="")
     args = parser.parse_args()
     if args.command == "init": result = initialize(Path(args.directory).resolve())
     elif args.command == "inspect":
@@ -41,6 +42,14 @@ def main() -> int:
             elif args.kind == "traces": result = client.traces(args.limit)
             elif args.kind == "trace": result = client.trace(args.value)
             else: result = client.retrieve(args.value or "*", top_k=args.limit, retrieval_mode="lexical")
+    elif args.command == "memory":
+        client = Client(args.server, args.api_key); common = {"tenant_id": args.tenant}
+        if args.action == "recall": result = client.recall_memory(args.value, purpose=args.purpose, **common)
+        elif args.action == "inspect": result = client.inspect_memory(args.value, **common)
+        elif args.action == "review": result = client.review_memories(status=args.status, **common)
+        elif args.action == "export": result = client.export_memories(**common)
+        elif args.action == "confirm": result = client.confirm_memory(args.value, **common)
+        else: result = client.forget_memory(args.value, **common)
     else:
         native_command = {"export": "snapshot", "import": "restore", "migrate": "migrate"}[args.command]
         command = [args.binary, native_command]
