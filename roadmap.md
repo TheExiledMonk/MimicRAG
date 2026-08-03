@@ -24,38 +24,38 @@ experience using the same fast indexes, predicates, graph, persistence, and nati
 
 ### Data lifecycle
 
-- [ ] Add document deletion and replacement APIs with removal from vector, lexical, graph, content,
+- [x] Add document deletion and replacement APIs with removal from vector, lexical, graph, content,
   and trace references.
-- [ ] Support retention policies and verifiable tenant data erasure.
-- [ ] Add online compaction for superseded versions, tombstones, content storage, and indexes.
-- [ ] Report reclaimable and live bytes before compaction.
-- [ ] Preserve crash recovery and atomic generation switching during maintenance.
+- [x] Support retention policies and verifiable tenant data erasure.
+- [x] Add online compaction for superseded versions, tombstones, content storage, and indexes.
+- [x] Report reclaimable and live bytes before compaction.
+- [x] Preserve crash recovery and atomic generation switching during maintenance.
 
 ### Backup, recovery, and upgrades
 
-- [ ] Add a native snapshot command with checksums and an integrity manifest.
-- [ ] Add restore verification and a non-destructive recovery rehearsal command.
-- [ ] Add index inspection, validation, rebuild, and repair commands.
-- [ ] Version every persisted format and document supported upgrade paths.
-- [ ] Add migration and rollback tooling before changing a stable format.
-- [ ] Implement graceful shutdown that drains active work and checkpoints ingestion.
+- [x] Add a native snapshot command with checksums and an integrity manifest.
+- [x] Add restore verification and a non-destructive recovery rehearsal command.
+- [x] Add index inspection, validation, rebuild, and repair commands.
+- [x] Version every persisted format and document supported upgrade paths.
+- [x] Add migration and rollback tooling before changing a stable format.
+- [x] Implement graceful shutdown that drains active work and checkpoints ingestion.
 
 ### Observability and administration
 
-- [ ] Add a metrics endpoint for QPS, latency distributions, queue depth, memory, mapped bytes,
+- [x] Add a metrics endpoint for QPS, latency distributions, queue depth, memory, mapped bytes,
   index sizes, cache behavior, ingestion progress, embedding latency, and provider failures.
-- [ ] Add structured logs with request/trace correlation and configurable rotation.
-- [ ] Add a `doctor` command for configuration, storage, model, accelerator, and permissions checks.
-- [ ] Add capacity warnings for disk, memory, index growth, and pending ingestion.
-- [ ] Publish baseline dashboards and alert recommendations.
+- [x] Add structured logs with request/trace correlation and configurable rotation.
+- [x] Add a `doctor` command for configuration, storage, model, accelerator, and permissions checks.
+- [x] Add capacity warnings for disk, memory, index growth, and pending ingestion.
+- [x] Publish baseline dashboards and alert recommendations.
 
 ### Security and tenancy
 
-- [ ] Replace shared bearer-key semantics with key identities and explicit read/write permissions.
-- [ ] Bind credentials to allowed tenants and access scopes.
-- [ ] Support multiple scopes or ACL lists per document and request.
-- [ ] Add independent per-tenant query, ingestion, storage, and provider quotas.
-- [ ] Add auditable administrative actions and key rotation workflows.
+- [x] Replace shared bearer-key semantics with key identities and explicit read/write permissions.
+- [x] Bind credentials to allowed tenants and access scopes.
+- [x] Support multiple scopes or ACL lists per document and request.
+- [x] Add independent per-tenant query, ingestion, storage, and provider quotas.
+- [x] Add auditable administrative actions and key rotation workflows.
 
 ## V1.2: semantic document ingestion
 

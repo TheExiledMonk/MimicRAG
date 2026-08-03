@@ -25,6 +25,27 @@ trace_id=$(printf '%s' "$result" | sed -n 's/.*"trace_id":"\([^"]*\)".*/\1/p')
 trace=$(curl -fsS "http://127.0.0.1:18081/v1/traces/$trace_id")
 [[ "$trace" == *'"operation":"retrieve"'* ]]
 
+document=$(curl -fsS -X POST http://127.0.0.1:18081/v1/documents -H 'Content-Type: application/json' \
+    --data '{"text":"Lifecycle deletion sentinel.","source_uri":"smoke://lifecycle","tenant_id":"lifecycle"}')
+document_id=$(printf '%s' "$document" | sed -n 's/.*"document_id":"\([^"]*\)".*/\1/p')
+[[ -n "$document_id" ]]
+before_delete=$(curl -fsS -X POST http://127.0.0.1:18081/v1/retrieve -H 'Content-Type: application/json' \
+    --data '{"query":"Lifecycle deletion sentinel","tenant_id":"lifecycle","top_k":3}')
+[[ "$before_delete" == *'smoke://lifecycle'* ]]
+deletion_trace_id=$(printf '%s' "$before_delete" | sed -n 's/.*"trace_id":"\([^"]*\)".*/\1/p')
+wrong_tenant=$(curl -fsS -X DELETE "http://127.0.0.1:18081/v1/documents/$document_id" -H 'Content-Type: application/json' \
+    --data '{"tenant_id":"wrong"}')
+[[ "$wrong_tenant" == *'"deleted":false'* ]]
+deleted=$(curl -fsS -X DELETE "http://127.0.0.1:18081/v1/documents/$document_id" -H 'Content-Type: application/json' \
+    --data '{"tenant_id":"lifecycle"}')
+[[ "$deleted" == *'"deleted":true'* ]]
+after_delete=$(curl -fsS -X POST http://127.0.0.1:18081/v1/retrieve -H 'Content-Type: application/json' \
+    --data '{"query":"Lifecycle deletion sentinel","tenant_id":"lifecycle","top_k":3}')
+[[ "$after_delete" != *'smoke://lifecycle'* ]]
+if curl -fsS "http://127.0.0.1:18081/v1/traces/$deletion_trace_id" >/dev/null 2>&1; then exit 1; fi
+storage=$(curl -fsS http://127.0.0.1:18081/v1/storage)
+[[ "$storage" == *'"reclaimable_content_bytes":'* ]]
+
 queued=$(curl -fsS -X POST http://127.0.0.1:18081/v1/documents -H 'Content-Type: application/json' \
     --data '{"text":"Background native embedding job.","source_uri":"smoke://job","tenant_id":"smoke","background":true}')
 job_id=$(printf '%s' "$queued" | sed -n 's/.*"job_id":"\([^"]*\)".*/\1/p')

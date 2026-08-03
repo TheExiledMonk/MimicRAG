@@ -16,6 +16,13 @@ public:
     explicit RagEngine(Config config);
     ~RagEngine();
     nlohmann::json Ingest(const nlohmann::json& request);
+    nlohmann::json DeleteDocument(const nlohmann::json& request);
+    nlohmann::json EraseTenant(const nlohmann::json& request);
+    nlohmann::json ApplyRetention(const nlohmann::json& request);
+    nlohmann::json CompactOnline();
+    nlohmann::json StorageStats() const;
+    nlohmann::json OperationalMetrics() const;
+    uint64_t TenantStorageBytes(const std::string& tenant) const;
     nlohmann::json Retrieve(const nlohmann::json& request);
     nlohmann::json Answer(const nlohmann::json& request);
     nlohmann::json AnswerStream(const nlohmann::json& request,

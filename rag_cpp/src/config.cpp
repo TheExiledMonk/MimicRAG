@@ -68,6 +68,25 @@ Config Config::Load(const std::string& path) {
     out.server.job_workers = server.value("job_workers", size_t{1});
     out.server.trace_memory = server.value("trace_memory", size_t{10000});
     out.server.trace_path = server.value("trace_path", "");
+    out.server.trace_max_bytes = server.value("trace_max_bytes", uint64_t{64ULL * 1024 * 1024});
+    out.server.audit_log_path = server.value("audit_log_path", out.server.data_path + "/audit.jsonl");
+    out.server.audit_log_max_bytes = server.value("audit_log_max_bytes", uint64_t{64ULL * 1024 * 1024});
+    out.server.capacity_warning_bytes = server.value("capacity_warning_bytes", uint64_t{1024ULL * 1024 * 1024});
+    out.server.memory_warning_bytes = server.value("memory_warning_bytes", uint64_t{0});
+    out.server.index_warning_bytes = server.value("index_warning_bytes", uint64_t{0});
+    out.server.retention_days = server.value("retention_days", size_t{0});
+    for (const auto& value : server.value("keys", json::array())) {
+        ApiKeyIdentity key;
+        key.id = value.at("id"); key.key = value.value("key", ""); key.key_env = value.value("key_env", "");
+        key.permissions = value.value("permissions", std::vector<std::string>{"read"});
+        key.tenants = value.value("tenants", std::vector<std::string>{}); key.scopes = value.value("scopes", std::vector<std::string>{});
+        key.query_requests_per_minute = value.value("query_requests_per_minute", size_t{0});
+        key.ingestion_requests_per_minute = value.value("ingestion_requests_per_minute", size_t{0});
+        key.provider_requests_per_minute = value.value("provider_requests_per_minute", size_t{0});
+        key.storage_bytes = value.value("storage_bytes", uint64_t{0});
+        if (key.id.empty() || (key.key.empty() && key.key_env.empty())) throw std::runtime_error("server key identity requires id and key/key_env");
+        out.server.keys.push_back(std::move(key));
+    }
     const auto graph = root.value("graph", json::object());
     out.server.graph_enabled = graph.value("enabled", true);
     out.server.graph_max_seeds = graph.value("max_seeds", size_t{5});

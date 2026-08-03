@@ -65,6 +65,7 @@ std::vector<std::string> Tokenize(const std::string& value) {
 struct DocumentRecord {
     std::string document_id, version_id, tenant, scope, source_uri, title;
     json metadata = json::object();
+    int64_t ingested_at_ms = 0;
 };
 struct Chunk {
     std::string id, text;
@@ -111,8 +112,13 @@ struct VectorSpace {
     bool Add(const std::vector<float>& vector, const DocumentRecord& document, size_t chunk_index, bool maintain_ivf = true) {
         if (vector.empty() || (dimension && vector.size() != dimension)) return false;
         if (!dimension) dimension = vector.size();
-        if (!dataset.Append({mimicdb::FieldValue::VectorFloat32(vector), mimicdb::FieldValue::Int64(static_cast<int64_t>(StableTag(document.tenant))), mimicdb::FieldValue::Int64(static_cast<int64_t>(StableTag(document.scope)))})) return false;
-        chunk_indices.push_back(chunk_index);
+        std::unordered_set<std::string> scopes{document.scope};
+        if (document.metadata.contains("access_scopes") && document.metadata["access_scopes"].is_array())
+            for (const auto& scope : document.metadata["access_scopes"]) if (scope.is_string()) scopes.insert(scope.get<std::string>());
+        for (const auto& scope : scopes) {
+            if (!dataset.Append({mimicdb::FieldValue::VectorFloat32(vector), mimicdb::FieldValue::Int64(static_cast<int64_t>(StableTag(document.tenant))), mimicdb::FieldValue::Int64(static_cast<int64_t>(StableTag(scope)))})) return false;
+            chunk_indices.push_back(chunk_index);
+        }
         if (maintain_ivf && dataset.ActiveRowCount() == 0) mimicdb::BuildVectorIvf(dataset, 0, mimicdb::VectorMetric::kCosine);
         return true;
     }
@@ -129,6 +135,16 @@ std::vector<std::string> InjectionPatterns(const std::string& text) {
 }
 
 int64_t NowMs() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }
+
+bool JsonReferencesAny(const json& value, const std::unordered_set<std::string>& identifiers) {
+    if (value.is_string() && identifiers.count(value.get_ref<const std::string&>())) return true;
+    if (value.is_object()) {
+        for (const auto& item : value.items()) if (JsonReferencesAny(item.value(), identifiers)) return true;
+    } else if (value.is_array()) {
+        for (const auto& item : value) if (JsonReferencesAny(item, identifiers)) return true;
+    }
+    return false;
+}
 
 struct LexicalHeader {
     uint64_t magic = 0x3258454c4741524dULL;  // MRAGLEX2
@@ -182,7 +198,8 @@ struct RagEngine::Impl {
     explicit Impl(const Config& config)
         : remote_embedding(config.embedding), chat(config.chat), local(config.local_embedding), data_path(config.server.data_path),
           trace_memory(std::max<size_t>(1, config.server.trace_memory)),
-          trace_path(config.server.trace_path.empty() ? data_path / "traces.jsonl" : std::filesystem::path(config.server.trace_path)) {
+          trace_path(config.server.trace_path.empty() ? data_path / "traces.jsonl" : std::filesystem::path(config.server.trace_path)),
+          trace_max_bytes(config.server.trace_max_bytes) {
         remote.identity = remote_embedding.Identity();
         local_space.identity = local.Identity();
         std::filesystem::create_directories(data_path);
@@ -217,6 +234,8 @@ struct RagEngine::Impl {
     mutable std::shared_mutex state_mutex;
     std::mutex local_embedding_mutex;
     std::atomic<bool> remote_healthy{true};
+    std::atomic<uint64_t> provider_failures{0};
+    std::atomic<uint64_t> embedding_calls{0}, embedding_latency_us{0};
     std::unordered_map<std::string, json> jobs;
     std::deque<std::pair<std::string, std::function<json()>>> job_queue;
     std::condition_variable job_ready;
@@ -240,6 +259,7 @@ struct RagEngine::Impl {
     std::deque<std::string> trace_order;
     size_t trace_memory;
     std::filesystem::path trace_path;
+    uint64_t trace_max_bytes;
     std::mutex trace_file_mutex;
     std::ofstream trace_output;
     std::filesystem::path content_path;
@@ -415,7 +435,31 @@ struct RagEngine::Impl {
         const std::string id = trace.at("trace_id");
         { std::lock_guard lock(mutex); traces[id] = trace; trace_order.push_back(id); while (trace_order.size() > trace_memory) { traces.erase(trace_order.front()); trace_order.pop_front(); } }
         std::lock_guard file_lock(trace_file_mutex);
+        if (trace_max_bytes && std::filesystem::exists(trace_path) && std::filesystem::file_size(trace_path) >= trace_max_bytes) {
+            trace_output.close(); const auto rotated = std::filesystem::path(trace_path.string() + ".1");
+            std::filesystem::remove(rotated); std::filesystem::rename(trace_path, rotated); trace_output.open(trace_path, std::ios::app);
+        }
         if (trace_output) trace_output << trace.dump() << '\n';
+    }
+
+    void EraseTraceReferences(const std::unordered_set<std::string>& identifiers) {
+        { std::lock_guard lock(mutex);
+          for (auto it = trace_order.begin(); it != trace_order.end();) {
+              const auto trace = traces.find(*it);
+              if (trace != traces.end() && JsonReferencesAny(trace->second, identifiers)) { traces.erase(trace); it = trace_order.erase(it); }
+              else ++it;
+          } }
+        std::lock_guard file_lock(trace_file_mutex); trace_output.close();
+        const auto temporary = std::filesystem::path(trace_path.string() + ".erasing");
+        std::ifstream input(trace_path); std::ofstream output(temporary, std::ios::trunc); std::string line;
+        while (std::getline(input, line)) {
+            try { if (!JsonReferencesAny(json::parse(line), identifiers)) output << line << '\n'; }
+            catch (const json::exception&) { /* Drop malformed trace records during erasure. */ }
+        }
+        output.close(); input.close();
+        if (!output.good()) throw std::runtime_error("failed to rewrite trace log during document erasure");
+        std::filesystem::rename(temporary, trace_path); trace_output.open(trace_path, std::ios::app);
+        if (!trace_output) throw std::runtime_error("failed to reopen trace log after document erasure");
     }
 
     std::string Submit(std::string kind, std::function<json()> action) {
@@ -434,13 +478,17 @@ struct RagEngine::Impl {
         }
     }
 
-    std::vector<size_t> Visible(const std::string& tenant, const std::string& scope) const {
+    std::vector<size_t> Visible(const std::string& tenant, const std::vector<std::string>& scopes) const {
         std::vector<size_t> out;
         for (size_t i = 0; i < chunks.size(); ++i) {
             const auto& chunk = chunks[i]; if (chunk.document >= documents.size()) continue;
             const auto& document = documents[chunk.document];
             auto current = current_versions.find(document.document_id);
-            if (document.tenant == tenant && current != current_versions.end() && current->second == document.version_id && (document.scope == "public" || document.scope == scope)) out.push_back(i);
+            bool allowed = document.scope == "public" || std::find(scopes.begin(), scopes.end(), document.scope) != scopes.end();
+            if (!allowed && document.metadata.contains("access_scopes") && document.metadata["access_scopes"].is_array())
+                for (const auto& candidate : document.metadata["access_scopes"]) if (candidate.is_string() &&
+                    std::find(scopes.begin(), scopes.end(), candidate.get<std::string>()) != scopes.end()) { allowed = true; break; }
+            if (document.tenant == tenant && current != current_versions.end() && current->second == document.version_id && allowed) out.push_back(i);
         }
         return out;
     }
@@ -499,10 +547,11 @@ struct RagEngine::Impl {
         return result;
     }
 
-    std::vector<std::pair<size_t, double>> Vector(const std::vector<float>& query, const VectorSpace& space, const std::string& tenant, const std::string& scope, size_t limit) const {
+    std::vector<std::pair<size_t, double>> Vector(const std::vector<float>& query, const VectorSpace& space, const std::string& tenant, const std::vector<std::string>& scopes, size_t limit) const {
         if (!space.dimension || query.size() != space.dimension) return {};
         std::unordered_map<size_t, double> best;
-        for (const auto& allowed_scope : std::unordered_set<std::string>{"public", scope}) {
+        std::unordered_set<std::string> allowed_scopes(scopes.begin(), scopes.end()); allowed_scopes.insert("public");
+        for (const auto& allowed_scope : allowed_scopes) {
             std::vector<mimicdb::VectorSearchHit> hits;
             const std::vector<mimicdb::VectorSearchPredicate> predicates = {
                 {1, mimicdb::CompareOp::kEq, static_cast<double>(StableTag(tenant))},
@@ -524,11 +573,11 @@ struct RagEngine::Impl {
         return out;
     }
 
-    std::vector<Ranked> RetrieveLocked(const std::string& query, const std::string& tenant, const std::string& scope, size_t top_k, const std::vector<float>* query_embedding, bool use_local, const std::vector<size_t>& visible) {
+    std::vector<Ranked> RetrieveLocked(const std::string& query, const std::string& tenant, const std::vector<std::string>& scopes, size_t top_k, const std::vector<float>* query_embedding, bool use_local, const std::vector<size_t>& visible) {
         const size_t candidates = std::max<size_t>(top_k * 4, top_k);
         auto lexical = Lexical(query, visible, candidates);
         std::vector<std::pair<size_t, double>> vectors;
-        if (query_embedding) vectors = Vector(*query_embedding, use_local ? local_space : remote, tenant, scope, candidates);
+        if (query_embedding) vectors = Vector(*query_embedding, use_local ? local_space : remote, tenant, scopes, candidates);
         const std::unordered_set<size_t> allowed(visible.begin(), visible.end());
         vectors.erase(std::remove_if(vectors.begin(), vectors.end(), [&](const auto& item) { return !allowed.count(item.first); }), vectors.end());
         std::unordered_map<size_t, Ranked> fused;
@@ -593,6 +642,13 @@ RagEngine::RagEngine(Config config) : config_(std::move(config)), impl_(std::mak
         impl_->replay_skip_lexical = impl_->LexicalSnapshotMatches(catalog_bytes);
         impl_->BeginContentReplay(catalog_bytes);
         binary.Replay([&](CatalogRecord&& record) {
+            if (record.document.value("_operation", "") == "delete") {
+                const std::string document_id = record.document.at("document_id");
+                impl_->current_versions.erase(document_id);
+                impl_->current_generations[document_id] = record.document.value("generation", impl_->current_generations[document_id] + 1);
+                impl_->current_chunk_counts.erase(document_id);
+                return;
+            }
             if (!record.remote_embeddings.empty()) record.document["remote_embeddings"] = std::move(record.remote_embeddings);
             if (!record.local_embeddings.empty()) record.document["local_embeddings"] = std::move(record.local_embeddings);
             record.document["_replay"] = true; Ingest(record.document);
@@ -636,8 +692,14 @@ json RagEngine::Ingest(const json& request) {
     const std::string tenant = request.value("tenant_id", "default"), title = request.value("title", ""), scope = request.value("access_scope", request.value("metadata", json::object()).value("access_scope", "public"));
     const std::string document_id = request.value("document_id", StableId(tenant + "\n" + source));
     const std::string version_id = StableId(document_id + "\n" + text);
-    const json metadata = request.value("metadata", json::object());
-    const DocumentRecord document{document_id, version_id, tenant, scope, source, title, metadata};
+    json metadata = request.value("metadata", json::object());
+    if (request.contains("access_scopes")) {
+        if (!request["access_scopes"].is_array() || request["access_scopes"].empty() || request["access_scopes"].size() > 64)
+            throw std::runtime_error("access_scopes must contain 1 to 64 scopes");
+        metadata["access_scopes"] = request["access_scopes"];
+    }
+    const int64_t ingested_at_ms = request.value("_replay", false) ? request.value("ingested_at_ms", NowMs()) : NowMs();
+    const DocumentRecord document{document_id, version_id, tenant, scope, source, title, metadata, ingested_at_ms};
     size_t generation = 1;
     {
         std::shared_lock lock(impl_->state_mutex);
@@ -665,6 +727,7 @@ json RagEngine::Ingest(const json& request) {
         start = end > overlap ? end - overlap : end;
     }
     bool remote_indexed = false, local_indexed = false;
+    std::unordered_set<std::string> superseded_identifiers;
     std::vector<std::string> texts; for (const auto& chunk : created) texts.push_back(chunk.text);
     std::vector<std::vector<float>> remote_vectors, local_vectors;
     if (config_.embedding.provider == "local") {
@@ -672,7 +735,12 @@ json RagEngine::Ingest(const json& request) {
     } else if (request.value("remote_model_identity", "") == impl_->remote.identity && request.contains("remote_embeddings")) {
         remote_vectors = request.at("remote_embeddings").get<std::vector<std::vector<float>>>();
         remote_indexed = remote_vectors.size() == created.size();
-    } else try { remote_vectors = impl_->remote_embedding.Embed(texts); remote_indexed = remote_vectors.size() == created.size(); impl_->remote_healthy = true; } catch (const std::exception&) { impl_->remote_healthy = false; }
+    } else {
+        const auto embedding_started = std::chrono::steady_clock::now(); ++impl_->embedding_calls;
+        try { remote_vectors = impl_->remote_embedding.Embed(texts); remote_indexed = remote_vectors.size() == created.size(); impl_->remote_healthy = true; }
+        catch (const std::exception&) { impl_->remote_healthy = false; ++impl_->provider_failures; }
+        impl_->embedding_latency_us += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - embedding_started).count());
+    }
     if (request.value("local_model_identity", "") == impl_->local_space.identity && request.contains("local_embeddings")) {
         local_vectors = request.at("local_embeddings").get<std::vector<std::vector<float>>>();
         local_indexed = local_vectors.size() == created.size();
@@ -685,6 +753,13 @@ json RagEngine::Ingest(const json& request) {
         std::unique_lock lock(impl_->state_mutex);
         auto found = impl_->current_versions.find(document_id);
         if (found != impl_->current_versions.end() && found->second == version_id) return {{"document_id", document_id}, {"version_id", version_id}, {"generation", impl_->current_generations[document_id]}, {"chunk_count", impl_->current_chunk_counts[document_id]}, {"unchanged", true}};
+        if (found != impl_->current_versions.end()) {
+            superseded_identifiers.insert(document_id);
+            for (const auto& existing : impl_->chunks) if (existing.document < impl_->documents.size()) {
+                const auto& owner = impl_->documents[existing.document];
+                if (owner.document_id == document_id && owner.version_id == found->second) superseded_identifiers.insert(existing.id);
+            }
+        }
         const bool replay = request.value("_replay", false);
         for (auto& chunk : created) impl_->StoreContent(&chunk, replay);
         const size_t base = impl_->chunks.size();
@@ -718,6 +793,9 @@ json RagEngine::Ingest(const json& request) {
         if (!request.value("_replay", false)) {
             auto persisted = request;
             persisted["document_id"] = document_id;
+            persisted["_record_version"] = 1;
+            persisted["ingested_at_ms"] = ingested_at_ms;
+            persisted.erase("_request_id");
             persisted.erase("remote_embeddings"); persisted.erase("local_embeddings");
             if (remote_indexed) persisted["remote_model_identity"] = impl_->remote.identity;
             if (local_indexed) persisted["local_model_identity"] = impl_->local_space.identity;
@@ -726,30 +804,176 @@ json RagEngine::Ingest(const json& request) {
         }
         for (size_t i = base; i < impl_->chunks.size(); ++i) std::string().swap(impl_->chunks[i].text);
     }
+    if (!superseded_identifiers.empty() && !request.value("_replay", false)) impl_->EraseTraceReferences(superseded_identifiers);
     return {{"document_id", document_id}, {"version_id", version_id}, {"generation", generation}, {"chunk_count", created.size()}, {"remote_indexed", remote_indexed}, {"local_indexed", local_indexed}, {"unchanged", false}};
+}
+
+json RagEngine::DeleteDocument(const json& request) {
+    const std::string document_id = request.at("document_id");
+    const std::string tenant = request.value("tenant_id", "default");
+    if (document_id.empty()) throw std::runtime_error("document_id is required");
+    size_t generation = 0;
+    std::unordered_set<std::string> deleted_identifiers{document_id};
+    {
+        std::unique_lock lock(impl_->state_mutex);
+        auto current = impl_->current_versions.find(document_id);
+        if (current == impl_->current_versions.end()) return {{"document_id", document_id}, {"deleted", false}, {"reason", "not_found"}};
+        const auto document = std::find_if(impl_->documents.rbegin(), impl_->documents.rend(), [&](const DocumentRecord& candidate) {
+            return candidate.document_id == document_id && candidate.version_id == current->second;
+        });
+        if (document == impl_->documents.rend() || document->tenant != tenant)
+            return {{"document_id", document_id}, {"deleted", false}, {"reason", "not_found"}};
+        generation = impl_->current_generations[document_id] + 1;
+        for (const auto& chunk : impl_->chunks)
+            if (chunk.document < impl_->documents.size() && impl_->documents[chunk.document].document_id == document_id)
+                deleted_identifiers.insert(chunk.id);
+        BinaryCatalog(impl_->data_path / "catalog.mrg").Append({json{{"_operation", "delete"}, {"_record_version", 1}, {"document_id", document_id},
+            {"tenant_id", tenant}, {"generation", generation}, {"deleted_at_ms", NowMs()}}, {}, {}});
+        impl_->current_versions.erase(current);
+        impl_->current_generations[document_id] = generation;
+        impl_->current_chunk_counts.erase(document_id);
+    }
+    impl_->EraseTraceReferences(deleted_identifiers);
+    return {{"document_id", document_id}, {"tenant_id", tenant}, {"generation", generation}, {"deleted", true}};
+}
+
+json RagEngine::EraseTenant(const json& request) {
+    const std::string tenant = request.at("tenant_id");
+    if (tenant.empty()) throw std::runtime_error("tenant_id is required");
+    std::vector<std::string> documents;
+    {
+        std::shared_lock lock(impl_->state_mutex);
+        for (const auto& [id, version] : impl_->current_versions) {
+            const auto found = std::find_if(impl_->documents.rbegin(), impl_->documents.rend(), [&](const DocumentRecord& document) {
+                return document.document_id == id && document.version_id == version && document.tenant == tenant;
+            });
+            if (found != impl_->documents.rend()) documents.push_back(id);
+        }
+    }
+    size_t deleted = 0; for (const auto& id : documents) deleted += DeleteDocument({{"document_id", id}, {"tenant_id", tenant}}).value("deleted", false);
+    bool verified = true;
+    { std::shared_lock lock(impl_->state_mutex); for (const auto& [id, version] : impl_->current_versions)
+        for (const auto& document : impl_->documents) if (document.document_id == id && document.version_id == version && document.tenant == tenant) verified = false; }
+    return {{"tenant_id", tenant}, {"documents_deleted", deleted}, {"active_references_remaining", verified ? 0 : 1},
+        {"verified", verified}, {"compaction_required_for_physical_erasure", deleted > 0}};
+}
+
+json RagEngine::ApplyRetention(const json& request) {
+    const size_t days = request.value("max_age_days", config_.server.retention_days);
+    if (!days) throw std::runtime_error("max_age_days must be greater than zero");
+    const std::string tenant_filter = request.value("tenant_id", "");
+    const int64_t cutoff = NowMs() - static_cast<int64_t>(days) * 24 * 60 * 60 * 1000;
+    std::vector<std::pair<std::string, std::string>> expired;
+    {
+        std::shared_lock lock(impl_->state_mutex);
+        for (const auto& [id, version] : impl_->current_versions) for (const auto& document : impl_->documents)
+            if (document.document_id == id && document.version_id == version && document.ingested_at_ms > 0 && document.ingested_at_ms < cutoff &&
+                (tenant_filter.empty() || document.tenant == tenant_filter)) expired.emplace_back(id, document.tenant);
+    }
+    size_t deleted = 0; for (const auto& [id, tenant] : expired) deleted += DeleteDocument({{"document_id", id}, {"tenant_id", tenant}}).value("deleted", false);
+    return {{"max_age_days", days}, {"cutoff_ms", cutoff}, {"documents_deleted", deleted}, {"tenant_id", tenant_filter.empty() ? "*" : tenant_filter}};
+}
+
+json RagEngine::CompactOnline() {
+    {
+        std::lock_guard lock(impl_->mutex);
+        if (!impl_->job_queue.empty()) throw std::runtime_error("cannot compact while ingestion jobs are queued");
+        for (const auto& [id, job] : impl_->jobs) { (void)id; if (job.value("status", "") == "running") throw std::runtime_error("cannot compact while ingestion jobs are running"); }
+    }
+    const auto before = StorageStats();
+    auto catalog_result = BinaryCatalog(impl_->data_path / "catalog.mrg").Compact();
+    for (const auto& name : {"content.dat", "content.manifest", "lexical.idx", "remote.ivf", "local.ivf"}) std::filesystem::remove(impl_->data_path / name);
+    RagEngine rebuilt(config_);
+    auto previous = std::move(impl_); impl_ = std::move(rebuilt.impl_);
+    previous.reset();  // May persist the previous indexes; publish the rebuilt generation afterward.
+    impl_->SaveLexicalIndex(); impl_->SaveVectorIndexes();
+    impl_->WriteContentManifest(std::filesystem::file_size(impl_->data_path / "catalog.mrg"));
+    const auto after = StorageStats();
+    return {{"compacted", true}, {"catalog", catalog_result}, {"before", before}, {"after", after}, {"generation_switched", true}};
+}
+
+json RagEngine::StorageStats() const {
+    std::shared_lock lock(impl_->state_mutex);
+    uint64_t total_bytes = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(impl_->data_path))
+        if (entry.is_regular_file()) total_bytes += entry.file_size();
+    // Count every live generation without relying on a caller's visibility domain.
+    size_t live_chunks = 0;
+    uint64_t live_content_bytes = 0;
+    for (const auto& chunk : impl_->chunks) {
+        if (chunk.document >= impl_->documents.size()) continue;
+        const auto& document = impl_->documents[chunk.document];
+        const auto current = impl_->current_versions.find(document.document_id);
+        if (current != impl_->current_versions.end() && current->second == document.version_id) {
+            ++live_chunks; live_content_bytes += chunk.content_bytes;
+        }
+    }
+    const uint64_t content_bytes = std::filesystem::exists(impl_->content_path) ? std::filesystem::file_size(impl_->content_path) : 0;
+    std::error_code space_error; const auto space = std::filesystem::space(impl_->data_path, space_error);
+    const bool capacity_warning = !space_error && space.available < config_.server.capacity_warning_bytes;
+    return {{"format_version", 1}, {"live_documents", impl_->current_versions.size()}, {"stored_document_versions", impl_->documents.size()},
+        {"live_chunks", live_chunks}, {"stored_chunks", impl_->chunks.size()}, {"live_content_bytes", live_content_bytes},
+        {"content_bytes", content_bytes}, {"reclaimable_content_bytes", content_bytes > live_content_bytes ? content_bytes - live_content_bytes : 0},
+        {"total_storage_bytes", total_bytes}, {"available_disk_bytes", space_error ? 0 : space.available},
+        {"capacity_warning", capacity_warning}, {"capacity_warning_threshold_bytes", config_.server.capacity_warning_bytes}};
+}
+
+json RagEngine::OperationalMetrics() const {
+    std::lock_guard lock(impl_->mutex);
+    size_t queued = 0, running = 0, failed = 0;
+    for (const auto& [id, job] : impl_->jobs) {
+        (void)id; const std::string status = job.value("status", "");
+        queued += status == "queued"; running += status == "running"; failed += status == "failed";
+    }
+    return {{"jobs_queued", queued}, {"jobs_running", running}, {"jobs_failed", failed},
+        {"provider_failures", impl_->provider_failures.load()}, {"remote_provider_healthy", impl_->remote_healthy.load()},
+        {"embedding_calls", impl_->embedding_calls.load()}, {"embedding_latency_us", impl_->embedding_latency_us.load()},
+#if defined(__linux__)
+        {"mapped_lexical_bytes", impl_->mapped_lexical_header ? impl_->mapped_lexical_header->file_bytes : 0},
+#else
+        {"mapped_lexical_bytes", 0},
+#endif
+        {"lexical_terms_cached", impl_->lexical_postings.size()}};
+}
+
+uint64_t RagEngine::TenantStorageBytes(const std::string& tenant) const {
+    std::shared_lock lock(impl_->state_mutex); uint64_t bytes = 0;
+    for (const auto& chunk : impl_->chunks) {
+        if (chunk.document >= impl_->documents.size()) continue;
+        const auto& document = impl_->documents[chunk.document];
+        const auto current = impl_->current_versions.find(document.document_id);
+        if (document.tenant == tenant && current != impl_->current_versions.end() && current->second == document.version_id) bytes += chunk.content_bytes;
+    }
+    return bytes;
 }
 
 json RagEngine::Retrieve(const json& request) {
     const auto started = std::chrono::steady_clock::now();
     const std::string query = request.at("query"); if (query.size() > config_.server.max_query_chars) throw std::runtime_error("query too large");
-    const std::string tenant = request.value("tenant_id", "default"), scope = request.value("access_scope", "public"); const size_t top_k = request.value("top_k", config_.server.top_k);
+    const std::string tenant = request.value("tenant_id", "default");
+    std::vector<std::string> scopes = request.value("access_scopes", std::vector<std::string>{request.value("access_scope", "public")});
+    if (scopes.empty() || scopes.size() > 64) throw std::runtime_error("access_scopes must contain 1 to 64 scopes");
+    const size_t top_k = request.value("top_k", config_.server.top_k);
     std::string backend = "bm25"; bool use_local = false; std::vector<float> query_embedding;
-    try { if (config_.embedding.provider == "local") throw std::runtime_error("local-only embedding mode"); query_embedding = impl_->remote_embedding.Embed({query}, true).at(0); impl_->remote_healthy = true; backend = "remote"; }
+    const bool attempted_remote = config_.embedding.provider != "local";
+    const auto embedding_started = std::chrono::steady_clock::now(); if (attempted_remote) ++impl_->embedding_calls;
+    try { if (!attempted_remote) throw std::runtime_error("local-only embedding mode"); query_embedding = impl_->remote_embedding.Embed({query}, true).at(0); impl_->remote_healthy = true; backend = "remote"; }
     catch (const std::exception&) {
-        impl_->remote_healthy = false;
+        impl_->remote_healthy = false; if (attempted_remote) ++impl_->provider_failures;
         if (impl_->local.Available()) {
             std::lock_guard local_lock(impl_->local_embedding_mutex);
             query_embedding = impl_->local.Embed({query}, true).at(0);
             use_local = true; backend = impl_->local.UsingGpu() ? "local_gpu" : "local_cpu";
         }
     }
+    if (attempted_remote) impl_->embedding_latency_us += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - embedding_started).count());
     json hits = json::array(); bool approximate = false; double graph_ms = 0; size_t graph_examined = 0, graph_hits = 0;
     { std::shared_lock lock(impl_->state_mutex);
       const auto& selected = use_local ? impl_->local_space : impl_->remote;
       approximate = mimicdb::VectorIvfReady(selected.dataset, 0, mimicdb::VectorMetric::kCosine);
       if (query_embedding.empty() || !selected.dimension) { query_embedding.clear(); backend = "bm25"; }
-      const auto visible = impl_->Visible(tenant, scope);
-      auto ranked = impl_->RetrieveLocked(query, tenant, scope, top_k, query_embedding.empty() ? nullptr : &query_embedding, use_local, visible);
+      const auto visible = impl_->Visible(tenant, scopes);
+      auto ranked = impl_->RetrieveLocked(query, tenant, scopes, top_k, query_embedding.empty() ? nullptr : &query_embedding, use_local, visible);
       if (request.value("graph_enabled", config_.server.graph_enabled)) {
           const auto graph_started = std::chrono::steady_clock::now();
           const auto stats = impl_->ExpandGraph(&ranked, visible, top_k, config_.server.graph_max_seeds,
@@ -761,7 +985,7 @@ json RagEngine::Retrieve(const json& request) {
     }
     const std::string trace_id = HexId(query);
     json ids = json::array(); for (const auto& hit : hits) ids.push_back(hit["chunk_id"]);
-    impl_->AddTrace({{"trace_id", trace_id}, {"operation", "retrieve"}, {"tenant_id", tenant}, {"started_at_ms", NowMs()},
+    impl_->AddTrace({{"trace_id", trace_id}, {"operation", "retrieve"}, {"tenant_id", tenant}, {"request_id", request.value("_request_id", "")}, {"started_at_ms", NowMs()},
         {"duration_ms", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count()}, {"query", query},
         {"provider", config_.embedding.provider}, {"model", config_.embedding.model}, {"embedding_model_key", use_local ? impl_->local_space.identity : impl_->remote.identity},
         {"approximate", approximate},
@@ -800,8 +1024,9 @@ json RagEngine::AnswerStream(const json& request, const std::function<void(const
     std::string answer;
     try { answer = impl_->chat.Chat(messages, options, stream); }
     catch (const std::exception& error) {
+        ++impl_->provider_failures;
         const std::string failed_trace_id = HexId(query_text + error.what());
-        impl_->AddTrace({{"trace_id", failed_trace_id}, {"operation", stream ? "answer_stream" : "answer"}, {"tenant_id", request.value("tenant_id", "default")},
+        impl_->AddTrace({{"trace_id", failed_trace_id}, {"operation", stream ? "answer_stream" : "answer"}, {"tenant_id", request.value("tenant_id", "default")}, {"request_id", request.value("_request_id", "")},
             {"started_at_ms", NowMs()}, {"duration_ms", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count()},
             {"query", query_text}, {"provider", config_.chat.provider}, {"model", config_.chat.model}, {"status", "error"}, {"error", error.what()},
             {"injection_patterns", InjectionPatterns(query_text + "\n" + context)}, {"attributes", {{"retrieval_trace_id", retrieval["trace_id"]}}}});
@@ -810,7 +1035,7 @@ json RagEngine::AnswerStream(const json& request, const std::function<void(const
     const std::string trace_id = HexId(answer + request.at("query").get<std::string>());
     json citation_ids = json::array(); for (const auto& item : citations) citation_ids.push_back(item["chunk_id"]);
     std::string assessed = request.at("query").get<std::string>() + "\n" + context;
-    impl_->AddTrace({{"trace_id", trace_id}, {"operation", stream ? "answer_stream" : "answer"}, {"tenant_id", request.value("tenant_id", "default")},
+    impl_->AddTrace({{"trace_id", trace_id}, {"operation", stream ? "answer_stream" : "answer"}, {"tenant_id", request.value("tenant_id", "default")}, {"request_id", request.value("_request_id", "")},
         {"started_at_ms", NowMs()}, {"duration_ms", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count()},
         {"query", request.at("query")}, {"provider", config_.chat.provider}, {"model", config_.chat.model},
         {"embedding_model_key", retrieval["embedding_backend"]}, {"citation_chunk_ids", citation_ids},
@@ -827,13 +1052,14 @@ json RagEngine::RecentTraces(size_t limit) const { std::lock_guard lock(impl_->m
 
 json RagEngine::GraphExpand(const json& request) const {
     const auto started = std::chrono::steady_clock::now(); const std::string node_id = request.at("node_id");
-    const std::string tenant = request.value("tenant_id", "default"), scope = request.value("access_scope", "public");
+    const std::string tenant = request.value("tenant_id", "default");
+    const std::vector<std::string> scopes = request.value("access_scopes", std::vector<std::string>{request.value("access_scope", "public")});
     const size_t maximum = std::clamp<size_t>(request.value("max_neighbors", config_.server.graph_max_neighbors), 1, 256);
     uint64_t node_key = 0; if (!Impl::ParseNodeId(node_id, &node_key)) throw std::out_of_range("graph node not found");
     std::shared_lock lock(impl_->state_mutex); const auto found = impl_->graph_node_refs.find(node_key);
     if (found == impl_->graph_node_refs.end() || found->second.graph >= impl_->graphs.size()) throw std::out_of_range("graph node not found");
     const auto& graph = impl_->graphs[found->second.graph];
-    const auto visible = impl_->Visible(tenant, scope); const std::unordered_set<size_t> allowed(visible.begin(), visible.end());
+    const auto visible = impl_->Visible(tenant, scopes); const std::unordered_set<size_t> allowed(visible.begin(), visible.end());
     bool authorized = false; for (size_t chunk = graph.first_chunk; chunk < graph.first_chunk + graph.chunk_nodes; ++chunk) authorized |= allowed.count(chunk);
     if (!authorized || found->second.node + 1 >= graph.offsets.size()) throw std::out_of_range("graph node not found");
     auto relation = [](GraphEdgeType type) { switch (type) { case GraphEdgeType::kParent: return "parent"; case GraphEdgeType::kChild: return "child"; case GraphEdgeType::kPrevious: return "previous"; case GraphEdgeType::kNext: return "next"; } return "related"; };
@@ -882,6 +1108,16 @@ json RagEngine::Health() const {
     const uint64_t catalog_bytes = binary ? std::filesystem::file_size(binary_catalog)
         : (std::filesystem::exists(legacy_catalog) ? std::filesystem::file_size(legacy_catalog) : 0);
     const auto content = impl_->data_path / "content.dat", lexical = impl_->data_path / "lexical.idx";
+    std::error_code space_error; const auto disk = std::filesystem::space(impl_->data_path, space_error);
+    const bool capacity_warning = !space_error && disk.available < config_.server.capacity_warning_bytes;
+    const bool pending_ingestion_warning = impl_->job_queue.size() > std::max<size_t>(10, config_.server.job_workers * 10);
+    uint64_t index_bytes = std::filesystem::exists(lexical) ? std::filesystem::file_size(lexical) : 0;
+    for (const auto& name : {"remote.ivf", "local.ivf"}) if (std::filesystem::exists(impl_->data_path / name)) index_bytes += std::filesystem::file_size(impl_->data_path / name);
+    uint64_t resident_bytes = 0;
+#if defined(__linux__)
+    { std::ifstream statm("/proc/self/statm"); uint64_t total_pages = 0, resident_pages = 0;
+      if (statm >> total_pages >> resident_pages) resident_bytes = resident_pages * static_cast<uint64_t>(sysconf(_SC_PAGESIZE)); }
+#endif
     return {{"status", "ok"}, {"ready", true}, {"implementation", "c++"}, {"chunks", impl_->chunks.size()}, {"pending_jobs", impl_->job_queue.size()},
         {"embedding_model_key", impl_->remote.identity}, {"remote_embedding_healthy", impl_->remote_healthy.load()},
         {"graph_documents", impl_->graphs.size()}, {"graph_edges", impl_->graph_edges}, {"graph_storage", "compact_csr"},
@@ -896,6 +1132,10 @@ json RagEngine::Health() const {
         {"lexical_index_storage", "heap_build"},
 #endif
         {"sealed_vectors_resident", impl_->local_space.dataset.SealedFieldValuesResident(0)},
-        {"remote_vector_rows", impl_->remote.dataset.RowCount()}, {"local_vector_rows", impl_->local_space.dataset.RowCount()}};
+        {"remote_vector_rows", impl_->remote.dataset.RowCount()}, {"local_vector_rows", impl_->local_space.dataset.RowCount()},
+        {"available_disk_bytes", space_error ? 0 : disk.available}, {"capacity_warning", capacity_warning},
+        {"pending_ingestion_warning", pending_ingestion_warning}, {"resident_memory_bytes", resident_bytes}, {"index_bytes", index_bytes},
+        {"memory_warning", config_.server.memory_warning_bytes && resident_bytes > config_.server.memory_warning_bytes},
+        {"index_growth_warning", config_.server.index_warning_bytes && index_bytes > config_.server.index_warning_bytes}};
 }
 }  // namespace mimicrag

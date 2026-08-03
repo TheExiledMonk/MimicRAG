@@ -1,0 +1,22 @@
+groups:
+  - name: mimicrag-v1.1
+    rules:
+      - alert: MimicRAGProviderUnavailable
+        expr: mimicrag_provider_healthy == 0
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Remote embedding provider has been unavailable for 10 minutes"}
+      - alert: MimicRAGQueueBacklog
+        expr: mimicrag_queue_depth > 100
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "MimicRAG request queue is persistently backed up"}
+      - alert: MimicRAGRequestRejections
+        expr: increase(mimicrag_queue_rejected_total[5m]) > 0
+        labels: {severity: critical}
+        annotations: {summary: "MimicRAG rejected requests because its queue was full"}
+      - alert: MimicRAGReclaimableStorage
+        expr: mimicrag_reclaimable_content_bytes > 1073741824
+        for: 1h
+        labels: {severity: info}
+        annotations: {summary: "More than 1 GiB can be reclaimed by compaction"}

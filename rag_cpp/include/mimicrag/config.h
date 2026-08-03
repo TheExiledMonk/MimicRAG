@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace mimicrag {
 
@@ -30,6 +31,19 @@ struct LocalEmbeddingConfig {
     std::string query_prefix;
 };
 
+struct ApiKeyIdentity {
+    std::string id;
+    std::string key;
+    std::string key_env;
+    std::vector<std::string> permissions;
+    std::vector<std::string> tenants;
+    std::vector<std::string> scopes;
+    size_t query_requests_per_minute = 0;
+    size_t ingestion_requests_per_minute = 0;
+    size_t provider_requests_per_minute = 0;
+    uint64_t storage_bytes = 0;
+};
+
 struct ServerConfig {
     std::string host = "127.0.0.1";
     uint16_t port = 8080;
@@ -46,6 +60,14 @@ struct ServerConfig {
     size_t job_workers = 1;
     size_t trace_memory = 10000;
     std::string trace_path;
+    uint64_t trace_max_bytes = 64ULL * 1024 * 1024;
+    std::string audit_log_path;
+    uint64_t audit_log_max_bytes = 64ULL * 1024 * 1024;
+    uint64_t capacity_warning_bytes = 1024ULL * 1024 * 1024;
+    uint64_t memory_warning_bytes = 0;
+    uint64_t index_warning_bytes = 0;
+    size_t retention_days = 0;
+    std::vector<ApiKeyIdentity> keys;
     bool graph_enabled = true;
     size_t graph_max_seeds = 5;
     size_t graph_max_neighbors = 32;

@@ -77,6 +77,11 @@ streams forward provider tokens immediately over SSE. Prompt-injection assessmen
 retrieval details, provider/model identity, latency, and citations are recorded in the
 bounded trace store and JSONL trace file.
 
+Lifecycle operations include tenant-bound `DELETE /v1/documents/{id}` (with a JSON
+`tenant_id`) and `GET /v1/storage`. Native `inspect` and `compact` commands validate the
+versioned catalog and atomically retain only current document generations. Compaction is an
+offline maintenance command; it removes derived indexes and rebuilds them on the next start.
+
 Retrieved chunks include a stable `node_id`. `POST /v1/graph/expand` accepts that ID,
 the tenant/access scope, and a neighbor limit, returning typed document, section, and
 chunk nodes without another embedding or global search. Every returned node has its own

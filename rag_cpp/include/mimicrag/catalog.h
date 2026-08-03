@@ -20,6 +20,8 @@ public:
     bool Exists() const;
     void Append(const CatalogRecord& record);
     size_t Replay(const std::function<void(CatalogRecord&&)>& consume);
+    nlohmann::json Inspect();
+    nlohmann::json Compact();
     const std::filesystem::path& Path() const { return path_; }
 private:
     std::filesystem::path path_;

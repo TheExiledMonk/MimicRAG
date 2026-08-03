@@ -6,6 +6,7 @@
 #include <fstream>
 #include <limits>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace mimicrag {
 namespace {
@@ -137,6 +138,55 @@ size_t BinaryCatalog::Replay(const std::function<void(CatalogRecord&&)>& consume
         last_good = static_cast<uint64_t>(input.tellg());
     }
     return records;
+}
+
+nlohmann::json BinaryCatalog::Inspect() {
+    const uint64_t bytes = Exists() ? std::filesystem::file_size(path_) : 0;
+    size_t records = 0, documents = 0, tombstones = 0;
+    std::unordered_map<std::string, bool> live;
+    records = Replay([&](CatalogRecord&& record) {
+        const std::string id = record.document.value("document_id", "");
+        if (id.empty()) throw std::runtime_error("catalog record has no document_id");
+        if (record.document.value("_operation", "") == "delete") { live[id] = false; ++tombstones; }
+        else { live[id] = true; ++documents; }
+    });
+    size_t live_documents = 0; for (const auto& item : live) live_documents += item.second;
+    return {{"valid", true}, {"format", "mrg1_zstd_float32"}, {"format_version", 1}, {"bytes", bytes},
+        {"records", records}, {"document_versions", documents}, {"tombstones", tombstones}, {"live_documents", live_documents}};
+}
+
+nlohmann::json BinaryCatalog::Compact() {
+    if (!Exists()) return {{"compacted", false}, {"reason", "catalog_not_found"}};
+    const uint64_t before = std::filesystem::file_size(path_);
+    std::vector<CatalogRecord> records;
+    std::unordered_map<std::string, size_t> latest;
+    Replay([&](CatalogRecord&& record) {
+        const std::string id = record.document.value("document_id", "");
+        if (id.empty()) throw std::runtime_error("catalog record has no document_id");
+        auto found = latest.find(id);
+        if (found != latest.end()) records[found->second].document = nullptr;
+        latest[id] = records.size(); records.push_back(std::move(record));
+    });
+    const auto temporary = std::filesystem::path(path_.string() + ".compacting");
+    std::filesystem::remove(temporary);
+    BinaryCatalog output(temporary); size_t retained = 0;
+    for (const auto& record : records) {
+        if (record.document.is_null() || record.document.value("_operation", "") == "delete") continue;
+        output.Append(record); ++retained;
+    }
+    if (!output.Exists()) Initialize(temporary);
+    // A same-filesystem rename is the generation switch. Keep the previous generation until the
+    // replacement has been completely written and validated.
+    BinaryCatalog validation(temporary); validation.Inspect();
+    const auto previous = std::filesystem::path(path_.string() + ".previous");
+    std::filesystem::remove(previous);
+    std::filesystem::rename(path_, previous);
+    try { std::filesystem::rename(temporary, path_); }
+    catch (...) { std::filesystem::rename(previous, path_); throw; }
+    std::filesystem::remove(previous);
+    const uint64_t after = std::filesystem::file_size(path_);
+    return {{"compacted", true}, {"records_before", records.size()}, {"records_after", retained},
+        {"bytes_before", before}, {"bytes_after", after}, {"reclaimed_bytes", before > after ? before - after : 0}};
 }
 
 }  // namespace mimicrag

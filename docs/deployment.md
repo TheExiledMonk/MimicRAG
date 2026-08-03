@@ -55,8 +55,9 @@ sudo chmod 0640 /etc/mimicdb/mimicrag.env
 ```
 
 Rotate a provider key by updating the environment file and restarting the service.
-Rotate the server bearer key only after clients have been updated or during a planned
-cutover; the native listener currently accepts one server key.
+Server keys are named identities with permissions, tenant/scope bindings, and quotas.
+Use an overlapping old/new identity during rotation as described in
+[V1.1 operations](operations_v1_1.md#authentication-and-quotas).
 
 ## systemd
 
@@ -99,6 +100,10 @@ Network firewalls should allow the service to contact only configured model prov
 and required package/model sources.
 
 ## Backup and restore
+
+Use the native checksummed snapshot, verification, rehearsal, and restore commands documented in
+[V1.1 operations](operations_v1_1.md#backup-and-recovery). The manual stopped-service procedure
+below remains available for older installations.
 
 Treat the complete `server.data_path` as one consistency unit. The safest initial
 procedure is a stopped-service snapshot:

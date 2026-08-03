@@ -314,6 +314,8 @@ graph construction.
 |---|---|---|
 | `GET` | `/health`, `/ready` | Readiness and index/storage state |
 | `POST` | `/v1/documents` | Versioned document ingestion |
+| `DELETE` | `/v1/documents/{id}` | Tenant-bound document deletion |
+| `GET` | `/v1/storage` | Live and reclaimable storage statistics |
 | `POST` | `/v1/retrieve` | Hybrid evidence retrieval |
 | `POST` | `/v1/answers` | Cited RAG answer, optionally SSE |
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat endpoint |
@@ -321,6 +323,10 @@ graph construction.
 | `POST` | `/v1/evaluations` | Golden-set evaluation |
 | `GET` | `/v1/jobs/{id}` | Background-ingestion job state |
 | `GET` | `/v1/traces`, `/v1/traces/{id}` | Retrieval and answer traces |
+| `DELETE` | `/v1/tenants/{id}` | Verified tenant erasure |
+| `POST` | `/v1/maintenance/retention` | Apply retention policy |
+| `POST` | `/v1/maintenance/compact` | Online atomic compaction and rebuild |
+| `GET` | `/metrics` | Prometheus operational metrics |
 
 ## Persistence
 

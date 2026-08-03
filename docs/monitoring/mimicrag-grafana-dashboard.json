@@ -1,0 +1,15 @@
+{
+  "title": "MimicRAG V1.1 Operations",
+  "uid": "mimicrag-v11",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "panels": [
+    {"type":"timeseries","title":"Request rate","targets":[{"expr":"rate(mimicrag_requests_total[5m])"}],"gridPos":{"x":0,"y":0,"w":8,"h":8}},
+    {"type":"timeseries","title":"Mean request latency","targets":[{"expr":"rate(mimicrag_request_latency_seconds_sum[5m]) / rate(mimicrag_requests_total[5m])"}],"gridPos":{"x":8,"y":0,"w":8,"h":8}},
+    {"type":"timeseries","title":"Queue and active requests","targets":[{"expr":"mimicrag_queue_depth"},{"expr":"mimicrag_requests_active"}],"gridPos":{"x":16,"y":0,"w":8,"h":8}},
+    {"type":"stat","title":"Provider health","targets":[{"expr":"mimicrag_provider_healthy"}],"gridPos":{"x":0,"y":8,"w":6,"h":6}},
+    {"type":"timeseries","title":"Provider failures","targets":[{"expr":"increase(mimicrag_provider_failures_total[5m])"}],"gridPos":{"x":6,"y":8,"w":6,"h":6}},
+    {"type":"timeseries","title":"Storage and reclaimable bytes","targets":[{"expr":"mimicrag_storage_bytes"},{"expr":"mimicrag_reclaimable_content_bytes"}],"gridPos":{"x":12,"y":8,"w":12,"h":6}}
+  ]
+}

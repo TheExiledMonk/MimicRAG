@@ -50,6 +50,7 @@ add_executable(mimicrag_server
     src/main.cpp
     src/config.cpp
     src/catalog.cpp
+    src/operations.cpp
     src/provider.cpp
     src/local_embeddings.cpp
     src/rag_engine.cpp
@@ -92,6 +93,9 @@ if(MIMICDB_BUILD_TESTS)
     add_test(NAME mimicrag_cpp_smoke
         COMMAND ${PROJECT_SOURCE_DIR}/scripts/mimicrag_cpp_smoke_test.sh
                 $<TARGET_FILE:mimicrag_server> ${PROJECT_SOURCE_DIR}/tests/mimicrag_cpp_test.json)
+    add_test(NAME mimicrag_v11_smoke
+        COMMAND ${PROJECT_SOURCE_DIR}/scripts/mimicrag_v11_smoke_test.sh
+                $<TARGET_FILE:mimicrag_server> ${PROJECT_SOURCE_DIR}/tests/mimicrag_v11_test.json)
     add_executable(mimicrag_provider_stream_smoke tests/provider_stream_smoke.cpp src/provider.cpp src/config.cpp)
     target_include_directories(mimicrag_provider_stream_smoke PRIVATE include)
     target_link_libraries(mimicrag_provider_stream_smoke PRIVATE CURL::libcurl nlohmann_json::nlohmann_json Threads::Threads)
