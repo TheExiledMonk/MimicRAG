@@ -123,16 +123,16 @@ LLM selectively only where it produces a measurable relevance improvement.
 
 ## V1.4: ingestion ecosystem
 
-- [ ] Add PDF, DOCX, HTML, email, JSON, Markdown, and source-code adapters.
-- [ ] Add OCR integration for scanned sources while preserving page coordinates.
-- [ ] Preserve table headers, rows, captions, and references as structured content.
-- [ ] Add directory watching and incremental source synchronization.
-- [ ] Add sitemap and authenticated web ingestion.
-- [ ] Add connectors for S3-compatible storage, Git repositories, Google Drive, and SharePoint.
-- [ ] Detect changed, unchanged, renamed, and deleted source documents.
-- [ ] Add content-hash deduplication before embedding.
-- [ ] Add language detection and model routing for multilingual corpora.
-- [ ] Produce an ingestion manifest containing provenance, successes, warnings, and rejections.
+- [x] Add PDF, DOCX, HTML, email, JSON, Markdown, and source-code adapters.
+- [x] Add OCR integration for scanned sources while preserving page coordinates.
+- [x] Preserve table headers, rows, captions, and references as structured content.
+- [x] Add directory watching and incremental source synchronization.
+- [x] Add sitemap and authenticated web ingestion.
+- [x] Add connectors for S3-compatible storage, Git repositories, Google Drive, and SharePoint.
+- [x] Detect changed, unchanged, renamed, and deleted source documents.
+- [x] Add content-hash deduplication before embedding.
+- [x] Add language detection and model routing for multilingual corpora.
+- [x] Produce an ingestion manifest containing provenance, successes, warnings, and rejections.
 
 Connectors should feed the normalized document representation and remain outside the core query
 engine. No connector should become a mandatory runtime dependency.
