@@ -164,6 +164,21 @@ bool RateAllowed(const std::string& identity, size_t limit) {
 
 std::string Lower(std::string value) { for (char& c : value) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return value; }
 
+json OpenApiSpec() {
+    const std::vector<std::pair<std::string, std::string>> routes{
+        {"/health", "get"}, {"/ready", "get"}, {"/openapi.json", "get"},
+        {"/v1/documents", "post"}, {"/v1/documents/{document_id}", "delete"},
+        {"/v1/retrieve", "post"}, {"/v1/answers", "post"}, {"/v1/graph/expand", "post"},
+        {"/v1/feedback", "post"}, {"/v1/evaluations", "post"}, {"/v1/storage", "get"},
+        {"/v1/traces", "get"}, {"/v1/traces/{trace_id}", "get"},
+        {"/v1/jobs/{job_id}", "get"}, {"/v1/chat/completions", "post"}};
+    json paths = json::object();
+    for (const auto& [path, method] : routes) paths[path][method] = {{"responses", {{"200", {{"description", "Successful response"}}}}}};
+    paths["/v1/jobs/{job_id}"]["delete"] = {{"responses", {{"200", {{"description", "Cancellation result"}}}}}};
+    return {{"openapi", "3.1.0"}, {"info", {{"title", "MimicRAG HTTP API"}, {"version", "1.5.0"}}},
+        {"paths", std::move(paths)}, {"components", {{"securitySchemes", {{"bearerAuth", {{"type", "http"}, {"scheme", "bearer"}}}}}}}};
+}
+
 void Handle(int socket, RagEngine& engine, std::shared_mutex& engine_gate) {
     RequestTimer request_timer;
     try {
@@ -195,6 +210,7 @@ void Handle(int socket, RagEngine& engine, std::shared_mutex& engine_gate) {
         if (method == "POST" && path == "/v1/maintenance/compact") maintenance_lock = std::unique_lock(engine_gate);
         else request_lock = std::shared_lock(engine_gate);
         if (method == "GET" && (path == "/health" || path == "/ready")) { Reply(socket, 200, engine.Health()); return; }
+        if (method == "GET" && path == "/openapi.json") { Reply(socket, 200, OpenApiSpec()); return; }
         if (method == "GET" && path == "/metrics") { ReplyText(socket, 200, Metrics(engine), "text/plain; version=0.0.4"); return; }
         if (method == "GET" && path == "/v1/storage") { Reply(socket, 200, engine.StorageStats()); return; }
         if (method == "GET" && path.rfind("/v1/jobs/", 0) == 0) { Reply(socket, 200, engine.Job(path.substr(9))); return; }
