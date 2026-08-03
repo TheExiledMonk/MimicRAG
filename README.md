@@ -421,15 +421,105 @@ Recommended production checks:
 - Reverse-proxy request limits and TLS
 - API-key rotation and incident procedure
 
-## Tests
+## Testing and benchmarks
+
+Build the native tests and benchmark executables once:
 
 ```bash
+cmake -S . -B build-release \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DMIMICDB_BUILD_BENCHMARKS=ON
+cmake --build build-release -j
 ctest --test-dir build-release --output-on-failure
 ```
 
 Focused native RAG tests include catalog recovery, Wikipedia parsing, HTTP retrieval,
-graph expansion, provider streaming, evaluation, and vector-index persistence. Some
-legacy CLI/API tests require the optional Python dependencies in `requirements.txt`.
+graph expansion, provider streaming, evaluation, vector-index persistence, and native memory
+lifecycle behavior. Some legacy CLI/API tests require the optional Python dependencies in
+`requirements.txt`.
+
+### Testing MimicDB
+
+The scan benchmark measures columnar predicate throughput. The vector benchmark measures exact,
+IVF, filtered, GPU-residency, and CPU/GPU-routing behavior:
+
+```bash
+./build-release/mimicdb_bench_scan --rows=1048576
+./build-release/mimicdb_bench_vector 50000 384 10 5
+```
+
+Python API correctness can be tested separately:
+
+```bash
+PYTHONPATH=api python -m unittest tests/test_python_api.py
+```
+
+### Testing MimicRAG
+
+The native benchmark covers ingestion, sequential and concurrent retrieval, tenant/access
+filtering, recall@1/10, graph-expansion overhead, persisted restart time, and first-query latency.
+It requires a local embedding GGUF, but does not require a generative LLM:
+
+```bash
+rag_data=$(mktemp -d /tmp/mimicrag-benchmark.XXXXXX)
+./build-release/rag_cpp/mimicrag_benchmark \
+  /path/to/nomic-embed-text-v1.5.Q4_K_M.gguf \
+  "$rag_data" 120 48 4 on
+```
+
+The final arguments are documents, queries, concurrent threads, and graph mode. Use a disposable
+data directory because the benchmark writes a complete native catalog.
+
+### Testing MimicMemory
+
+The comprehensive memory benchmark is deterministic and does not require an LLM. It covers
+evidence immutability, isolation, lifecycle review, correction precedence, reminders, relations,
+working-memory promotion, authoritative-document ordering, export/audit/deletion, extraction
+caching, durable workers, retries, recall quality, latency, throughput, and storage:
+
+```bash
+PYTHONPATH=api python benchmarks/bench_agent_memory.py \
+  --memories 500 --queries 100 \
+  --output benchmarks/results/agent_memory.json
+```
+
+Add `--native-url http://127.0.0.1:8080 --api-key "$MIMICRAG_API_KEY"` to benchmark the
+native memory HTTP lifecycle. Live extraction testing is optional and incurs provider charges:
+
+```bash
+ANTHROPIC_API_KEY=... PYTHONPATH=api \
+  python benchmarks/bench_agent_memory.py --live-llm
+MINIMAX_API_KEY=... PYTHONPATH=api \
+  python benchmarks/bench_agent_memory.py --live-llm
+```
+
+MiniMax uses its preferred Anthropic-compatible endpoint; add `--minimax-openai` to exercise its
+optional OpenAI-compatible endpoint too. See the complete [memory benchmark guide](docs/agent_memory_benchmarks.md).
+
+### Latest local benchmark smoke run
+
+The following small-scale regression run was recorded on 2026-08-03 using an AMD Ryzen 9 7950X3D,
+Radeon RX 7900 XTX, Vulkan, and Nomic Embed Text v1.5 Q4_K_M:
+
+| Component | Workload | Result |
+|---|---|---:|
+| MimicDB scan | 1,048,576 rows | 242.2 million rows/s |
+| MimicDB exact vector | 50,000 × 384 dimensions | 99.1 million vectors/s |
+| MimicDB filtered vector | 500 candidates | 6.62 million candidate vectors/s |
+| MimicRAG ingestion | 120 documents | 300.9 documents/s |
+| MimicRAG sequential retrieval | 48 queries | 196.3 QPS, 6.31 ms p95, recall@10 1.0 |
+| MimicRAG four-thread retrieval | 48 queries | 315.6 QPS, 15.43 ms p95, recall@10 1.0 |
+| MimicRAG restart replay | 120 vectors | 46.83 ms |
+| MimicMemory ingestion | 500 memories | 12,576 memories/s |
+| MimicMemory recall | 100 queries | 230.3 QPS, 4.35 ms p95, useful recall 1.0 |
+| MimicMemory safety | 30 assertions | Passed; zero leakage, harmful recall, and stale recall |
+
+These development smoke results use synthetic, deliberately well-separated benchmark data; they
+are not production-capacity or real-world relevance claims. They do show that the heavily optimized
+engine, retrieval, and memory paths introduce no obvious architectural overhead at this scale,
+including when evidence binding, isolation, lifecycle policy, filtering, persistence, and auditing
+are enabled. Validate with representative documents, noisy and contradictory memories, concurrency,
+hardware, and access policies before using the results for deployment sizing or comparisons.
 
 ## Repository layout
 
@@ -491,6 +581,7 @@ Third-party dependencies and the `llama.cpp` submodule remain under their respec
 - [`docs/unified_agent_memory_v1_6.md`](docs/unified_agent_memory_v1_6.md): embedded agent memory
 - [`docs/native_memory_integration_v1_7.md`](docs/native_memory_integration_v1_7.md): native memory persistence, recall, and agent integration
 - [`docs/memory_hardening_v1_8.md`](docs/memory_hardening_v1_8.md): authoritative evidence, lifecycle review, durable workers, and evaluation
+- [`docs/agent_memory_benchmarks.md`](docs/agent_memory_benchmarks.md): deterministic, native HTTP, and live-provider memory benchmarks
 - [`docs/openapi.json`](docs/openapi.json): complete published HTTP contract
 - [`docs/function-schemas.json`](docs/function-schemas.json): portable agent tool schemas
 - [`docs/design.md`](docs/design.md): MimicDB architecture and durability
