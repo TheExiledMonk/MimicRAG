@@ -139,15 +139,15 @@ engine. No connector should become a mandatory runtime dependency.
 
 ## V1.5: agent and developer experience
 
-- [ ] Publish an OpenAPI specification tested against the implemented HTTP routes.
-- [ ] Add a native C++ client plus lightweight Go, Rust, JavaScript, and Python clients.
-- [ ] Add an MCP server exposing retrieval, graph expansion, ingestion, and trace inspection.
-- [ ] Publish portable function schemas for non-MCP agent runtimes.
-- [ ] Add bounded conversation-aware retrieval sessions.
-- [ ] Add a corpus, ingestion, trace, and relevance inspection interface.
-- [ ] Add one-command initialization and persistent hardware calibration.
-- [ ] Add instance export/import and migration tools.
-- [ ] Maintain compatibility tests for OpenAI clients, OpenClaw, Hermes, and other agent hosts.
+- [x] Publish an OpenAPI specification tested against the implemented HTTP routes.
+- [x] Add a native C++ client plus lightweight Go, Rust, JavaScript, and Python clients.
+- [x] Add an MCP server exposing retrieval, graph expansion, ingestion, and trace inspection.
+- [x] Publish portable function schemas for non-MCP agent runtimes.
+- [x] Add bounded conversation-aware retrieval sessions.
+- [x] Add a corpus, ingestion, trace, and relevance inspection interface.
+- [x] Add one-command initialization and persistent hardware calibration.
+- [x] Add instance export/import and migration tools.
+- [x] Maintain compatibility tests for OpenAI clients, OpenClaw, Hermes, and other agent hosts.
 
 ## V1.6: unified agent memory
 
