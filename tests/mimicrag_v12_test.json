@@ -1,0 +1,15 @@
+{
+  "chat": {"provider": "openai_compatible", "model": "test", "base_url": "http://127.0.0.1:1/v1", "timeout_seconds": 1, "max_retries": 0},
+  "embedding": {"provider": "openai_compatible", "model": "test", "base_url": "http://127.0.0.1:1/v1", "timeout_seconds": 1, "max_retries": 0},
+  "local_embedding": {"enabled": false},
+  "ingestion": {
+    "default_mode": "fast", "target_chars": 300, "minimum_chars": 80,
+    "maximum_chars": 500, "overlap_chars": 40, "maximum_chunks": 100,
+    "analysis_enabled": false, "maximum_analysis_calls": 2, "maximum_analysis_input_chars": 1000,
+    "maximum_generated_metadata_bytes": 16384, "maximum_graph_edges": 1000, "maximum_analysis_seconds": 1
+  },
+  "server": {
+    "host": "127.0.0.1", "port": 18084, "data_path": "__DATA_PATH__", "requests_per_minute": 0,
+    "keys": [{"id": "operator", "key": "operator-secret", "permissions": ["read", "write", "admin"], "tenants": ["test"], "scopes": ["public"]}]
+  }
+}

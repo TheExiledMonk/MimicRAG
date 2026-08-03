@@ -322,6 +322,7 @@ graph construction.
 | `POST` | `/v1/graph/expand` | Bounded structural deep dive |
 | `POST` | `/v1/evaluations` | Golden-set evaluation |
 | `GET` | `/v1/jobs/{id}` | Background-ingestion job state |
+| `DELETE` | `/v1/jobs/{id}` | Cooperatively cancel background ingestion |
 | `GET` | `/v1/traces`, `/v1/traces/{id}` | Retrieval and answer traces |
 | `DELETE` | `/v1/tenants/{id}` | Verified tenant erasure |
 | `POST` | `/v1/maintenance/retention` | Apply retention policy |
@@ -338,6 +339,7 @@ The configured `server.data_path` contains all runtime state:
 - `local.ivf` / `remote.ivf`: persisted, memory-mapped vector indexes
 - `lexical.idx`: compact memory-mapped BM25 dictionary, lengths, and postings
 - trace JSONL and optional Wikipedia checkpoint
+- restart-safe ingestion checkpoints and content/config keyed semantic-analysis cache
 
 Back up the whole directory as one consistency unit while ingestion is stopped. The
 catalog can recover a truncated final append and stale derived indexes are rebuilt, but

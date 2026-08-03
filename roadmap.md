@@ -65,39 +65,39 @@ LLM selectively only where it produces a measurable relevance improvement.
 
 ### Normalized document structure
 
-- [ ] Define a native document model for titles, headings, paragraphs, lists, tables, code blocks,
+- [x] Define a native document model for titles, headings, paragraphs, lists, tables, code blocks,
   captions, footnotes, citations, and source offsets.
-- [ ] Add format adapters incrementally, starting with Markdown, HTML, and plain text.
-- [ ] Preserve section hierarchy and adjacency through existing document graph nodes and edges.
-- [ ] Keep byte, page, and section offsets needed to reconstruct faithful citations.
-- [ ] Prevent headings, table labels, definitions, and qualifiers from becoming orphaned.
+- [x] Add format adapters incrementally, starting with Markdown, HTML, and plain text.
+- [x] Preserve section hierarchy and adjacency through existing document graph nodes and edges.
+- [x] Keep byte, page, and section offsets needed to reconstruct faithful citations.
+- [x] Prevent headings, table labels, definitions, and qualifiers from becoming orphaned.
 
 ### Adaptive chunking
 
-- [ ] Split on structural and semantic boundaries before applying token-size limits.
-- [ ] Add overlap only where boundary analysis indicates that context crosses chunks.
-- [ ] Attach undersized fragments to the appropriate parent or neighbor.
-- [ ] Detect oversized or dense sections requiring semantic subdivision.
-- [ ] Record chunking strategy, parser version, and source span for reproducibility.
+- [x] Split on structural and semantic boundaries before applying token-size limits.
+- [x] Add overlap only where boundary analysis indicates that context crosses chunks.
+- [x] Attach undersized fragments to the appropriate parent or neighbor.
+- [x] Detect oversized or dense sections requiring semantic subdivision.
+- [x] Record chunking strategy, parser version, and source span for reproducibility.
 
 ### Optional LLM-assisted analysis
 
-- [ ] Add a provider-independent ingestion-analysis interface using existing custom model URLs and
+- [x] Add a provider-independent ingestion-analysis interface using existing custom model URLs and
   environment-based API keys.
-- [ ] Use an LLM only for ambiguous boundaries, dense prose, tables, and mixed-topic sections.
-- [ ] Support local inference with GPU acceleration and CPU fallback.
-- [ ] Generate contextual chunk headers or retrieval summaries without replacing source text.
-- [ ] Require validated structured output, timeouts, retry limits, and deterministic fallback.
-- [ ] Prevent document prompt injection from changing ingestion policy or accessing credentials.
-- [ ] Record model identity, prompt version, decisions, latency, and token usage.
+- [x] Use an LLM only for ambiguous boundaries, dense prose, tables, and mixed-topic sections.
+- [x] Support local inference with GPU acceleration and CPU fallback.
+- [x] Generate contextual chunk headers or retrieval summaries without replacing source text.
+- [x] Require validated structured output, timeouts, retry limits, and deterministic fallback.
+- [x] Prevent document prompt injection from changing ingestion policy or accessing credentials.
+- [x] Record model identity, prompt version, decisions, latency, and token usage.
 
 ### Semantic-ingestion operations
 
-- [ ] Add `fast`, `structured`, and `semantic` modes with explicit resource budgets.
-- [ ] Support background analysis, cancellation, progress, and restart-safe checkpoints.
-- [ ] Cache analysis by content hash and configuration.
-- [ ] Bound per-document cost, time, output size, graph fan-out, and generated metadata.
-- [ ] Reindex safely when parser, chunker, prompt, or embedding identity changes.
+- [x] Add `fast`, `structured`, and `semantic` modes with explicit resource budgets.
+- [x] Support background analysis, cancellation, progress, and restart-safe checkpoints.
+- [x] Cache analysis by content hash and configuration.
+- [x] Bound per-document cost, time, output size, graph fan-out, and generated metadata.
+- [x] Reindex safely when parser, chunker, prompt, or embedding identity changes.
 
 ## V1.3: retrieval quality
 

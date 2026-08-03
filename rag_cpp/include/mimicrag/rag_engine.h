@@ -28,6 +28,7 @@ public:
     nlohmann::json AnswerStream(const nlohmann::json& request,
                                 const std::function<void(const std::string&)>& stream);
     nlohmann::json Job(const std::string& job_id) const;
+    nlohmann::json CancelJob(const std::string& job_id);
     nlohmann::json Trace(const std::string& trace_id) const;
     nlohmann::json RecentTraces(size_t limit) const;
     nlohmann::json Evaluate(const nlohmann::json& request);
@@ -38,6 +39,7 @@ private:
     struct Impl;
     Config config_;
     std::unique_ptr<Impl> impl_;
+    void ResumeIngestionCheckpoints();
 };
 
 }  // namespace mimicrag

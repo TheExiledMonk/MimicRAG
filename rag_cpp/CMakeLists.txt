@@ -50,6 +50,7 @@ add_executable(mimicrag_server
     src/main.cpp
     src/config.cpp
     src/catalog.cpp
+    src/document.cpp
     src/operations.cpp
     src/provider.cpp
     src/local_embeddings.cpp
@@ -73,7 +74,7 @@ target_compile_options(mimicrag_server PRIVATE -Wall -Wextra -Wpedantic)
 if(MIMICDB_BUILD_BENCHMARKS AND MIMICRAG_ENABLE_LLAMA)
     add_executable(mimicrag_benchmark
         ${PROJECT_SOURCE_DIR}/benchmarks/rag_cpp_benchmark.cpp
-        src/config.cpp src/catalog.cpp src/provider.cpp src/local_embeddings.cpp src/rag_engine.cpp)
+        src/config.cpp src/catalog.cpp src/document.cpp src/provider.cpp src/local_embeddings.cpp src/rag_engine.cpp)
     target_include_directories(mimicrag_benchmark PRIVATE include)
     target_compile_definitions(mimicrag_benchmark PRIVATE MIMICRAG_HAVE_LLAMA=1)
     target_link_libraries(mimicrag_benchmark PRIVATE
@@ -82,6 +83,10 @@ if(MIMICDB_BUILD_BENCHMARKS AND MIMICRAG_ENABLE_LLAMA)
 endif()
 
 if(MIMICDB_BUILD_TESTS)
+    add_executable(mimicrag_document_smoke tests/document_smoke.cpp src/document.cpp)
+    target_include_directories(mimicrag_document_smoke PRIVATE include)
+    target_link_libraries(mimicrag_document_smoke PRIVATE nlohmann_json::nlohmann_json)
+    add_test(NAME mimicrag_document_smoke COMMAND mimicrag_document_smoke)
     add_executable(mimicrag_catalog_smoke tests/catalog_smoke.cpp src/catalog.cpp)
     target_include_directories(mimicrag_catalog_smoke PRIVATE include)
     target_link_libraries(mimicrag_catalog_smoke PRIVATE PkgConfig::ZSTD nlohmann_json::nlohmann_json)
@@ -96,6 +101,9 @@ if(MIMICDB_BUILD_TESTS)
     add_test(NAME mimicrag_v11_smoke
         COMMAND ${PROJECT_SOURCE_DIR}/scripts/mimicrag_v11_smoke_test.sh
                 $<TARGET_FILE:mimicrag_server> ${PROJECT_SOURCE_DIR}/tests/mimicrag_v11_test.json)
+    add_test(NAME mimicrag_v12_smoke
+        COMMAND ${PROJECT_SOURCE_DIR}/scripts/mimicrag_v12_smoke_test.sh
+                $<TARGET_FILE:mimicrag_server> ${PROJECT_SOURCE_DIR}/tests/mimicrag_v12_test.json)
     add_executable(mimicrag_provider_stream_smoke tests/provider_stream_smoke.cpp src/provider.cpp src/config.cpp)
     target_include_directories(mimicrag_provider_stream_smoke PRIVATE include)
     target_link_libraries(mimicrag_provider_stream_smoke PRIVATE CURL::libcurl nlohmann_json::nlohmann_json Threads::Threads)

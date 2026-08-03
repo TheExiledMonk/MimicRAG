@@ -63,9 +63,12 @@ int main(int argc, char** argv) {
         if (command == "migrate") { std::cout << engine.Health().dump(2) << '\n'; return 0; }
         if (command == "serve" && engine.GetConfig().server.retention_days) engine.ApplyRetention(nlohmann::json::object());
         if (command == "ingest") {
-            if (argc < 3) throw std::runtime_error("usage: mimicrag_server ingest PATH [--config FILE] [--tenant ID] [--source-uri URI] [--title TITLE]");
+            if (argc < 3) throw std::runtime_error("usage: mimicrag_server ingest PATH [--config FILE] [--tenant ID] [--source-uri URI] [--title TITLE] [--format text|markdown|html] [--mode fast|structured|semantic] [--background]");
             const std::string path = argv[2];
-            auto result = engine.Ingest({{"text", ReadFile(path)}, {"source_uri", Option(argc, argv, "--source-uri", "file://" + path)}, {"tenant_id", Option(argc, argv, "--tenant", "default")}, {"title", Option(argc, argv, "--title", "")}, {"background", false}});
+            std::string inferred_format = Option(argc, argv, "--format", "");
+            if (inferred_format.empty()) { const auto extension = std::filesystem::path(path).extension().string(); inferred_format = extension == ".md" || extension == ".markdown" ? "markdown" : extension == ".html" || extension == ".htm" ? "html" : "text"; }
+            auto result = engine.Ingest({{"text", ReadFile(path)}, {"source_uri", Option(argc, argv, "--source-uri", "file://" + path)}, {"tenant_id", Option(argc, argv, "--tenant", "default")}, {"title", Option(argc, argv, "--title", "")},
+                {"format", inferred_format}, {"mode", Option(argc, argv, "--mode", config.ingestion.default_mode)}, {"background", Flag(argc, argv, "--background")}});
             std::cout << result.dump(2) << '\n'; return 0;
         }
         if (command == "delete") {

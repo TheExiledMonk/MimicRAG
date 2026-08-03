@@ -48,6 +48,21 @@
     "provider": "local",
     "model": "nomic-embed-text-v1.5"
   },
+  "ingestion": {
+    "default_mode": "fast",
+    "target_chars": 1600,
+    "minimum_chars": 240,
+    "maximum_chars": 2400,
+    "overlap_chars": 200,
+    "maximum_chunks": 10000,
+    "analysis_enabled": false,
+    "maximum_analysis_calls": 8,
+    "maximum_analysis_input_chars": 24000,
+    "maximum_generated_metadata_bytes": 65536,
+    "maximum_graph_edges": 200000,
+    "maximum_analysis_seconds": 60,
+    "prompt_version": "semantic-ingestion-1"
+  },
   "chat": {
     "provider": "openai_compatible",
     "model": "your-chat-model",

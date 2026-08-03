@@ -44,6 +44,23 @@ struct ApiKeyIdentity {
     uint64_t storage_bytes = 0;
 };
 
+struct IngestionConfig {
+    std::string default_mode = "fast";
+    size_t target_chars = 1600;
+    size_t minimum_chars = 240;
+    size_t maximum_chars = 2400;
+    size_t overlap_chars = 200;
+    size_t maximum_chunks = 10000;
+    size_t maximum_analysis_calls = 8;
+    size_t maximum_analysis_input_chars = 24000;
+    size_t maximum_generated_metadata_bytes = 65536;
+    size_t maximum_graph_edges = 200000;
+    long maximum_analysis_seconds = 60;
+    bool analysis_enabled = false;
+    bool analysis_use_chat_provider = true;
+    std::string prompt_version = "semantic-ingestion-1";
+};
+
 struct ServerConfig {
     std::string host = "127.0.0.1";
     uint16_t port = 8080;
@@ -80,6 +97,7 @@ struct Config {
     ModelConfig embedding;
     LocalEmbeddingConfig local_embedding;
     ServerConfig server;
+    IngestionConfig ingestion;
     static Config Load(const std::string& path);
 };
 

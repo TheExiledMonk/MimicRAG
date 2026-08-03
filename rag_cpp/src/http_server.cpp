@@ -187,7 +187,7 @@ void Handle(int socket, RagEngine& engine, std::shared_mutex& engine_gate) {
         if (!authenticated) { Reply(socket, 401, {{"error", "invalid API key"}}); return; }
         const std::string identity = auth.key ? auth.id : (supplied.empty() ? fields["x-forwarded-for"] : "legacy");
         if (!RateAllowed(identity, server_config.requests_per_minute)) { Reply(socket, 429, {{"error", "rate limit exceeded"}}); return; }
-        const std::string permission = (method == "POST" && path == "/v1/documents") || method == "DELETE" ? "write" :
+        const std::string permission = (method == "POST" && path == "/v1/documents") || (method == "DELETE" && path.rfind("/v1/documents/", 0) == 0) ? "write" :
             (path == "/metrics" || path == "/v1/storage" || path.rfind("/v1/jobs", 0) == 0 || path.rfind("/v1/traces", 0) == 0 || path.rfind("/v1/tenants", 0) == 0 || path.rfind("/v1/maintenance", 0) == 0 || path == "/v1/evaluations") ? "admin" : "read";
         if (!HasPermission(auth, permission)) { Audit(server_config, auth, permission, "", false, fields["x-request-id"]); Reply(socket, 403, {{"error", "permission denied"}}); return; }
         std::unique_lock<std::shared_mutex> maintenance_lock;
@@ -225,9 +225,10 @@ void Handle(int socket, RagEngine& engine, std::shared_mutex& engine_gate) {
         if (ingestion || method == "DELETE" || path.rfind("/v1/maintenance", 0) == 0)
             Audit(server_config, auth, ingestion ? "document.ingest" : path.rfind("/v1/tenants", 0) == 0 ? "tenant.erase" :
                 method == "DELETE" ? "document.delete" : "maintenance", tenant, true, input.value("_request_id", ""));
-        if (method == "POST" && path == "/v1/documents") {
+        if (method == "DELETE" && path.rfind("/v1/jobs/", 0) == 0) Reply(socket, 200, engine.CancelJob(path.substr(9)));
+        else if (method == "POST" && path == "/v1/documents") {
             json sanitized = input;
-            for (const auto& internal : {"_replay", "_operation", "_record_version", "ingested_at_ms", "remote_embeddings", "local_embeddings", "remote_model_identity", "local_model_identity"}) sanitized.erase(internal);
+            for (const auto& internal : {"_replay", "_operation", "_record_version", "ingested_at_ms", "analysis_results", "remote_embeddings", "local_embeddings", "remote_model_identity", "local_model_identity"}) sanitized.erase(internal);
             Reply(socket, 200, engine.Ingest(sanitized));
         }
         else if (method == "DELETE" && path.rfind("/v1/documents/", 0) == 0) {

@@ -65,9 +65,6 @@ RemoteProvider::RemoteProvider(ModelConfig config) : config_(std::move(config)) 
 }
 
 nlohmann::json RemoteProvider::PostJson(const std::string& path, const nlohmann::json& body) const {
-    CURL* curl = curl_easy_init();
-    if (!curl) throw std::runtime_error("curl initialization failed");
-    std::string response;
     const std::string payload = body.dump();
     CurlHeaders headers;
     headers.Add("Content-Type: application/json");
@@ -84,21 +81,28 @@ nlohmann::json RemoteProvider::PostJson(const std::string& path, const nlohmann:
     std::string request_path = path;
     if (config_.provider == "azure_openai") request_path += "?api-version=" + (config_.api_version.empty() ? "2024-10-21" : config_.api_version);
     const std::string url = JoinUrl(config_.base_url, request_path);
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(payload.size()));
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers.value);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteString);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, config_.timeout_seconds);
-    const CURLcode status = curl_easy_perform(curl);
-    long http_status = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
-    curl_easy_cleanup(curl);
-    if (status != CURLE_OK || http_status < 200 || http_status >= 300) {
-        throw std::runtime_error("provider request failed: HTTP " + std::to_string(http_status) + " " + response.substr(0, 512));
+    std::string last_error;
+    for (int attempt = 0; attempt <= std::max(0, config_.max_retries); ++attempt) {
+        CURL* curl = curl_easy_init();
+        if (!curl) throw std::runtime_error("curl initialization failed");
+        std::string response;
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(payload.size()));
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers.value);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteString);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, config_.timeout_seconds);
+        const CURLcode status = curl_easy_perform(curl);
+        long http_status = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
+        curl_easy_cleanup(curl);
+        if (status == CURLE_OK && http_status >= 200 && http_status < 300) return nlohmann::json::parse(response);
+        last_error = "provider request failed: HTTP " + std::to_string(http_status) + " " + response.substr(0, 512);
+        const bool retryable = status != CURLE_OK || http_status == 429 || http_status >= 500;
+        if (!retryable) break;
     }
-    return nlohmann::json::parse(response);
+    throw std::runtime_error(last_error);
 }
 
 std::string RemoteProvider::StreamJson(const std::string& path, const nlohmann::json& body,

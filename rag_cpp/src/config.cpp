@@ -93,6 +93,21 @@ Config Config::Load(const std::string& path) {
     out.server.graph_max_neighbors = graph.value("max_neighbors", size_t{32});
     out.server.graph_max_section_children = graph.value("max_section_children", size_t{8});
     out.server.graph_min_seed_score = graph.value("min_seed_score", 0.01);
+    const auto ingestion = root.value("ingestion", json::object());
+    out.ingestion.default_mode = ingestion.value("default_mode", "fast");
+    out.ingestion.target_chars = ingestion.value("target_chars", size_t{1600});
+    out.ingestion.minimum_chars = ingestion.value("minimum_chars", size_t{240});
+    out.ingestion.maximum_chars = ingestion.value("maximum_chars", size_t{2400});
+    out.ingestion.overlap_chars = ingestion.value("overlap_chars", size_t{200});
+    out.ingestion.maximum_chunks = ingestion.value("maximum_chunks", size_t{10000});
+    out.ingestion.maximum_analysis_calls = ingestion.value("maximum_analysis_calls", size_t{8});
+    out.ingestion.maximum_analysis_input_chars = ingestion.value("maximum_analysis_input_chars", size_t{24000});
+    out.ingestion.maximum_generated_metadata_bytes = ingestion.value("maximum_generated_metadata_bytes", size_t{65536});
+    out.ingestion.maximum_graph_edges = ingestion.value("maximum_graph_edges", size_t{200000});
+    out.ingestion.maximum_analysis_seconds = ingestion.value("maximum_analysis_seconds", 60L);
+    out.ingestion.analysis_enabled = ingestion.value("analysis_enabled", false);
+    out.ingestion.analysis_use_chat_provider = ingestion.value("analysis_use_chat_provider", true);
+    out.ingestion.prompt_version = ingestion.value("prompt_version", "semantic-ingestion-1");
     if (out.local_embedding.enabled && out.local_embedding.model_path.empty()) {
         throw std::runtime_error("local_embedding.model_path is required when enabled");
     }
