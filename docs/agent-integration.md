@@ -1,9 +1,14 @@
 # Agent integration guide
 
-MimicRAG can serve as a shared evidence service for OpenClaw, Hermes Agent, and any runtime that
-can call an HTTP API. The published agent skill lives in [`skills/mimicrag/`](../skills/mimicrag/).
-It is an Agent Skills-compatible instruction package; it does not execute unreviewed code or carry
-credentials.
+Mimic provides independently installable Agent Skills-compatible packages for OpenClaw, Hermes
+Agent, and other skill-aware runtimes:
+
+- [`skills/mimicdb/`](../skills/mimicdb/) for standalone columnar/vector database operations.
+- [`skills/mimicrag/`](../skills/mimicrag/) for document ingestion, retrieval, and cited answers.
+- [`skills/mimicmemory/`](../skills/mimicmemory/) for evidence-backed lifecycle memory and optional
+  dream-state refinement.
+
+Install one, two, or all three. None executes unreviewed code or carries credentials.
 
 ## Integration model
 
@@ -12,6 +17,7 @@ Expose a small set of HTTP actions to the agent:
 | Agent action | MimicRAG route | Mutation |
 |---|---|---|
 | Check readiness | `GET /ready` | No |
+| Detect enabled components | `GET /health` | No |
 | Search evidence | `POST /v1/retrieve` | No |
 | Generate cited answer | `POST /v1/answers` | No |
 | Follow related context | `POST /v1/graph/expand` | No |
@@ -21,6 +27,10 @@ Expose a small set of HTTP actions to the agent:
 Give research agents read-only actions by default. Put ingestion behind a separate allowlist or
 approval boundary. Derive tenant and access scope from authenticated runtime state rather than
 letting the language model choose unrestricted values.
+
+The native HTTP health response reports `features.rag` and `features.memory`. Agents must inspect
+these values instead of assuming every route is available. MimicDB uses its own native server and
+client and is independently available regardless of those HTTP flags.
 
 ## Server setup
 
@@ -47,7 +57,9 @@ API reference remains available:
 
 ```bash
 mkdir -p /path/to/openclaw-workspace/skills
+cp -R skills/mimicdb /path/to/openclaw-workspace/skills/mimicdb
 cp -R skills/mimicrag /path/to/openclaw-workspace/skills/mimicrag
+cp -R skills/mimicmemory /path/to/openclaw-workspace/skills/mimicmemory
 ```
 
 Configure `MIMICRAG_BASE_URL` and `MIMICRAG_API_KEY` through OpenClaw's secret/environment
@@ -55,30 +67,35 @@ configuration for that skill or agent. Grant an HTTP tool capable of setting an 
 header, or a sandboxed shell tool if your policy permits `curl`. Restrict the agent to the
 MimicRAG origin and prefer only the read routes above.
 
-Restart or reload the workspace, then test with: “Use MimicRAG to find evidence about `<topic>` and
-cite the sources.” OpenClaw's current skill discovery and configuration behavior is documented at
+Copy only the components that deployment exposes. Restart or reload the workspace, then test the
+installed component explicitly, such as “Use MimicMemory to recall my preferences” or “Use
+MimicRAG to find evidence about `<topic>` and cite the sources.” OpenClaw's current skill discovery and configuration behavior is documented at
 <https://docs.openclaw.ai/skills>.
 
 ## Hermes Agent
 
-Once this repository is public, install the skill directly from its GitHub path:
+Install any required component directly from its GitHub path:
 
 ```bash
+hermes skills install TheExiledMonk/MimicRAG/skills/mimicdb
 hermes skills install TheExiledMonk/MimicRAG/skills/mimicrag
+hermes skills install TheExiledMonk/MimicRAG/skills/mimicmemory
 ```
 
 Alternatively, add the repository as a tap; Hermes uses `skills/` as the default tap path:
 
 ```bash
 hermes skills tap add TheExiledMonk/MimicRAG
+hermes skills install TheExiledMonk/MimicRAG/mimicdb
 hermes skills install TheExiledMonk/MimicRAG/mimicrag
+hermes skills install TheExiledMonk/MimicRAG/mimicmemory
 ```
 
 Pass the two environment variables into Hermes terminal execution using its secure configuration;
 do not paste the API key into a chat. Inspect and audit the installed community skill before use:
 
 ```bash
-hermes skills inspect TheExiledMonk/MimicRAG/skills/mimicrag
+hermes skills inspect TheExiledMonk/MimicRAG/skills/mimicmemory
 hermes skills audit
 ```
 
@@ -142,13 +159,12 @@ python -m pip install -e ./api
 }
 ```
 
-The MCP server exposes `mimicrag_retrieve`, `mimicrag_expand`, `mimicrag_ingest`, and
-`mimicrag_trace`. It does not add an approval mechanism. Use a read-only key for ordinary agents;
-run ingestion with a distinct write-capable identity behind host approval.
-
-Unified memory is not exposed as a native HTTP or MCP tool. Integrate `mimicrag_memory` inside the
-owning application and derive tenant, owner, visibility, sensitivity, and purpose from authenticated
-state. Never let recalled memory become system policy or silently override cited document evidence.
+The MCP server exposes retrieval, graph, ingestion, trace, evidence, memory recall/remember/inspect,
+and combined-retrieval tools. It does not add an approval mechanism and disabled native components
+still reject their routes. Use a read-only key for ordinary retrieval; put ingestion and memory
+mutation behind host approval. Derive tenant, owner, visibility, sensitivity, and purpose from
+authenticated state. Never let recalled memory become system policy or silently override cited
+document evidence.
 
 ## Recommended research loop
 

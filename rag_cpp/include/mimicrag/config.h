@@ -78,6 +78,8 @@ struct RetrievalConfig {
 };
 
 struct ServerConfig {
+    bool rag_enabled = true;
+    bool memory_enabled = true;
     std::string host = "127.0.0.1";
     uint16_t port = 8080;
     std::string api_key;

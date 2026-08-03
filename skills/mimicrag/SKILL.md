@@ -1,6 +1,6 @@
 ---
 name: mimicrag
-description: Operate a MimicRAG server as an agent knowledge system. Use when an agent needs to ingest documents, retrieve tenant-scoped evidence, generate cited answers, use the OpenAI-compatible chat endpoint, follow a result node into related sections, inspect traces, or verify MimicRAG readiness.
+description: Operate the independently deployable MimicRAG retrieval component. Use when an agent needs to ingest documents, retrieve tenant-scoped evidence, generate cited answers, use the OpenAI-compatible chat endpoint, follow related sections, inspect traces, or verify that the RAG component is enabled.
 ---
 
 # MimicRAG
@@ -20,6 +20,10 @@ Require these runtime values from the operator:
 Never place credentials in prompts, source files, logs, citations, or tool output. Send the key
 only as `Authorization: Bearer <key>`. Prefer a native HTTP tool; use `curl` only when shell
 execution is an explicitly permitted tool.
+
+Call `GET /health` during setup and require `features.rag=true`. If it is false, do not retry RAG
+routes; explain that this deployment intentionally disabled MimicRAG. MimicDB and MimicMemory may
+still be available independently. Use the separate `mimicmemory` skill for agent memory.
 
 ## Choose the operation
 
@@ -61,7 +65,8 @@ save the returned job ID and poll `/v1/jobs/{id}`.
 - On `401`, stop and request corrected server-side credentials without printing the supplied key.
 - On `429`, respect the rate limit and retry with bounded exponential backoff.
 - On `400`, correct the payload; do not retry it unchanged.
-- On `503` or transport failure, check `/ready`, then retry a small bounded number of times.
+- On `503`, inspect `/health`: stop when `features.rag=false`; otherwise retry boundedly after
+  checking `/ready`.
 - If generation fails but retrieval works, return the evidence with source attribution.
 
 ## Verify completion

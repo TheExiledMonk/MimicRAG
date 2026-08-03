@@ -3,6 +3,11 @@
   "description": "Portable tool schemas for trusted wrappers. Hosts should inject tenant/scope and authentication from policy where possible.",
   "functions": [
     {
+      "name": "mimic_components",
+      "description": "Inspect enabled MimicRAG and MimicMemory components before choosing tools.",
+      "parameters": {"type": "object", "properties": {}}
+    },
+    {
       "name": "mimicrag_retrieve",
       "description": "Retrieve ranked evidence passages without generating an answer.",
       "parameters": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "tenant_id": {"type": "string", "default": "default"}, "access_scope": {"type": "string", "default": "public"}, "top_k": {"type": "integer", "minimum": 1, "maximum": 100}, "filter": {"type": "object"}}}

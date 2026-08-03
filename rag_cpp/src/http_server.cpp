@@ -164,25 +164,45 @@ bool RateAllowed(const std::string& identity, size_t limit) {
 
 std::string Lower(std::string value) { for (char& c : value) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return value; }
 
-json OpenApiSpec() {
-    const std::vector<std::pair<std::string, std::string>> routes{
+bool IsMemoryRoute(const std::string& path) {
+    return path.rfind("/v1/memory", 0) == 0 || path.rfind("/v1/evidence", 0) == 0 ||
+        path.rfind("/v1/dream", 0) == 0 || path == "/v1/retrieve/combined";
+}
+
+bool IsRagRoute(const std::string& path) {
+    return path.rfind("/v1/documents", 0) == 0 || path == "/v1/retrieve" ||
+        path.rfind("/v1/answers", 0) == 0 || path.rfind("/v1/chat/completions", 0) == 0 ||
+        path.rfind("/v1/graph", 0) == 0 || path.rfind("/v1/feedback", 0) == 0 ||
+        path.rfind("/v1/evaluations", 0) == 0 || path == "/v1/retrieve/combined";
+}
+
+json OpenApiSpec(const ServerConfig& config) {
+    const std::vector<std::pair<std::string, std::string>> common_routes{
         {"/health", "get"}, {"/ready", "get"}, {"/openapi.json", "get"},
-        {"/metrics", "get"},
-        {"/v1/documents", "post"}, {"/v1/documents/{document_id}", "delete"},
-        {"/v1/retrieve", "post"}, {"/v1/answers", "post"}, {"/v1/graph/expand", "post"},
-        {"/v1/feedback", "post"}, {"/v1/evaluations", "post"}, {"/v1/storage", "get"},
+        {"/metrics", "get"}, {"/v1/storage", "get"},
         {"/v1/traces", "get"}, {"/v1/traces/{trace_id}", "get"},
         {"/v1/jobs/{job_id}", "get"}, {"/v1/tenants/{tenant_id}", "delete"},
-        {"/v1/maintenance/retention", "post"}, {"/v1/maintenance/compact", "post"},
+        {"/v1/maintenance/retention", "post"}, {"/v1/maintenance/compact", "post"}};
+    const std::vector<std::pair<std::string, std::string>> rag_routes{
+        {"/v1/documents", "post"}, {"/v1/documents/{document_id}", "delete"},
+        {"/v1/retrieve", "post"}, {"/v1/answers", "post"}, {"/v1/graph/expand", "post"},
+        {"/v1/feedback", "post"}, {"/v1/evaluations", "post"}, {"/v1/chat/completions", "post"}};
+    const std::vector<std::pair<std::string, std::string>> memory_routes{
         {"/v1/evidence", "post"}, {"/v1/evidence/inspect", "post"},
         {"/v1/memory/remember", "post"}, {"/v1/memory/recall", "post"}, {"/v1/memory/inspect", "post"},
         {"/v1/memory/correct", "post"}, {"/v1/memory/confirm", "post"}, {"/v1/memory/review", "post"},
         {"/v1/memory/reject", "post"}, {"/v1/memory/dispute", "post"}, {"/v1/memory/due", "post"},
-        {"/v1/memory/export", "post"}, {"/v1/memory/{memory_id}", "delete"}, {"/v1/retrieve/combined", "post"},
-        {"/v1/dream/run", "post"}, {"/v1/dream/review", "post"}, {"/v1/dream/action", "post"}, {"/v1/dream/procedure", "post"},
-        {"/v1/chat/completions", "post"}};
+        {"/v1/memory/export", "post"}, {"/v1/memory/{memory_id}", "delete"},
+        {"/v1/dream/run", "post"}, {"/v1/dream/review", "post"}, {"/v1/dream/action", "post"}, {"/v1/dream/procedure", "post"}};
     json paths = json::object();
-    for (const auto& [path, method] : routes) paths[path][method] = {{"responses", {{"200", {{"description", "Successful response"}}}}}};
+    const auto add_routes = [&paths](const auto& routes) {
+        for (const auto& [path, method] : routes) paths[path][method] = {{"responses", {{"200", {{"description", "Successful response"}}}}}};
+    };
+    add_routes(common_routes);
+    if (config.rag_enabled) add_routes(rag_routes);
+    if (config.memory_enabled) add_routes(memory_routes);
+    if (config.rag_enabled && config.memory_enabled)
+        paths["/v1/retrieve/combined"]["post"] = {{"responses", {{"200", {{"description", "Successful response"}}}}}};
     paths["/v1/jobs/{job_id}"]["delete"] = {{"responses", {{"200", {{"description", "Cancellation result"}}}}}};
     return {{"openapi", "3.1.0"}, {"info", {{"title", "MimicRAG HTTP API"}, {"version", "1.9.1"}}},
         {"paths", std::move(paths)}, {"components", {{"securitySchemes", {{"bearerAuth", {{"type", "http"}, {"scheme", "bearer"}}}}}}}};
@@ -209,6 +229,12 @@ void Handle(int socket, RagEngine& engine, std::shared_mutex& engine_gate) {
             for (const auto& key : server_config.keys) if (ConstantEqual(supplied, KeySecret(key))) { auth = {key.id, &key}; authenticated = true; break; }
         } else { const std::string expected = ResolveServerKey(server_config); authenticated = expected.empty() || ConstantEqual(supplied, expected); }
         if (!authenticated) { Reply(socket, 401, {{"error", "invalid API key"}}); return; }
+        if (IsMemoryRoute(path) && !server_config.memory_enabled) {
+            Reply(socket, 503, {{"error", "MimicMemory is disabled by configuration"}, {"feature", "memory"}}); return;
+        }
+        if (IsRagRoute(path) && !server_config.rag_enabled) {
+            Reply(socket, 503, {{"error", "MimicRAG is disabled by configuration"}, {"feature", "rag"}}); return;
+        }
         const std::string identity = auth.key ? auth.id : (supplied.empty() ? fields["x-forwarded-for"] : "legacy");
         const std::string owner_identity = auth.key ? auth.id : "legacy";
         if (!RateAllowed(identity, server_config.requests_per_minute)) { Reply(socket, 429, {{"error", "rate limit exceeded"}}); return; }
@@ -222,7 +248,7 @@ void Handle(int socket, RagEngine& engine, std::shared_mutex& engine_gate) {
         if (method == "POST" && path == "/v1/maintenance/compact") maintenance_lock = std::unique_lock(engine_gate);
         else request_lock = std::shared_lock(engine_gate);
         if (method == "GET" && (path == "/health" || path == "/ready")) { Reply(socket, 200, engine.Health()); return; }
-        if (method == "GET" && path == "/openapi.json") { Reply(socket, 200, OpenApiSpec()); return; }
+        if (method == "GET" && path == "/openapi.json") { Reply(socket, 200, OpenApiSpec(server_config)); return; }
         if (method == "GET" && path == "/metrics") { ReplyText(socket, 200, Metrics(engine), "text/plain; version=0.0.4"); return; }
         if (method == "GET" && path == "/v1/storage") { Reply(socket, 200, engine.StorageStats()); return; }
         if (method == "GET" && path.rfind("/v1/jobs/", 0) == 0) { Reply(socket, 200, engine.Job(path.substr(9))); return; }

@@ -1,0 +1,4 @@
+interface:
+  display_name: "MimicMemory"
+  short_description: "Give agents evidence-backed lifecycle memory"
+  default_prompt: "Use $mimicmemory to recall, store, review, or safely refine agent memory."

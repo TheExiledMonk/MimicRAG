@@ -1,7 +1,9 @@
 # MimicRAG configuration reference
 
-The native server reads one JSON file. `chat` and `embedding` are required and each must contain a
-non-empty `model`. Unknown top-level keys are ignored, but relying on that behavior is discouraged.
+The native server reads one JSON file. `chat` is required when RAG is enabled, while `embedding` is
+required when either RAG or Memory is enabled; each configured model object must contain a non-empty
+`model`. A Memory-only service therefore needs no chat-provider configuration, and an operational
+shell with both components disabled needs neither model. Unknown top-level keys are ignored, but relying on that behavior is discouraged.
 Start from [`mimicrag.example.json`](../mimicrag.example.json).
 
 ## Model objects
@@ -33,6 +35,10 @@ provider's embeddings.
 
 Important fields are:
 
+- Components: `rag_enabled` and `memory_enabled` independently expose the MimicRAG and
+  MimicMemory HTTP surfaces. Both default to `true`. MimicDB remains independently usable through
+  its native server regardless of these settings. Disabling RAG does not disable the internal
+  indexing primitives Memory uses for recall.
 - Network and storage: `host`, `port`, `data_path`, `max_body_bytes`, `max_query_chars`,
   `context_chars`, `top_k`, `worker_threads`, and `job_workers`.
 - Limits: `requests_per_minute`, `answer_max_tokens`, `retention_days`, and capacity/memory/index
@@ -45,6 +51,11 @@ Each item in `server.keys` requires `id` plus `key` or `key_env`. It may define 
 (`read`, `write`, `admin`), allowed `tenants`, allowed `scopes`, query/ingestion/provider requests
 per minute, and `storage_bytes`. An empty tenant or scope list means unrestricted for that
 dimension; populate the lists to enforce an allowlist.
+
+For a Memory-only endpoint set `rag_enabled` to `false`; for RAG without agent memory set
+`memory_enabled` to `false`. Disabled component routes return HTTP 503, `/health` reports the
+active component set, and `/openapi.json` omits disabled routes. `/v1/retrieve/combined` is exposed
+only when both components are enabled.
 
 ## `local_embedding`
 

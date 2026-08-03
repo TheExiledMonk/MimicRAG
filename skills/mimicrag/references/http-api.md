@@ -6,7 +6,9 @@ network; its native listener does not terminate TLS.
 
 ## Health
 
-`GET /health` and `GET /ready` return runtime, storage, and index state.
+`GET /health` and `GET /ready` return runtime, storage, index state, and a `features` object. Use
+`features.rag` to verify this API surface is enabled. Disabled component routes return `503` and
+runtime `/openapi.json` omits them.
 
 ## Retrieve
 
@@ -95,4 +97,4 @@ Omit `document_id` only when server-derived stable identity is acceptable. With
 ## Error behavior
 
 Expect `400` for invalid input, `401` for authentication failure, `404` for unknown resources,
-`429` for rate limiting, and `503` when the bounded work queue is full.
+`429` for rate limiting, and `503` when RAG is disabled or the bounded work queue is full.

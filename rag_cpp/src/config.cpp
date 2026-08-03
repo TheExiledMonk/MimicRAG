@@ -42,8 +42,14 @@ Config Config::Load(const std::string& path) {
     nlohmann::json root;
     input >> root;
     Config out;
-    out.chat = ReadModel(root.at("chat"));
-    out.embedding = ReadModel(root.at("embedding"));
+    const auto server = root.value("server", json::object());
+    out.server.rag_enabled = server.value("rag_enabled", true);
+    out.server.memory_enabled = server.value("memory_enabled", true);
+    if (root.contains("chat")) out.chat = ReadModel(root.at("chat"));
+    else if (out.server.rag_enabled) throw std::runtime_error("chat model is required when MimicRAG is enabled");
+    if (root.contains("embedding")) out.embedding = ReadModel(root.at("embedding"));
+    else if (out.server.rag_enabled || out.server.memory_enabled)
+        throw std::runtime_error("embedding model is required when MimicRAG or MimicMemory is enabled");
     const auto local = root.value("local_embedding", json::object());
     out.local_embedding.enabled = local.value("enabled", false);
     out.local_embedding.eager_dual_index = local.value("eager_dual_index", true);
@@ -53,7 +59,6 @@ Config Config::Load(const std::string& path) {
     out.local_embedding.context_size = local.value("context_size", 2048);
     out.local_embedding.document_prefix = local.value("document_prefix", "");
     out.local_embedding.query_prefix = local.value("query_prefix", "");
-    const auto server = root.value("server", json::object());
     out.server.host = server.value("host", "127.0.0.1");
     out.server.port = static_cast<uint16_t>(server.value("port", 8080));
     out.server.api_key = server.value("api_key", "");

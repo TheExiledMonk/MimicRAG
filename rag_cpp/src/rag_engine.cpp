@@ -1742,7 +1742,9 @@ json RagEngine::Health() const {
     { std::ifstream statm("/proc/self/statm"); uint64_t total_pages = 0, resident_pages = 0;
       if (statm >> total_pages >> resident_pages) resident_bytes = resident_pages * static_cast<uint64_t>(sysconf(_SC_PAGESIZE)); }
 #endif
-    return {{"status", "ok"}, {"ready", true}, {"implementation", "c++"}, {"chunks", impl_->chunks.size()}, {"pending_jobs", impl_->job_queue.size()},
+    return {{"status", "ok"}, {"ready", true}, {"implementation", "c++"},
+        {"features", {{"mimicdb", true}, {"rag", config_.server.rag_enabled}, {"memory", config_.server.memory_enabled}}},
+        {"chunks", impl_->chunks.size()}, {"pending_jobs", impl_->job_queue.size()},
         {"embedding_model_key", impl_->remote.identity}, {"remote_embedding_healthy", impl_->remote_healthy.load()},
         {"graph_documents", impl_->graphs.size()}, {"graph_edges", impl_->graph_edges}, {"graph_storage", "compact_csr"},
         {"document_records", impl_->documents.size()}, {"document_metadata_storage", "interned"},

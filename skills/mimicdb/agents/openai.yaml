@@ -1,0 +1,4 @@
+interface:
+  display_name: "MimicDB"
+  short_description: "Operate standalone columnar and vector data"
+  default_prompt: "Use $mimicdb to safely inspect, query, or mutate a standalone MimicDB service."

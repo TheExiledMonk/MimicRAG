@@ -18,6 +18,7 @@ class FakeResponse(io.BytesIO):
 
 class FakeClient:
     def __init__(self): self.answers = []
+    def health(self): return {"features": {"rag": True, "memory": False}}
     def answer(self, query, **options): self.answers.append((query, options)); return {"answer": "answer:" + query, "citations": []}
     def retrieve(self, **options): return {"hits": [], "request": options}
     def expand(self, **options): return {"nodes": [], "request": options}
@@ -52,6 +53,8 @@ class DeveloperExperienceV15Tests(unittest.TestCase):
         self.assertEqual({tool["name"] for tool in TOOLS}, {item["name"] for item in schemas["functions"]})
         response = dispatch(FakeClient(), {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "mimicrag_retrieve", "arguments": {"query": "x"}}})
         self.assertEqual(response["id"], 7); self.assertIn("structuredContent", response["result"])
+        components = dispatch(FakeClient(), {"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "mimic_components", "arguments": {}}})
+        self.assertEqual(components["result"]["structuredContent"]["features"], {"rag": True, "memory": False})
 
     def test_one_command_initialization(self):
         with tempfile.TemporaryDirectory() as directory:

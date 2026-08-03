@@ -14,6 +14,12 @@ CUDA, Metal, or CPU.
 MimicDB, the underlying engine, is also available as a standalone columnar database
 with a native server, C++ API, compatibility layers, and management UI.
 
+MimicDB, MimicRAG, and MimicMemory can be used independently. In the native RAG service both RAG
+and Memory are enabled by default; set `server.rag_enabled` or `server.memory_enabled` to `false`
+to remove that component's HTTP routes. A Memory-only deployment retains the internal indexing
+needed for recall without exposing the document/RAG API. Health and runtime OpenAPI output reflect
+the enabled components, and combined retrieval is available only when both are enabled.
+
 ## Why MimicRAG
 
 - One C++ executable and one data directory
@@ -595,17 +601,20 @@ Third-party dependencies and the `llama.cpp` submodule remain under their respec
 - [`docs/security_setup_howto.md`](docs/security_setup_howto.md): security setup
 - [`benchmarks/results/`](benchmarks/results/): reproducible benchmark records
 
-## Agent skill
+## Agent skills
 
-The portable [`skills/mimicrag/SKILL.md`](skills/mimicrag/SKILL.md) teaches compatible agents how
-to retrieve evidence, generate cited answers, ingest approved documents, and perform bounded graph
-deep dives. Install the complete `skills/mimicrag` directory so its HTTP reference is included.
+Portable, independently installable skills teach compatible agents how to operate
+[`MimicDB`](skills/mimicdb/SKILL.md), [`MimicRAG`](skills/mimicrag/SKILL.md), and
+[`MimicMemory`](skills/mimicmemory/SKILL.md). Install each complete directory so its references are
+included; install only the components exposed by the deployment, or all three for the full stack.
 
 For Hermes Agent after this repository is public:
 
 ```bash
+hermes skills install TheExiledMonk/MimicRAG/skills/mimicdb
 hermes skills install TheExiledMonk/MimicRAG/skills/mimicrag
+hermes skills install TheExiledMonk/MimicRAG/skills/mimicmemory
 ```
 
-For OpenClaw, copy `skills/mimicrag` beneath a configured workspace or global skills root. See the
+For OpenClaw, copy any required directories from `skills/` beneath a configured workspace or global skills root. See the
 [agent integration guide](docs/agent-integration.md) for credentials, tool boundaries, and testing.

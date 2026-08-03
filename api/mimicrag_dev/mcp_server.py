@@ -9,6 +9,7 @@ from .client import Client
 
 
 TOOLS = [
+    {"name": "mimic_components", "description": "Inspect enabled MimicRAG and MimicMemory components before choosing tools", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "mimicrag_retrieve", "description": "Retrieve evidence passages", "inputSchema": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "tenant_id": {"type": "string"}, "access_scope": {"type": "string"}, "top_k": {"type": "integer", "minimum": 1, "maximum": 100}, "filter": {"type": "object"}}}},
     {"name": "mimicrag_expand", "description": "Expand related graph context", "inputSchema": {"type": "object", "required": ["node_id"], "properties": {"node_id": {"type": "string"}, "tenant_id": {"type": "string"}, "access_scope": {"type": "string"}, "max_neighbors": {"type": "integer", "minimum": 1, "maximum": 256}}}},
     {"name": "mimicrag_ingest", "description": "Ingest approved text", "inputSchema": {"type": "object", "required": ["text", "source_uri"], "properties": {"text": {"type": "string"}, "source_uri": {"type": "string"}, "tenant_id": {"type": "string"}, "access_scope": {"type": "string"}, "title": {"type": "string"}, "format": {"enum": ["text", "markdown", "html"]}, "mode": {"enum": ["fast", "structured", "semantic"]}, "metadata": {"type": "object"}}}},
@@ -24,11 +25,12 @@ TOOLS = [
 def dispatch(client: Client, request: dict[str, Any]) -> dict[str, Any] | None:
     method, request_id = request.get("method"), request.get("id")
     if method == "notifications/initialized": return None
-    if method == "initialize": result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "mimicrag", "version": "1.7"}}
+    if method == "initialize": result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "mimicrag", "version": "1.9.1"}}
     elif method == "tools/list": result = {"tools": TOOLS}
     elif method == "tools/call":
         params = request.get("params", {}); args = params.get("arguments", {}); name = params.get("name")
-        if name == "mimicrag_retrieve": value = client.retrieve(**args)
+        if name == "mimic_components": value = client.health()
+        elif name == "mimicrag_retrieve": value = client.retrieve(**args)
         elif name == "mimicrag_expand": value = client.expand(**args)
         elif name == "mimicrag_ingest": value = client.ingest(**args)
         elif name == "mimicrag_trace": value = client.trace(**args)

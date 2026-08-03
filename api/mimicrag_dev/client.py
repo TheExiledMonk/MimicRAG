@@ -29,6 +29,7 @@ class Client:
             raise MimicRagError(message, exc.code) from exc
 
     def ready(self): return self.request("GET", "/ready")
+    def health(self): return self.request("GET", "/health")
     def ingest(self, text: str, source_uri: str, **options): return self.request("POST", "/v1/documents", {"text": text, "source_uri": source_uri, **options})
     def retrieve(self, query: str, **options): return self.request("POST", "/v1/retrieve", {"query": query, **options})
     def answer(self, query: str, **options): return self.request("POST", "/v1/answers", {"query": query, **options})

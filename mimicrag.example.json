@@ -1,5 +1,7 @@
 {
   "server": {
+    "rag_enabled": true,
+    "memory_enabled": true,
     "host": "127.0.0.1",
     "port": 8080,
     "data_path": "data/mimicrag_cpp",
