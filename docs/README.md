@@ -18,6 +18,7 @@
 - [V1.5 developer experience](developer_experience_v1_5.md)
 - [V1.6 unified agent memory](unified_agent_memory_v1_6.md)
 - [V1.7 native memory integration](native_memory_integration_v1_7.md)
+- [V1.8 memory hardening](memory_hardening_v1_8.md)
 
 ## MimicDB APIs and architecture
 

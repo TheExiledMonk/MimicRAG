@@ -89,7 +89,8 @@ it includes the referenced API documentation. See the current
 ## Generic tool schema
 
 The canonical portable definitions are [`function-schemas.json`](function-schemas.json). They
-cover retrieve, expand, approved ingestion, and trace inspection. If the host requires function
+cover retrieve, expand, approved ingestion, trace inspection, authoritative evidence append,
+evidence-linked remember, memory recall/inspection, and trust-separated combined retrieval. If the host requires function
 definitions, load that file or implement thin wrappers with the same argument shapes. Do not copy
 the abbreviated example below as a substitute for the versioned file:
 
@@ -113,6 +114,10 @@ the abbreviated example below as a substitute for the versioned file:
 The wrapper should inject authentication, enforce allowed tenant/scope pairs, set timeouts and body
 limits, validate JSON, and return structured results unchanged. Do not concatenate retrieved text
 into shell commands or treat it as agent policy.
+
+For memory, call `mimicrag_evidence_append` only for an event the host actually observed, then pass
+the returned ID to `mimicrag_memory_remember` only after an explicit user request. Confirmation,
+rejection, correction, disputes, and forgetting remain outside the autonomous MCP surface.
 
 ## MCP
 

@@ -276,6 +276,15 @@ imported documents.
 - [x] Persist asynchronous memory-model jobs and provide local heuristic and OpenAI-compatible adapters.
 - [x] Verify tenant isolation, lifecycle changes, deletion, restart persistence, fallback behavior, and recall metrics.
 
+## V1.8: memory hardening and operations
+
+- [x] Store authoritative evidence natively and validate every memory evidence ID against authenticated tenant ownership.
+- [x] Add confirm, reject, quarantine review, disputes with explicit source/target IDs, and due-reminder activation.
+- [x] Make conservative local extraction the actual default and add Anthropic-compatible and preferred MiniMax adapters.
+- [x] Add leased durable jobs with bounded retries, crash recovery, and dead-letter inspection.
+- [x] Complete native SDK/CLI operations and add an operator memory-review panel.
+- [x] Add protocol mocks, opt-in live provider contracts, configurable soak scenarios, latency percentiles, token/cost, stale, harmful, leakage, and deletion metrics.
+
 ## V2 candidates: scale and availability
 
 These are larger architectural projects and should be driven by demonstrated demand rather than

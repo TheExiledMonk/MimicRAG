@@ -30,7 +30,8 @@ override document evidence.
 - `POST /v1/retrieve/combined`: coordinated RAG and memory retrieval with fixed trust ordering.
 
 Memory namespaces are `working`, `episodic`, `semantic`, `procedural`, `preference`,
-`prospective`, and `negative`. A record must include either inline `evidence` or `evidence_ids`.
+`prospective`, and `negative`. Since V1.8, a record must reference authoritative `evidence_ids`
+previously created through `POST /v1/evidence`; caller-supplied inline evidence is rejected.
 
 ## SDK, CLI, and agents
 

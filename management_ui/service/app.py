@@ -9,6 +9,9 @@ import secrets
 import sys
 import threading
 import time
+import json
+import urllib.error
+import urllib.request
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -89,6 +92,33 @@ class AppendRequest(BaseModel):
     database: str
     dataset: str
     columns: dict[str, list]
+
+
+class MemoryReviewRequest(BaseModel):
+    tenant_id: str = "default"
+    status: str = ""
+
+
+class MemoryActionRequest(BaseModel):
+    tenant_id: str = "default"
+    memory_id: str
+    action: str
+    reason: str = "operator rejection"
+
+
+def _memory_request(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    base = os.getenv("MIMICRAG_BASE_URL", "http://127.0.0.1:8080").rstrip("/")
+    key = os.getenv("MIMICRAG_API_KEY", "")
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if key: headers["Authorization"] = "Bearer " + key
+    request = urllib.request.Request(base + path, json.dumps(payload).encode(), headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response: return json.load(response)
+    except urllib.error.HTTPError as exc:
+        try: detail = json.load(exc).get("error", str(exc))
+        except Exception: detail = str(exc)
+        raise HTTPException(status_code=exc.code, detail=detail) from exc
+    except OSError as exc: raise HTTPException(status_code=502, detail="MimicRAG unavailable: " + str(exc)) from exc
 
 
 class ConnectionState:
@@ -667,3 +697,15 @@ def append_batch(payload: AppendRequest) -> dict[str, Any]:
         error = _map_exception(exc)
         raise HTTPException(status_code=error["status"], detail=error["detail"]) from exc
     return {"ok": True}
+
+
+@app.post("/api/memory/review")
+def memory_review(payload: MemoryReviewRequest) -> dict[str, Any]:
+    return _memory_request("/v1/memory/review", payload.dict())
+
+
+@app.post("/api/memory/action")
+def memory_action(payload: MemoryActionRequest) -> dict[str, Any]:
+    routes = {"confirm": "/v1/memory/confirm", "reject": "/v1/memory/reject"}
+    if payload.action not in routes: raise HTTPException(status_code=400, detail="action must be confirm or reject")
+    return _memory_request(routes[payload.action], {"tenant_id": payload.tenant_id, "memory_id": payload.memory_id, "reason": payload.reason})

@@ -7,7 +7,7 @@ navigation, cited answer generation, tracing, and evaluation.
 
 The native server does not require a Python runtime, separate vector database, search engine,
 graph database, or embedding server. Optional Python packages provide the V1.4 connector
-ecosystem, V1.5 SDK/MCP/developer tools, and V1.6 embedded agent memory. Remote model APIs remain
+ecosystem, SDK/MCP/developer tools, and V1.8 native plus embedded agent memory. Remote model APIs remain
 optional: embeddings can run in-process through the pinned `llama.cpp` submodule with Vulkan,
 CUDA, Metal, or CPU.
 
@@ -364,6 +364,10 @@ graph construction.
 | `POST` | `/v1/answers` | Cited RAG answer, optionally SSE |
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat endpoint |
 | `POST` | `/v1/graph/expand` | Bounded structural deep dive |
+| `POST` | `/v1/evidence`, `/v1/evidence/inspect` | Authoritative owner-scoped memory evidence |
+| `POST` | `/v1/memory/{operation}` | Remember, recall, inspect, review, correct, confirm, reject, dispute, due, and export |
+| `DELETE` | `/v1/memory/{id}` | Verified owner-scoped forgetting |
+| `POST` | `/v1/retrieve/combined` | Separate authoritative document and lower-trust memory tiers |
 | `POST` | `/v1/evaluations` | Golden-set evaluation |
 | `GET` | `/v1/jobs/{id}` | Background-ingestion job state |
 | `DELETE` | `/v1/jobs/{id}` | Cooperatively cancel background ingestion |
@@ -486,6 +490,7 @@ Third-party dependencies and the `llama.cpp` submodule remain under their respec
 - [`docs/developer_experience_v1_5.md`](docs/developer_experience_v1_5.md): clients, OpenAPI, MCP, and tooling
 - [`docs/unified_agent_memory_v1_6.md`](docs/unified_agent_memory_v1_6.md): embedded agent memory
 - [`docs/native_memory_integration_v1_7.md`](docs/native_memory_integration_v1_7.md): native memory persistence, recall, and agent integration
+- [`docs/memory_hardening_v1_8.md`](docs/memory_hardening_v1_8.md): authoritative evidence, lifecycle review, durable workers, and evaluation
 - [`docs/openapi.json`](docs/openapi.json): complete published HTTP contract
 - [`docs/function-schemas.json`](docs/function-schemas.json): portable agent tool schemas
 - [`docs/design.md`](docs/design.md): MimicDB architecture and durability

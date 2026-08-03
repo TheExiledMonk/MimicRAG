@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from .models import MemoryNamespace, MemoryPolicy, MemoryProposal, MemoryRecord, SENSITIVE_CLASSES, Visibility
 from .store import MemoryStore
+from .providers import LocalHeuristicMemoryModel
 
 
 class MemoryModel(Protocol):
@@ -26,7 +27,8 @@ class MemoryManager:
 
     def __init__(self, store: MemoryStore, model: MemoryModel | None = None, *, local_fallback: MemoryModel | None = None, policy: MemoryPolicy | None = None,
                  prompt_version: str = "memory-manager-v1", schema_version: int = 1):
-        self.store = store; self.model = model; self.local_fallback = local_fallback; self.policy = policy or MemoryPolicy(); self.prompt_version = prompt_version; self.schema_version = schema_version
+        self.store = store; self.model = model or LocalHeuristicMemoryModel(); self.local_fallback = local_fallback; self.policy = policy or MemoryPolicy(); self.prompt_version = prompt_version; self.schema_version = schema_version
+        self.worker_id = "worker-" + uuid.uuid4().hex
         self.budgets: dict[str, dict[str, int]] = {}
         self.queue: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue(maxsize=128); self.stop_event = threading.Event()
         self.worker = threading.Thread(target=self._run, name="mimicrag-memory", daemon=True); self.worker.start()
@@ -58,27 +60,37 @@ class MemoryManager:
         request = {"tenant": tenant, "owner": owner, "evidence_ids": evidence_ids, "purpose": purpose, "operation": operation}
         now = int(time.time() * 1000)
         with self.store.db:
-            self.store.db.execute("INSERT INTO memory_jobs VALUES(?,?,?,?,?,?,?,?,?)", (identifier, tenant, owner, json.dumps(request, sort_keys=True), "queued", "{}", "", now, now))
+            self.store.db.execute("INSERT INTO memory_jobs(id,tenant,owner,request,status,result,error,created_at_ms,updated_at_ms) VALUES(?,?,?,?,?,?,?,?,?)", (identifier, tenant, owner, json.dumps(request, sort_keys=True), "queued", "{}", "", now, now))
         self.queue.put_nowait((identifier, request))
         return identifier
 
     def _run(self) -> None:
         while not self.stop_event.is_set():
+            from_queue = True
             try: identifier, request = self.queue.get(timeout=0.1)
-            except queue.Empty: continue
-            with self.store.db: self.store.db.execute("UPDATE memory_jobs SET status='running',updated_at_ms=? WHERE id=?", (int(time.time() * 1000), identifier))
+            except queue.Empty:
+                pending = self.store.pending_memory_jobs()
+                if not pending: continue
+                identifier, request = pending[0]; from_queue = False
+            if not self.store.claim_memory_job(identifier, self.worker_id):
+                if from_queue: self.queue.task_done()
+                continue
             try:
                 result = self.process(**request)
-                with self.store.db: self.store.db.execute("UPDATE memory_jobs SET status='complete',result=?,updated_at_ms=? WHERE id=?", (json.dumps(result, sort_keys=True), int(time.time() * 1000), identifier))
+                with self.store.db: self.store.db.execute("UPDATE memory_jobs SET status='complete',result=?,lease_owner='',lease_until_ms=0,updated_at_ms=? WHERE id=? AND lease_owner=?", (json.dumps(result, sort_keys=True), int(time.time() * 1000), identifier, self.worker_id))
             except Exception as exc:
                 with self.store.db:
-                    self.store.db.execute("UPDATE memory_jobs SET status='failed',error=?,updated_at_ms=? WHERE id=?", (str(exc), int(time.time() * 1000), identifier))
+                    row = self.store.db.execute("SELECT attempts,max_attempts FROM memory_jobs WHERE id=?", (identifier,)).fetchone(); exhausted = row and row[0] >= row[1]
+                    self.store.db.execute("UPDATE memory_jobs SET status=?,error=?,lease_owner='',lease_until_ms=0,updated_at_ms=? WHERE id=?", ("dead_letter" if exhausted else "queued", str(exc), int(time.time() * 1000), identifier))
                     self.store._audit(request["tenant"], request["owner"], "memory.job_failed", identifier, str(exc))
-            finally: self.queue.task_done()
+                if not exhausted:
+                    try: self.queue.put_nowait((identifier, request))
+                    except queue.Full: pass
+            finally:
+                if from_queue: self.queue.task_done()
 
     def process(self, *, tenant: str, owner: str, evidence_ids: list[str], purpose: str,
                 operation: str = "extract", session_id: str = "default") -> dict[str, Any]:
-        if not self.model: return {"status": "deterministic_fallback", "accepted": [], "reason": "memory model unavailable"}
         processing_model = self.model
         if not processing_model.local:
             sensitivities = [self.store._evidence(identifier, tenant, owner)["sensitivity"] for identifier in evidence_ids]
@@ -149,7 +161,7 @@ class MemoryManager:
         if proposal.operation == "delete": raise ValueError("model deletions require explicit authorization")
         if proposal.operation in {"associate", "supersede", "dispute"}:
             relation = proposal.relation or {"supersede": "supersedes", "dispute": "contradicts"}.get(proposal.operation, "supports")
-            return [self.store.associate(proposal.subject, proposal.target_id, relation, tenant, owner)]
+            return [self.store.associate(proposal.source_id, proposal.target_id, relation, tenant, owner)]
         return []
 
     def _quarantine(self, tenant: str, proposal: MemoryProposal, reason: str) -> str:

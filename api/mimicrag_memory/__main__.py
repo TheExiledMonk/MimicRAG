@@ -17,6 +17,9 @@ def main() -> int:
     correct = sub.add_parser("correct"); correct.add_argument("memory_id"); correct.add_argument("statement"); correct.add_argument("evidence_id")
     forget = sub.add_parser("forget"); forget.add_argument("memory_id"); forget.add_argument("--erase-evidence", action="store_true")
     inspect = sub.add_parser("inspect"); inspect.add_argument("memory_id")
+    confirm = sub.add_parser("confirm"); confirm.add_argument("memory_id")
+    reject = sub.add_parser("reject"); reject.add_argument("memory_id"); reject.add_argument("--reason", default="operator rejection")
+    review = sub.add_parser("review"); review.add_argument("--status", default="")
     export = sub.add_parser("export"); export.add_argument("--include-evidence", action="store_true")
     args = parser.parse_args(); store = MemoryStore(args.store)
     try:
@@ -29,6 +32,9 @@ def main() -> int:
         elif args.operation == "correct": result = store.correct(args.memory_id, statement=args.statement, correction_evidence_id=args.evidence_id, tenant=args.tenant, owner=args.owner)
         elif args.operation == "forget": result = store.forget(args.memory_id, tenant=args.tenant, owner=args.owner, erase_evidence=args.erase_evidence)
         elif args.operation == "inspect": result = store.inspect(args.memory_id, tenant=args.tenant, owner=args.owner)
+        elif args.operation == "confirm": result = store.confirm(args.memory_id, tenant=args.tenant, owner=args.owner)
+        elif args.operation == "reject": result = store.reject(args.memory_id, tenant=args.tenant, owner=args.owner, reason=args.reason)
+        elif args.operation == "review": result = store.review(tenant=args.tenant, owner=args.owner, status=args.status)
         else: result = store.export(tenant=args.tenant, owner=args.owner, include_evidence_content=args.include_evidence)
         print(json.dumps(result, indent=2, ensure_ascii=False)); return 0
     finally: store.close()

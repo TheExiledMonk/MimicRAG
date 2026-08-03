@@ -49,6 +49,7 @@ const TABS = [
   "Data Preview",
   "Aggregates",
   "Ingest",
+  "Memory",
   "Admin",
   "Settings",
 ] as const;
@@ -61,6 +62,8 @@ type AggregateResponse = {
   max: number | null;
   has_value: boolean;
 };
+
+type MemoryReviewItem = { memory_id: string; subject: string; status: string; namespace: string; sensitivity: string };
 
 type HealthConfig = {
   bind_host?: string;
@@ -278,6 +281,10 @@ export default function App() {
   const [aggregateField, setAggregateField] = useState<string>("");
   const [aggregateResult, setAggregateResult] = useState<AggregateResponse | null>(null);
   const [aggregateError, setAggregateError] = useState<string | null>(null);
+  const [memoryTenant, setMemoryTenant] = useState("default");
+  const [memoryStatus, setMemoryStatus] = useState("");
+  const [memoryItems, setMemoryItems] = useState<MemoryReviewItem[]>([]);
+  const [memoryError, setMemoryError] = useState<string | null>(null);
   const [aggregateBusy, setAggregateBusy] = useState(false);
 
   const [ingestValues, setIngestValues] = useState<Record<string, string>>({});
@@ -956,6 +963,24 @@ export default function App() {
     }
   }
 
+  async function loadMemoryReview() {
+    setMemoryError(null);
+    try {
+      const response = await fetch("/api/memory/review", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tenant_id: memoryTenant, status: memoryStatus }) });
+      const payload = await response.json(); if (!response.ok) throw new Error(payload.detail ?? "memory review failed");
+      setMemoryItems(payload.memories ?? []);
+    } catch (err) { setMemoryError(err instanceof Error ? err.message : "memory review failed"); }
+  }
+
+  async function reviewMemory(memoryId: string, action: "confirm" | "reject") {
+    setMemoryError(null);
+    try {
+      const response = await fetch("/api/memory/action", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tenant_id: memoryTenant, memory_id: memoryId, action }) });
+      const payload = await response.json(); if (!response.ok) throw new Error(payload.detail ?? "memory action failed");
+      await loadMemoryReview();
+    } catch (err) { setMemoryError(err instanceof Error ? err.message : "memory action failed"); }
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -1225,6 +1250,19 @@ export default function App() {
                     ))}
                   </div>
                   <button type="button" className="apply" onClick={runIngest}>Append Row</button>
+                </div>
+              ) : activeTab === "Memory" ? (
+                <div className="panel">
+                  <div className="panel-title">Memory review</div>
+                  <div className="filters">
+                    <label>Tenant<input value={memoryTenant} onChange={(event) => setMemoryTenant(event.target.value)} /></label>
+                    <label>Status<select value={memoryStatus} onChange={(event) => setMemoryStatus(event.target.value)}><option value="">All</option><option value="pending_confirmation">Pending confirmation</option><option value="quarantined">Quarantined</option><option value="disputed">Disputed</option></select></label>
+                    <button type="button" className="apply" onClick={loadMemoryReview}>Refresh</button>
+                  </div>
+                  {memoryError ? <div className="error">{memoryError}</div> : null}
+                  <table className="data-table"><thead><tr><th>Subject</th><th>Namespace</th><th>Status</th><th>Sensitivity</th><th>Actions</th></tr></thead>
+                    <tbody>{memoryItems.map((item) => <tr key={item.memory_id}><td>{item.subject}</td><td>{item.namespace}</td><td>{item.status}</td><td>{item.sensitivity}</td><td>{item.status === "pending_confirmation" ? <button type="button" onClick={() => reviewMemory(item.memory_id, "confirm")}>Confirm</button> : null}{["pending_confirmation", "quarantined"].includes(item.status) ? <button type="button" onClick={() => reviewMemory(item.memory_id, "reject")}>Reject</button> : null}</td></tr>)}</tbody>
+                  </table>
                 </div>
               ) : activeTab === "Admin" ? (
                 <div className="panel">

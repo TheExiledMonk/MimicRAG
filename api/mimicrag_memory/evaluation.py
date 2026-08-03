@@ -20,7 +20,8 @@ class MemoryEvaluation:
 
     def report(self) -> dict[str, Any]:
         total = self.useful_recall + self.missed_recall
-        return {**self.__dict__, "latency_ms": {"mean": sum(self.latency_ms) / max(1, len(self.latency_ms)), "samples": len(self.latency_ms)},
+        ordered = sorted(self.latency_ms); percentile = lambda q: ordered[min(len(ordered) - 1, int((len(ordered) - 1) * q))] if ordered else 0.0
+        return {**self.__dict__, "latency_ms": {"mean": sum(self.latency_ms) / max(1, len(self.latency_ms)), "p50": percentile(.5), "p95": percentile(.95), "p99": percentile(.99), "samples": len(self.latency_ms)},
                 "useful_recall_rate": self.useful_recall / max(1, total),
                 "acceptance": {"zero_cross_tenant_leakage": self.cross_tenant_leakage == 0,
                                "zero_harmful_recall": self.harmful_recall == 0,
@@ -37,6 +38,11 @@ def evaluate_cases(store: Any, cases: list[dict[str, Any]]) -> dict[str, Any]:
         metrics.useful_recall += len(identifiers & expected); metrics.missed_recall += len(expected - identifiers)
         metrics.intrusive_recall += len(identifiers - expected) if case.get("strict", False) else 0
         metrics.harmful_recall += len(identifiers & forbidden)
+        metrics.stale_recall += len(identifiers & set(case.get("stale_ids", [])))
         metrics.token_overhead += len(str(result)) // 4
+        metrics.remote_cost += float(case.get("remote_cost", 0.0))
         if any(item.get("tenant") != case["tenant"] for item in result["memories"]): metrics.cross_tenant_leakage += 1
+        for deleted_id in case.get("deleted_ids", []):
+            try: store.inspect(deleted_id, tenant=case["tenant"], owner=case["owner"]); metrics.deletion_failures += deleted_id in identifiers
+            except ValueError: pass
     return metrics.report()

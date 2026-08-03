@@ -94,6 +94,7 @@ class MemoryProposal:
     confidence: float = 0.0
     importance: float = 0.5
     target_id: str = ""
+    source_id: str = ""
     relation: str = ""
     quoted_spans: dict[str, str] = field(default_factory=dict)
     sensitivity: str = "internal"
@@ -104,5 +105,6 @@ class MemoryProposal:
         if self.operation not in {"create", "reinforce", "associate", "supersede", "dispute", "remind", "delete"}: raise ValueError("unsupported proposal operation")
         if not self.evidence_ids: raise ValueError("proposal requires evidence IDs")
         if self.operation in {"create", "remind"} and (not self.subject or not self.statement): raise ValueError("proposal requires subject and statement")
+        if self.operation in {"associate", "supersede", "dispute"} and (not self.source_id or not self.target_id): raise ValueError("relation proposal requires source_id and target_id")
         if not 0 <= self.confidence <= 1: raise ValueError("proposal confidence out of bounds")
         if self.relation and self.relation not in RELATION_TYPES: raise ValueError("unsupported relation")

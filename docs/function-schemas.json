@@ -1,5 +1,5 @@
 {
-  "version": "1.7",
+  "version": "1.8",
   "description": "Portable tool schemas for trusted wrappers. Hosts should inject tenant/scope and authentication from policy where possible.",
   "functions": [
     {
@@ -28,9 +28,14 @@
       "parameters": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "tenant_id": {"type": "string"}, "purpose": {"type": "string"}, "namespace": {"type": "string"}, "top_k": {"type": "integer", "minimum": 1, "maximum": 100}}}
     },
     {
+      "name": "mimicrag_evidence_append",
+      "description": "Append an observed authoritative evidence event before forming memory.",
+      "parameters": {"type": "object", "required": ["kind", "content"], "properties": {"kind": {"enum": ["conversation", "tool_result", "correction", "task_outcome", "observation"]}, "content": {"type": "string"}, "tenant_id": {"type": "string"}, "provenance": {"type": "string"}, "sensitivity": {"type": "string"}, "purpose": {"type": "string"}}}
+    },
+    {
       "name": "mimicrag_memory_remember",
-      "description": "Store evidence-bound memory only after an explicit user request; sensitive records require separate confirmation.",
-      "parameters": {"type": "object", "required": ["subject", "statement", "evidence"], "properties": {"subject": {"type": "string"}, "statement": {"type": "string"}, "evidence": {"type": "array", "minItems": 1}, "tenant_id": {"type": "string"}, "namespace": {"type": "string"}, "sensitivity": {"type": "string"}, "allowed_purposes": {"type": "array", "items": {"type": "string"}}}}
+      "description": "Store memory linked to authoritative evidence only after an explicit user request; sensitive records require separate confirmation.",
+      "parameters": {"type": "object", "required": ["subject", "statement", "evidence_ids"], "properties": {"subject": {"type": "string"}, "statement": {"type": "string"}, "evidence_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "tenant_id": {"type": "string"}, "namespace": {"type": "string"}, "sensitivity": {"type": "string"}, "allowed_purposes": {"type": "array", "items": {"type": "string"}}}}
     },
     {
       "name": "mimicrag_memory_inspect",

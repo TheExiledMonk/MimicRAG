@@ -31,7 +31,7 @@ def main() -> int:
     export = sub.add_parser("export"); export.add_argument("directory"); export.add_argument("--binary", default="mimicrag_server"); export.add_argument("--config", default="mimicrag.json")
     restore = sub.add_parser("import"); restore.add_argument("snapshot"); restore.add_argument("--binary", default="mimicrag_server"); restore.add_argument("--config", default="mimicrag.json"); restore.add_argument("--destination", default="")
     migrate = sub.add_parser("migrate"); migrate.add_argument("--binary", default="mimicrag_server"); migrate.add_argument("--config", default="mimicrag.json")
-    memory = sub.add_parser("memory"); memory.add_argument("action", choices=("recall", "inspect", "review", "export", "confirm", "forget")); memory.add_argument("value", nargs="?", default=""); memory.add_argument("--tenant", default="default"); memory.add_argument("--purpose", default="conversation"); memory.add_argument("--status", default="")
+    memory = sub.add_parser("memory"); memory.add_argument("action", choices=("evidence", "remember", "recall", "inspect", "review", "export", "correct", "confirm", "reject", "dispute", "due", "forget")); memory.add_argument("value", nargs="?", default=""); memory.add_argument("--tenant", default="default"); memory.add_argument("--purpose", default="conversation"); memory.add_argument("--status", default=""); memory.add_argument("--kind", default="conversation"); memory.add_argument("--subject", default=""); memory.add_argument("--statement", default=""); memory.add_argument("--namespace", default="semantic"); memory.add_argument("--evidence-id", action="append", default=[]); memory.add_argument("--target", default=""); memory.add_argument("--reason", default="operator rejection")
     args = parser.parse_args()
     if args.command == "init": result = initialize(Path(args.directory).resolve())
     elif args.command == "inspect":
@@ -44,11 +44,17 @@ def main() -> int:
             else: result = client.retrieve(args.value or "*", top_k=args.limit, retrieval_mode="lexical")
     elif args.command == "memory":
         client = Client(args.server, args.api_key); common = {"tenant_id": args.tenant}
-        if args.action == "recall": result = client.recall_memory(args.value, purpose=args.purpose, **common)
+        if args.action == "evidence": result = client.append_evidence(args.kind, args.value, purpose=args.purpose, **common)
+        elif args.action == "remember": result = client.remember(args.subject, args.statement or args.value, args.evidence_id, namespace=args.namespace, allowed_purposes=[args.purpose], **common)
+        elif args.action == "recall": result = client.recall_memory(args.value, purpose=args.purpose, **common)
         elif args.action == "inspect": result = client.inspect_memory(args.value, **common)
         elif args.action == "review": result = client.review_memories(status=args.status, **common)
         elif args.action == "export": result = client.export_memories(**common)
         elif args.action == "confirm": result = client.confirm_memory(args.value, **common)
+        elif args.action == "correct": result = client.correct_memory(args.value, args.statement, evidence_ids=args.evidence_id, **common)
+        elif args.action == "reject": result = client.reject_memory(args.value, args.reason, **common)
+        elif args.action == "dispute": result = client.dispute_memory(args.value, args.target, args.evidence_id[0], **common)
+        elif args.action == "due": result = client.due_memories(args.value, purpose=args.purpose, **common)
         else: result = client.forget_memory(args.value, **common)
     else:
         native_command = {"export": "snapshot", "import": "restore", "migrate": "migrate"}[args.command]

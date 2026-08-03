@@ -86,6 +86,11 @@ streams forward provider tokens immediately over SSE. Prompt-injection assessmen
 retrieval details, provider/model identity, latency, and citations are recorded in the
 bounded trace store and JSONL trace file.
 
+V1.8 native memory routes include `/v1/evidence`, `/v1/evidence/inspect`,
+`/v1/memory/{remember,recall,inspect,review,correct,confirm,reject,dispute,due,export}`,
+`DELETE /v1/memory/{id}`, and `/v1/retrieve/combined`. Evidence and memory ownership is derived
+from the authenticated key identity, and these internal records never appear in ordinary retrieval.
+
 Lifecycle operations include tenant-bound `DELETE /v1/documents/{id}` (with a JSON
 `tenant_id`) and `GET /v1/storage`. Native `inspect` and `compact` commands validate the
 versioned catalog and atomically retain only current document generations. Compaction is an

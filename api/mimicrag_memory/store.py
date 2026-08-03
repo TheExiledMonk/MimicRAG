@@ -56,9 +56,14 @@ class MemoryStore:
           proposal TEXT NOT NULL, created_at_ms INTEGER NOT NULL, resolved_at_ms INTEGER);
         CREATE TABLE IF NOT EXISTS memory_jobs(id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL,
           request TEXT NOT NULL, status TEXT NOT NULL, result TEXT NOT NULL, error TEXT NOT NULL,
-          created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL);
+          created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+          max_attempts INTEGER NOT NULL DEFAULT 3, lease_owner TEXT NOT NULL DEFAULT '', lease_until_ms INTEGER NOT NULL DEFAULT 0);
         CREATE INDEX IF NOT EXISTS memory_jobs_scope ON memory_jobs(tenant,owner,created_at_ms);
-        """); self.db.commit()
+        """)
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(memory_jobs)")}
+        for name, declaration in {"attempts": "INTEGER NOT NULL DEFAULT 0", "max_attempts": "INTEGER NOT NULL DEFAULT 3", "lease_owner": "TEXT NOT NULL DEFAULT ''", "lease_until_ms": "INTEGER NOT NULL DEFAULT 0"}.items():
+            if name not in columns: self.db.execute(f"ALTER TABLE memory_jobs ADD COLUMN {name} {declaration}")
+        self.db.commit()
 
     def _audit(self, tenant: str, owner: str, action: str, object_id: str, reason: str, detail: Any = None) -> None:
         self.db.execute("INSERT INTO audit(at_ms,tenant,owner,action,object_id,reason,detail) VALUES(?,?,?,?,?,?,?)",
@@ -127,6 +132,25 @@ class MemoryStore:
         if not row: raise ValueError("memory not found")
         value = json.loads(row[0]); value["status"] = status
         self.db.execute("UPDATE memories SET status=?,record=?,updated_at_ms=? WHERE id=?", (status, json.dumps(value, sort_keys=True), _now(), memory_id))
+
+    def confirm(self, memory_id: str, *, tenant: str, owner: str) -> dict[str, Any]:
+        row = self.db.execute("SELECT status FROM memories WHERE id=? AND tenant=? AND owner=?", (memory_id, tenant, owner)).fetchone()
+        if not row or row[0] != "pending_confirmation": raise ValueError("memory is not pending confirmation")
+        with self.db: self._set_status(memory_id, "active"); self._audit(tenant, owner, "memory.confirm", memory_id, "operator confirmation")
+        return self.inspect(memory_id, tenant=tenant, owner=owner)["memory"]
+
+    def reject(self, memory_id: str, *, tenant: str, owner: str, reason: str = "operator rejection") -> dict[str, Any]:
+        row = self.db.execute("SELECT status FROM memories WHERE id=? AND tenant=? AND owner=?", (memory_id, tenant, owner)).fetchone()
+        if not row or row[0] not in {"pending_confirmation", "quarantined"}: raise ValueError("memory is not reviewable")
+        with self.db: self._set_status(memory_id, "rejected"); self._audit(tenant, owner, "memory.reject", memory_id, reason)
+        return self.inspect(memory_id, tenant=tenant, owner=owner)["memory"]
+
+    def review(self, *, tenant: str, owner: str, status: str = "") -> dict[str, Any]:
+        query, values = "SELECT record FROM memories WHERE tenant=? AND owner=?", [tenant, owner]
+        if status: query += " AND status=?"; values.append(status)
+        memories = [json.loads(row[0]) for row in self.db.execute(query + " ORDER BY updated_at_ms DESC", values)]
+        quarantined = [dict(row) for row in self.db.execute("SELECT * FROM quarantined WHERE tenant=? AND resolved_at_ms IS NULL ORDER BY created_at_ms", (tenant,))]
+        return {"memories": memories, "quarantined_proposals": quarantined, "count": len(memories), "tenant": tenant, "owner": owner}
 
     def reinforce(self, memory_id: str, evidence_id: str, tenant: str, owner: str, *, successful_use: bool = False) -> None:
         self._evidence(evidence_id, tenant, owner); row = self.db.execute("SELECT record FROM memories WHERE id=? AND tenant=? AND owner=?", (memory_id, tenant, owner)).fetchone()
@@ -278,7 +302,13 @@ class MemoryStore:
         return value
 
     def pending_memory_jobs(self) -> list[tuple[str, dict[str, Any]]]:
-        rows = self.db.execute("SELECT id,request FROM memory_jobs WHERE status IN ('queued','running') ORDER BY created_at_ms").fetchall()
+        rows = self.db.execute("SELECT id,request FROM memory_jobs WHERE status='queued' OR (status='running' AND lease_until_ms<=?) ORDER BY created_at_ms", (_now(),)).fetchall()
         return [(row["id"], json.loads(row["request"])) for row in rows]
+
+    def claim_memory_job(self, job_id: str, worker: str, lease_ms: int = 30000) -> bool:
+        now = _now()
+        with self.db:
+            cursor = self.db.execute("UPDATE memory_jobs SET status='running',lease_owner=?,lease_until_ms=?,attempts=attempts+1,updated_at_ms=? WHERE id=? AND attempts<max_attempts AND (status='queued' OR (status='running' AND lease_until_ms<=?))", (worker, now + lease_ms, now, job_id, now))
+        return cursor.rowcount == 1
 
     def close(self) -> None: self.db.close()

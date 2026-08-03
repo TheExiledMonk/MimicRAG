@@ -92,3 +92,13 @@ def test_aggregate_rejects_string_field(tmp_path, monkeypatch):
     )
     assert response.status_code == 400
     assert "unsupported aggregate field" in response.json()["detail"]
+
+
+def test_memory_review_and_action_proxy(monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module, "_memory_request", lambda path, payload: calls.append((path, payload)) or {"memories": []})
+    client = TestClient(app_module.app)
+    assert client.post("/api/memory/review", json={"tenant_id": "acme", "status": "quarantined"}).status_code == 200
+    assert client.post("/api/memory/action", json={"tenant_id": "acme", "memory_id": "mem-1", "action": "reject", "reason": "unsafe"}).status_code == 200
+    assert calls[0] == ("/v1/memory/review", {"tenant_id": "acme", "status": "quarantined"})
+    assert calls[1][0] == "/v1/memory/reject"

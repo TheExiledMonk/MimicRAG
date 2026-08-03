@@ -1100,6 +1100,8 @@ json RagEngine::DeleteDocument(const json& request) {
         });
         if (document == impl_->documents.rend() || document->tenant != tenant)
             return {{"document_id", document_id}, {"deleted", false}, {"reason", "not_found"}};
+        if (!request.value("_allow_internal", false) && (document->metadata.value("memory_record", false) || document->metadata.value("evidence_record", false)))
+            throw std::runtime_error("internal records require their dedicated lifecycle API");
         generation = impl_->current_generations[document_id] + 1;
         for (const auto& chunk : impl_->chunks)
             if (chunk.document < impl_->documents.size() && impl_->documents[chunk.document].document_id == document_id)
@@ -1127,7 +1129,7 @@ json RagEngine::EraseTenant(const json& request) {
             if (found != impl_->documents.rend()) documents.push_back(id);
         }
     }
-    size_t deleted = 0; for (const auto& id : documents) deleted += DeleteDocument({{"document_id", id}, {"tenant_id", tenant}}).value("deleted", false);
+    size_t deleted = 0; for (const auto& id : documents) deleted += DeleteDocument({{"document_id", id}, {"tenant_id", tenant}, {"_allow_internal", true}}).value("deleted", false);
     bool verified = true;
     { std::shared_lock lock(impl_->state_mutex); for (const auto& [id, version] : impl_->current_versions)
         for (const auto& document : impl_->documents) if (document.document_id == id && document.version_id == version && document.tenant == tenant) verified = false; }
@@ -1147,7 +1149,7 @@ json RagEngine::ApplyRetention(const json& request) {
             if (document.document_id == id && document.version_id == version && document.ingested_at_ms > 0 && document.ingested_at_ms < cutoff &&
                 (tenant_filter.empty() || document.tenant == tenant_filter)) expired.emplace_back(id, document.tenant);
     }
-    size_t deleted = 0; for (const auto& [id, tenant] : expired) deleted += DeleteDocument({{"document_id", id}, {"tenant_id", tenant}}).value("deleted", false);
+    size_t deleted = 0; for (const auto& [id, tenant] : expired) deleted += DeleteDocument({{"document_id", id}, {"tenant_id", tenant}, {"_allow_internal", true}}).value("deleted", false);
     return {{"max_age_days", days}, {"cutoff_ms", cutoff}, {"documents_deleted", deleted}, {"tenant_id", tenant_filter.empty() ? "*" : tenant_filter}};
 }
 
@@ -1253,7 +1255,8 @@ json RagEngine::Retrieve(const json& request) {
       if (query_embedding.empty() || !selected.dimension) { query_embedding.clear(); backend = "bm25"; }
       auto visible = impl_->Visible(tenant, scopes);
       if (!request.value("_include_memory", false)) visible.erase(std::remove_if(visible.begin(), visible.end(), [&](size_t index) {
-          return impl_->documents[impl_->chunks[index].document].metadata.value("memory_record", false); }), visible.end());
+          const auto& metadata = impl_->documents[impl_->chunks[index].document].metadata;
+          return metadata.value("memory_record", false) || metadata.value("evidence_record", false); }), visible.end());
       if (request.contains("filter")) visible.erase(std::remove_if(visible.begin(), visible.end(), [&](size_t index) {
           return !MetadataMatches(impl_->documents[impl_->chunks[index].document].metadata, request["filter"]); }), visible.end());
       auto ranked = impl_->RetrieveLocked(plan.effective_query, tenant, scopes, shortlist, query_embedding.empty() ? nullptr : &query_embedding, use_local, visible, plan.lexical || query_embedding.empty());
@@ -1373,15 +1376,44 @@ json RagEngine::Trace(const std::string& trace_id) const { std::lock_guard lock(
 
 json RagEngine::RecentTraces(size_t limit) const { std::lock_guard lock(impl_->mutex); json result = json::array(); limit = std::min(limit, impl_->trace_order.size()); for (size_t i = 0; i < limit; ++i) result.push_back(impl_->traces.at(impl_->trace_order[impl_->trace_order.size() - 1 - i])); return result; }
 
+json RagEngine::EvidenceAppend(const json& request) {
+    static const std::unordered_set<std::string> kinds{"conversation", "tool_result", "correction", "task_outcome", "observation"};
+    const std::string tenant = request.value("tenant_id", "default"), owner = request.at("owner"), kind = request.at("kind"), content = request.at("content");
+    if (!kinds.count(kind) || owner.empty() || content.empty()) throw std::runtime_error("valid kind, owner, and content are required");
+    const int64_t now = NowMs(); const std::string id = request.value("evidence_id", StableId(tenant + "\n" + owner + "\n" + content + "\n" + std::to_string(now)));
+    { std::shared_lock lock(impl_->state_mutex); if (impl_->current_versions.count(id)) throw std::runtime_error("evidence_id already exists"); }
+    json metadata = {{"evidence_record", true}, {"evidence_id", id}, {"evidence_owner", owner}, {"evidence_kind", kind},
+        {"evidence_provenance", request.value("provenance", "explicit")}, {"evidence_sensitivity", request.value("sensitivity", "internal")},
+        {"evidence_purpose", request.value("purpose", "conversation")}, {"evidence_event_time_ms", request.value("event_time_ms", now)},
+        {"evidence_recorded_at_ms", now}, {"trust", "authoritative_evidence"}, {"policy_authority", false}};
+    auto indexed = Ingest({{"text", content}, {"source_uri", "evidence://" + id}, {"document_id", id}, {"tenant_id", tenant},
+        {"access_scope", request.value("access_scope", "public")}, {"title", kind}, {"format", "text"}, {"mode", "fast"}, {"metadata", metadata}});
+    return {{"evidence_id", id}, {"tenant_id", tenant}, {"owner", owner}, {"indexed", indexed}};
+}
+
+json RagEngine::EvidenceInspect(const json& request) const {
+    const std::string id = request.at("evidence_id"), tenant = request.value("tenant_id", "default"), owner = request.at("owner");
+    std::shared_lock lock(impl_->state_mutex);
+    for (const auto& document : impl_->documents) { const auto current = impl_->current_versions.find(document.document_id);
+        if (document.document_id != id || document.tenant != tenant || current == impl_->current_versions.end() || current->second != document.version_id ||
+            !document.metadata.value("evidence_record", false) || document.metadata.value("evidence_owner", "") != owner) continue;
+        std::string content; for (const auto& chunk : impl_->chunks) if (chunk.document < impl_->documents.size() && &impl_->documents[chunk.document] == &document) content += impl_->LoadContent(chunk);
+        return {{"evidence_id", id}, {"tenant_id", tenant}, {"owner", owner}, {"content", content}, {"metadata", document.metadata}, {"access_scope", document.scope}};
+    }
+    throw std::out_of_range("evidence not found");
+}
+
 json RagEngine::MemoryRemember(const json& request) {
     static const std::unordered_set<std::string> namespaces{"working", "episodic", "semantic", "procedural", "preference", "prospective", "negative"};
     static const std::unordered_set<std::string> sensitive{"sensitive", "personal", "legal", "financial", "identity"};
     const std::string tenant = request.value("tenant_id", "default"), owner = request.at("owner"), subject = request.at("subject"), statement = request.at("statement");
     const std::string memory_namespace = request.value("namespace", "semantic"), visibility = request.value("visibility", "private"), sensitivity = request.value("sensitivity", "internal");
-    const json evidence = request.value("evidence", json::array()); const json evidence_ids = request.value("evidence_ids", json::array());
+    const json evidence_ids = request.value("evidence_ids", json::array());
     if (owner.empty() || subject.empty() || statement.empty() || statement.size() > config_.server.max_body_bytes) throw std::runtime_error("owner, subject, and statement are required");
     if (!namespaces.count(memory_namespace)) throw std::runtime_error("invalid memory namespace");
-    if ((!evidence.is_array() || evidence.empty()) && (!evidence_ids.is_array() || evidence_ids.empty())) throw std::runtime_error("memory requires evidence or evidence_ids");
+    if (!evidence_ids.is_array() || evidence_ids.empty()) throw std::runtime_error("memory requires authoritative evidence_ids");
+    for (const auto& evidence_id : evidence_ids) { if (!evidence_id.is_string()) throw std::runtime_error("evidence_ids must be strings");
+        (void)EvidenceInspect({{"evidence_id", evidence_id}, {"tenant_id", tenant}, {"owner", owner}}); }
     json purposes = request.value("allowed_purposes", json::array({"conversation"})); if (!purposes.is_array() || purposes.empty() || purposes.size() > 16) throw std::runtime_error("allowed_purposes must contain 1 to 16 values");
     const double confidence = request.value("confidence", 0.7), importance = request.value("importance", 0.5); if (confidence < 0 || confidence > 1 || importance < 0 || importance > 1) throw std::runtime_error("memory confidence and importance must be between 0 and 1");
     std::string status = "active"; const bool confirmed = request.value("confirmed", false);
@@ -1393,7 +1425,7 @@ json RagEngine::MemoryRemember(const json& request) {
         {"memory_subject", subject}, {"memory_confidence", confidence}, {"memory_importance", importance}, {"memory_provenance", request.value("provenance", "explicit")},
         {"memory_reinforcement", request.value("reinforcement", 1)}, {"memory_event_time_ms", request.value("event_time_ms", now)}, {"memory_recorded_at_ms", now},
         {"memory_valid_from_ms", request.value("valid_from_ms", int64_t{0})}, {"memory_valid_until_ms", request.value("valid_until_ms", int64_t{0})},
-        {"memory_evidence", evidence}, {"memory_evidence_ids", evidence_ids}, {"trust", "memory"}, {"policy_authority", false}};
+        {"memory_evidence_ids", evidence_ids}, {"memory_relations", json::array()}, {"trust", "memory"}, {"policy_authority", false}};
     auto indexed = Ingest({{"text", statement}, {"source_uri", "memory://" + memory_id}, {"document_id", memory_id}, {"tenant_id", tenant},
         {"access_scope", request.value("access_scope", "public")}, {"title", subject}, {"format", "text"}, {"mode", "fast"}, {"metadata", metadata}});
     return {{"memory_id", memory_id}, {"tenant_id", tenant}, {"owner", owner}, {"status", status}, {"confirmation_required", status == "pending_confirmation"}, {"indexed", indexed}};
@@ -1458,7 +1490,44 @@ json RagEngine::MemoryConfirm(const json& request) {
     return {{"memory_id", old["memory_id"]}, {"status", "active"}, {"indexed", indexed}};
 }
 
-json RagEngine::MemoryForget(const json& request) { (void)MemoryInspect(request); return DeleteDocument({{"document_id", request.at("memory_id")}, {"tenant_id", request.value("tenant_id", "default")}}); }
+json RagEngine::MemoryReject(const json& request) {
+    const auto old = MemoryInspect(request); const std::string status = old["metadata"].value("memory_status", "");
+    if (status != "pending_confirmation" && status != "quarantined") throw std::runtime_error("memory is not reviewable");
+    json metadata = old["metadata"]; metadata["memory_status"] = "rejected"; metadata["memory_rejected_at_ms"] = NowMs(); metadata["memory_rejection_reason"] = request.value("reason", "operator rejection");
+    auto indexed = Ingest({{"text", old["statement"]}, {"source_uri", old["source_uri"]}, {"document_id", old["memory_id"]}, {"tenant_id", old["tenant_id"]},
+        {"access_scope", old["access_scope"]}, {"title", metadata["memory_subject"]}, {"format", "text"}, {"mode", "fast"}, {"metadata", metadata}});
+    return {{"memory_id", old["memory_id"]}, {"status", "rejected"}, {"indexed", indexed}};
+}
+
+json RagEngine::MemoryDispute(const json& request) {
+    const auto source = MemoryInspect(request); const std::string target_id = request.at("target_memory_id");
+    const auto target = MemoryInspect({{"memory_id", target_id}, {"tenant_id", source["tenant_id"]}, {"owner", source["owner"]}});
+    const std::string evidence_id = request.at("evidence_id"); (void)EvidenceInspect({{"evidence_id", evidence_id}, {"tenant_id", source["tenant_id"]}, {"owner", source["owner"]}});
+    const double weight = request.value("weight", 1.0); if (weight < 0 || weight > 1) throw std::runtime_error("weight must be between 0 and 1");
+    json metadata = source["metadata"]; json relations = metadata.value("memory_relations", json::array());
+    relations.push_back({{"relation", "contradicts"}, {"target_memory_id", target_id}, {"evidence_id", evidence_id}, {"weight", weight}, {"created_at_ms", NowMs()}});
+    metadata["memory_relations"] = relations; metadata["memory_status"] = "disputed";
+    auto indexed = Ingest({{"text", source["statement"]}, {"source_uri", source["source_uri"]}, {"document_id", source["memory_id"]}, {"tenant_id", source["tenant_id"]},
+        {"access_scope", source["access_scope"]}, {"title", metadata["memory_subject"]}, {"format", "text"}, {"mode", "fast"}, {"metadata", metadata}});
+    return {{"memory_id", source["memory_id"]}, {"target_memory_id", target["memory_id"]}, {"status", "disputed"}, {"indexed", indexed}};
+}
+
+json RagEngine::MemoryDue(const json& request) const {
+    const std::string tenant = request.value("tenant_id", "default"), owner = request.at("owner"), purpose = request.value("purpose", "planning");
+    const int64_t now = request.value("now_ms", NowMs()); const std::string context = Fold(request.value("context", "")); json due = json::array();
+    const auto context_tokens = Tokenize(context); std::shared_lock lock(impl_->state_mutex);
+    for (const auto& document : impl_->documents) { const auto current = impl_->current_versions.find(document.document_id); const auto& metadata = document.metadata;
+        if (document.tenant != tenant || current == impl_->current_versions.end() || current->second != document.version_id || !metadata.value("memory_record", false) ||
+            metadata.value("memory_owner", "") != owner || metadata.value("memory_namespace", "") != "prospective" || metadata.value("memory_status", "") != "active") continue;
+        const auto purposes = metadata.value("memory_allowed_purposes", json::array()); if (std::find(purposes.begin(), purposes.end(), purpose) == purposes.end()) continue;
+        if (metadata.value("memory_valid_from_ms", int64_t{0}) > now || (metadata.value("memory_valid_until_ms", int64_t{0}) && metadata.value("memory_valid_until_ms", int64_t{0}) < now)) continue;
+        const std::string subject = Fold(metadata.value("memory_subject", "")); bool matches = context_tokens.empty(); for (const auto& token : context_tokens) if (token.size() >= 3) matches |= subject.find(token) != std::string::npos;
+        if (matches) due.push_back({{"memory_id", document.document_id}, {"subject", metadata.value("memory_subject", "")}, {"statement", [&] { std::string text; for (const auto& chunk : impl_->chunks) if (chunk.document < impl_->documents.size() && &impl_->documents[chunk.document] == &document) text += impl_->LoadContent(chunk); return text; }()}, {"due_at_ms", now}});
+    }
+    return {{"due", due}, {"count", due.size()}, {"tenant_id", tenant}, {"owner", owner}, {"purpose", purpose}};
+}
+
+json RagEngine::MemoryForget(const json& request) { (void)MemoryInspect(request); return DeleteDocument({{"document_id", request.at("memory_id")}, {"tenant_id", request.value("tenant_id", "default")}, {"_allow_internal", true}}); }
 
 json RagEngine::MemoryReview(const json& request) const {
     const std::string tenant = request.value("tenant_id", "default"), owner = request.at("owner"), status = request.value("status", ""); json memories = json::array();
@@ -1470,8 +1539,16 @@ json RagEngine::MemoryReview(const json& request) const {
 }
 
 json RagEngine::MemoryExport(const json& request) const {
-    auto review = MemoryReview(request); json records = json::array(); for (const auto& item : review["memories"]) records.push_back(MemoryInspect({{"memory_id", item["memory_id"]}, {"tenant_id", review["tenant_id"]}, {"owner", review["owner"]}}));
-    return {{"format", "mimicrag-native-memory-export"}, {"version", 1}, {"tenant_id", review["tenant_id"]}, {"owner", review["owner"]}, {"exported_at_ms", NowMs()}, {"memories", records}};
+    auto review = MemoryReview(request); json records = json::array(), evidence = json::array(); std::unordered_set<std::string> evidence_ids;
+    for (const auto& item : review["memories"]) {
+        auto record = MemoryInspect({{"memory_id", item["memory_id"]}, {"tenant_id", review["tenant_id"]}, {"owner", review["owner"]}});
+        for (const auto& id : record["metadata"].value("memory_evidence_ids", json::array())) {
+            if (id.is_string()) evidence_ids.insert(id);
+        }
+        records.push_back(std::move(record));
+    }
+    for (const auto& id : evidence_ids) evidence.push_back(EvidenceInspect({{"evidence_id", id}, {"tenant_id", review["tenant_id"]}, {"owner", review["owner"]}}));
+    return {{"format", "mimicrag-native-memory-export"}, {"version", 2}, {"tenant_id", review["tenant_id"]}, {"owner", review["owner"]}, {"exported_at_ms", NowMs()}, {"memories", records}, {"evidence", evidence}};
 }
 
 json RagEngine::RetrieveCombined(const json& request) {
