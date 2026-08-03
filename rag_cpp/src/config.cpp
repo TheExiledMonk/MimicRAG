@@ -108,6 +108,24 @@ Config Config::Load(const std::string& path) {
     out.ingestion.analysis_enabled = ingestion.value("analysis_enabled", false);
     out.ingestion.analysis_use_chat_provider = ingestion.value("analysis_use_chat_provider", true);
     out.ingestion.prompt_version = ingestion.value("prompt_version", "semantic-ingestion-1");
+    const auto retrieval = root.value("retrieval", json::object());
+    out.retrieval.classification_enabled = retrieval.value("classification_enabled", true);
+    out.retrieval.rewriting_enabled = retrieval.value("rewriting_enabled", true);
+    out.retrieval.reranking_enabled = retrieval.value("reranking_enabled", true);
+    out.retrieval.shortlist_multiplier = retrieval.value("shortlist_multiplier", size_t{4});
+    out.retrieval.maximum_rewrites = retrieval.value("maximum_rewrites", size_t{3});
+    out.retrieval.maximum_rewrite_chars = retrieval.value("maximum_rewrite_chars", size_t{512});
+    out.retrieval.rerank_weight = retrieval.value("rerank_weight", 0.35);
+    out.retrieval.recency_weight = retrieval.value("recency_weight", 0.05);
+    out.retrieval.authority_weight = retrieval.value("authority_weight", 0.08);
+    out.retrieval.source_quality_weight = retrieval.value("source_quality_weight", 0.08);
+    out.retrieval.feedback_weight = retrieval.value("feedback_weight", 0.05);
+    out.retrieval.minimum_confidence = retrieval.value("minimum_confidence", 0.18);
+    out.retrieval.near_duplicate_threshold = retrieval.value("near_duplicate_threshold", 0.9);
+    if (!out.retrieval.shortlist_multiplier || out.retrieval.shortlist_multiplier > 20 || out.retrieval.maximum_rewrites > 10 ||
+        out.retrieval.maximum_rewrite_chars > out.server.max_query_chars || out.retrieval.minimum_confidence < 0 || out.retrieval.minimum_confidence > 1 ||
+        out.retrieval.near_duplicate_threshold < 0.5 || out.retrieval.near_duplicate_threshold > 1)
+        throw std::runtime_error("invalid retrieval limits");
     if (out.local_embedding.enabled && out.local_embedding.model_path.empty()) {
         throw std::runtime_error("local_embedding.model_path is required when enabled");
     }

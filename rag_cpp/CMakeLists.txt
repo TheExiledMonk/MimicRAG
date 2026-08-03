@@ -104,6 +104,9 @@ if(MIMICDB_BUILD_TESTS)
     add_test(NAME mimicrag_v12_smoke
         COMMAND ${PROJECT_SOURCE_DIR}/scripts/mimicrag_v12_smoke_test.sh
                 $<TARGET_FILE:mimicrag_server> ${PROJECT_SOURCE_DIR}/tests/mimicrag_v12_test.json)
+    add_test(NAME mimicrag_v13_smoke
+        COMMAND ${PROJECT_SOURCE_DIR}/scripts/mimicrag_v13_smoke_test.sh
+                $<TARGET_FILE:mimicrag_server> ${PROJECT_SOURCE_DIR}/tests/mimicrag_v13_test.json)
     add_executable(mimicrag_provider_stream_smoke tests/provider_stream_smoke.cpp src/provider.cpp src/config.cpp)
     target_include_directories(mimicrag_provider_stream_smoke PRIVATE include)
     target_link_libraries(mimicrag_provider_stream_smoke PRIVATE CURL::libcurl nlohmann_json::nlohmann_json Threads::Threads)

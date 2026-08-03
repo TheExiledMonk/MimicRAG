@@ -63,6 +63,21 @@
     "maximum_analysis_seconds": 60,
     "prompt_version": "semantic-ingestion-1"
   },
+  "retrieval": {
+    "classification_enabled": true,
+    "rewriting_enabled": true,
+    "reranking_enabled": true,
+    "shortlist_multiplier": 4,
+    "maximum_rewrites": 3,
+    "maximum_rewrite_chars": 512,
+    "rerank_weight": 0.35,
+    "recency_weight": 0.05,
+    "authority_weight": 0.08,
+    "source_quality_weight": 0.08,
+    "feedback_weight": 0.05,
+    "minimum_confidence": 0.18,
+    "near_duplicate_threshold": 0.9
+  },
   "chat": {
     "provider": "openai_compatible",
     "model": "your-chat-model",

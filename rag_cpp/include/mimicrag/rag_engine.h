@@ -32,6 +32,7 @@ public:
     nlohmann::json Trace(const std::string& trace_id) const;
     nlohmann::json RecentTraces(size_t limit) const;
     nlohmann::json Evaluate(const nlohmann::json& request);
+    nlohmann::json RecordFeedback(const nlohmann::json& request);
     nlohmann::json GraphExpand(const nlohmann::json& request) const;
     nlohmann::json Health() const;
     const Config& GetConfig() const { return config_; }

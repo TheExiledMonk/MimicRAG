@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Representative V1.3 retrieval-quality corpus; ingest each document with its declared mode before evaluating cases.",
+  "documents": [
+    {"source_uri":"quality://prose-fast","format":"text","mode":"fast","metadata":{"class":"prose","authority":0.8,"source_quality":0.8},"text":"The coastal observatory records salinity each morning. Calibration occurs before the first reading, and anomalous measurements require a second instrument."},
+    {"source_uri":"quality://manual-structured","format":"markdown","mode":"structured","metadata":{"class":"manual","authority":1.0,"source_quality":0.9},"text":"# Recovery manual\n\nStop writes before taking a snapshot.\n\n## Restore\n\nVerify the checksum manifest before switching generations. Never overwrite the active generation during rehearsal."},
+    {"source_uri":"quality://policy-semantic","format":"markdown","mode":"semantic","metadata":{"class":"policy","authority":1.0,"source_quality":1.0},"text":"# Retention policy\n\nCustomer records are retained for thirty days after closure. Legal holds suspend deletion.\n\n## Exceptions\n\nAudit records remain for seven years; test fixtures expire after one day."},
+    {"source_uri":"quality://table-structured","format":"markdown","mode":"structured","metadata":{"class":"table","authority":0.9,"source_quality":0.9},"text":"# Support windows\n\n| Tier | Response | Coverage |\n| --- | --- | --- |\n| Critical | 15 minutes | 24x7 |\n| Standard | 8 hours | Weekdays |"},
+    {"source_uri":"quality://code-structured","format":"markdown","mode":"structured","metadata":{"class":"code","authority":0.9,"source_quality":0.8},"text":"# Retry helper\n\n```cpp\nfor (int attempt = 0; attempt <= max_retries; ++attempt) {\n    if (request()) return true;\n}\n```\n\nOnly transport errors, HTTP 429, and server errors are retryable."},
+    {"source_uri":"quality://cross-section-semantic","format":"markdown","mode":"semantic","metadata":{"class":"cross_section","authority":0.9,"source_quality":0.9},"text":"# Authentication\n\nKeys identify a tenant and its allowed scopes.\n\n## Rotation\n\nCreate the replacement key before revoking the old key.\n\n## Audit\n\nBoth creation and revocation must appear in the administrative audit log."}
+  ],
+  "cases": [
+    {"class":"prose","query":"When is the salinity instrument calibrated?","relevant_source_uris":["quality://prose-fast"],"required_answer_terms":["before","first reading"]},
+    {"class":"manual","query":"What must be verified before a restore generation switch?","relevant_source_uris":["quality://manual-structured"],"required_answer_terms":["checksum manifest"]},
+    {"class":"policy","query":"How long are audit records retained?","relevant_source_uris":["quality://policy-semantic"],"required_answer_terms":["seven years"]},
+    {"class":"table","query":"What is the critical support response window?","relevant_source_uris":["quality://table-structured"],"required_answer_terms":["15 minutes"]},
+    {"class":"code","query":"Which HTTP response is explicitly retryable?","relevant_source_uris":["quality://code-structured"],"required_answer_terms":["429"]},
+    {"class":"cross_section","query":"How should keys be rotated and audited?","relevant_source_uris":["quality://cross-section-semantic"],"required_answer_terms":["replacement","audit log"]},
+    {"class":"insufficient","query":"What is the observatory's annual electricity budget?","relevant_source_uris":[],"expected_insufficient":true}
+  ],
+  "compare_modes":["fast","structured","semantic"]
+}

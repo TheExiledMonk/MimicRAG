@@ -187,7 +187,7 @@ void Handle(int socket, RagEngine& engine, std::shared_mutex& engine_gate) {
         if (!authenticated) { Reply(socket, 401, {{"error", "invalid API key"}}); return; }
         const std::string identity = auth.key ? auth.id : (supplied.empty() ? fields["x-forwarded-for"] : "legacy");
         if (!RateAllowed(identity, server_config.requests_per_minute)) { Reply(socket, 429, {{"error", "rate limit exceeded"}}); return; }
-        const std::string permission = (method == "POST" && path == "/v1/documents") || (method == "DELETE" && path.rfind("/v1/documents/", 0) == 0) ? "write" :
+        const std::string permission = (method == "POST" && (path == "/v1/documents" || path == "/v1/feedback")) || (method == "DELETE" && path.rfind("/v1/documents/", 0) == 0) ? "write" :
             (path == "/metrics" || path == "/v1/storage" || path.rfind("/v1/jobs", 0) == 0 || path.rfind("/v1/traces", 0) == 0 || path.rfind("/v1/tenants", 0) == 0 || path.rfind("/v1/maintenance", 0) == 0 || path == "/v1/evaluations") ? "admin" : "read";
         if (!HasPermission(auth, permission)) { Audit(server_config, auth, permission, "", false, fields["x-request-id"]); Reply(socket, 403, {{"error", "permission denied"}}); return; }
         std::unique_lock<std::shared_mutex> maintenance_lock;
@@ -206,7 +206,7 @@ void Handle(int socket, RagEngine& engine, std::shared_mutex& engine_gate) {
         const std::string scope = input.value("access_scope", input.value("metadata", json::object()).value("access_scope", "public"));
         const bool tenant_scoped = path.rfind("/v1/documents", 0) == 0 || path.rfind("/v1/retrieve", 0) == 0 ||
             path.rfind("/v1/answers", 0) == 0 || path.rfind("/v1/chat/completions", 0) == 0 || path.rfind("/v1/graph", 0) == 0 ||
-            path.rfind("/v1/evaluations", 0) == 0 || path.rfind("/v1/tenants", 0) == 0 || path == "/v1/maintenance/retention";
+            path.rfind("/v1/evaluations", 0) == 0 || path.rfind("/v1/feedback", 0) == 0 || path.rfind("/v1/tenants", 0) == 0 || path == "/v1/maintenance/retention";
         bool scopes_allowed = Contains(auth.key ? auth.key->scopes : std::vector<std::string>{}, scope);
         if (auth.key && input.contains("access_scopes")) for (const auto& requested : input["access_scopes"])
             scopes_allowed &= requested.is_string() && Contains(auth.key->scopes, requested.get<std::string>());
@@ -240,6 +240,7 @@ void Handle(int socket, RagEngine& engine, std::shared_mutex& engine_gate) {
         else if (method == "POST" && path == "/v1/maintenance/retention") Reply(socket, 200, engine.ApplyRetention(input));
         else if (method == "POST" && path == "/v1/maintenance/compact") Reply(socket, 200, engine.CompactOnline());
         else if (method == "POST" && path == "/v1/retrieve") Reply(socket, 200, engine.Retrieve(input));
+        else if (method == "POST" && path == "/v1/feedback") Reply(socket, 200, engine.RecordFeedback(input));
         else if (method == "POST" && path == "/v1/evaluations") Reply(socket, 200, engine.Evaluate(input));
         else if (method == "POST" && path == "/v1/graph/expand") Reply(socket, 200, engine.GraphExpand(input));
         else if (method == "POST" && path == "/v1/answers") {

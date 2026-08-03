@@ -64,6 +64,125 @@ std::vector<std::string> Tokenize(const std::string& value) {
     return result;
 }
 
+std::string Fold(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+double TokenOverlap(const std::string& query, const std::string& text) {
+    const auto query_tokens = Tokenize(query), text_tokens = Tokenize(text);
+    if (query_tokens.empty()) return 0;
+    static const std::unordered_set<std::string> stopwords = {"a", "an", "and", "are", "as", "at", "be", "by", "do", "for", "from", "how", "in", "is", "it", "of", "on", "or", "the", "this", "to", "was", "what", "when", "where", "which", "who", "why", "with"};
+    std::unordered_set<std::string> haystack, unique; for (const auto& token : text_tokens) if (!stopwords.count(token)) haystack.insert(token);
+    for (const auto& token : query_tokens) if (!stopwords.count(token)) unique.insert(token);
+    if (unique.empty()) return 0;
+    size_t matched = 0; for (const auto& token : unique) matched += haystack.count(token);
+    return static_cast<double>(matched) / unique.size();
+}
+
+double SetSimilarity(const std::string& left, const std::string& right) {
+    std::unordered_set<std::string> a, b;
+    const auto add = [](const std::vector<std::string>& tokens, std::unordered_set<std::string>* out) {
+        for (size_t i = 0; i < tokens.size(); ++i) out->insert(tokens[i] + (i + 1 < tokens.size() ? "\n" + tokens[i + 1] : ""));
+    };
+    add(Tokenize(left), &a); add(Tokenize(right), &b); if (a.empty() || b.empty()) return 0;
+    size_t intersection = 0; for (const auto& item : a) intersection += b.count(item);
+    return static_cast<double>(intersection) / (a.size() + b.size() - intersection);
+}
+
+const json* MetadataValue(const json& metadata, const std::string& path) {
+    const json* current = &metadata; size_t start = 0;
+    while (start <= path.size()) { const size_t dot = path.find('.', start); const std::string key = path.substr(start, dot - start);
+        if (!current->is_object() || !current->contains(key)) return nullptr;
+        current = &current->at(key);
+        if (dot == std::string::npos) return current;
+        start = dot + 1; }
+    return current;
+}
+
+double MetadataNumber(const json& metadata, const std::string& key, double fallback) {
+    const auto found = metadata.find(key); return found != metadata.end() && found->is_number() ? found->get<double>() : fallback;
+}
+
+bool ScalarCompare(const json& actual, const std::string& operation, const json& expected) {
+    if (operation == "eq") return actual == expected;
+    if (operation == "ne") return actual != expected;
+    if (operation == "in") { if (!expected.is_array()) return false; return std::find(expected.begin(), expected.end(), actual) != expected.end(); }
+    if (operation == "contains") {
+        if (actual.is_array()) return std::find(actual.begin(), actual.end(), expected) != actual.end();
+        return actual.is_string() && expected.is_string() && actual.get_ref<const std::string&>().find(expected.get_ref<const std::string&>()) != std::string::npos;
+    }
+    if (operation != "gt" && operation != "gte" && operation != "lt" && operation != "lte") throw std::runtime_error("unsupported metadata filter operation");
+    if (!actual.is_number() || !expected.is_number()) return false;
+    const double a = actual.get<double>(), b = expected.get<double>();
+    return operation == "gt" ? a > b : operation == "gte" ? a >= b : operation == "lt" ? a < b : operation == "lte" ? a <= b : false;
+}
+
+bool MetadataMatches(const json& metadata, const json& filter, size_t depth = 0) {
+    if (filter.is_null() || (filter.is_object() && filter.empty())) return true;
+    if (!filter.is_object() || depth > 8) throw std::runtime_error("invalid metadata filter");
+    if (filter.contains("and")) { if (!filter["and"].is_array() || filter["and"].size() > 32) throw std::runtime_error("invalid and filter"); for (const auto& item : filter["and"]) if (!MetadataMatches(metadata, item, depth + 1)) return false; return true; }
+    if (filter.contains("or")) { if (!filter["or"].is_array() || filter["or"].size() > 32) throw std::runtime_error("invalid or filter"); for (const auto& item : filter["or"]) if (MetadataMatches(metadata, item, depth + 1)) return true; return false; }
+    if (filter.contains("not")) return !MetadataMatches(metadata, filter["not"], depth + 1);
+    const std::string field = filter.value("field", ""), operation = filter.value("op", "eq"); if (field.empty() || field.size() > 256) throw std::runtime_error("invalid metadata filter field");
+    const json* actual = MetadataValue(metadata, field); return actual && ScalarCompare(*actual, operation, filter.value("value", json()));
+}
+
+struct QueryPlan { std::string classification = "hybrid", effective_query; std::vector<std::string> rewrites; bool lexical = true, vector = true, graph = false, rerank = true; };
+
+QueryPlan PlanQuery(const json& request, const Config& config) {
+    QueryPlan plan; plan.effective_query = request.at("query"); const std::string folded = Fold(plan.effective_query);
+    const bool quoted = folded.find('"') != std::string::npos;
+    const bool identifier = std::regex_search(folded, std::regex("\\b[A-Z]{2,}[-_][A-Z0-9_-]+\\b", std::regex::icase));
+    const bool relational = std::regex_search(folded, std::regex("\\b(related|relationship|before|after|parent|child|section|root|deep|depends|follow)\\b"));
+    const bool conceptual = std::regex_search(folded, std::regex("\\b(why|how|explain|meaning|concept|similar)\\b"));
+    if (config.retrieval.classification_enabled) {
+        if (quoted || identifier) { plan.classification = "lexical"; plan.vector = false; plan.rerank = false; }
+        else if (relational) { plan.classification = "graph"; plan.graph = true; }
+        else if (conceptual) { plan.classification = "vector"; plan.lexical = false; }
+    }
+    if (request.contains("retrieval_mode")) {
+        plan.classification = request["retrieval_mode"];
+        if (plan.classification == "lexical") { plan.lexical = true; plan.vector = false; plan.graph = false; }
+        else if (plan.classification == "vector") { plan.lexical = false; plan.vector = true; plan.graph = false; }
+        else if (plan.classification == "hybrid") { plan.lexical = true; plan.vector = true; plan.graph = false; }
+        else if (plan.classification == "graph") { plan.lexical = true; plan.vector = true; plan.graph = true; }
+        else throw std::runtime_error("retrieval_mode must be lexical, vector, hybrid, or graph");
+    }
+    if (config.retrieval.rewriting_enabled) {
+        static const std::vector<std::pair<std::regex, std::string>> abbreviations = {
+            {std::regex("\\bSLA\\b", std::regex::icase), "service level agreement"}, {std::regex("\\bSSO\\b", std::regex::icase), "single sign-on"},
+            {std::regex("\\bRBAC\\b", std::regex::icase), "role based access control"}, {std::regex("\\bRAG\\b", std::regex::icase), "retrieval augmented generation"}};
+        for (const auto& [pattern, expansion] : abbreviations) if (std::regex_search(plan.effective_query, pattern) && plan.rewrites.size() < config.retrieval.maximum_rewrites) {
+            plan.effective_query = std::regex_replace(plan.effective_query, pattern, expansion); plan.rewrites.push_back(expansion); }
+        if (request.contains("conversation") && (!request["conversation"].is_array() || request["conversation"].size() > 64)) throw std::runtime_error("conversation must be an array of at most 64 messages");
+        if (request.contains("conversation") && std::regex_search(folded, std::regex("\\b(it|that|they|this|those|its)\\b"))) {
+            for (auto it = request["conversation"].rbegin(); it != request["conversation"].rend(); ++it) if (it->value("role", "") == "user" && it->value("content", "") != request.at("query").get<std::string>()) {
+                const std::string prior = it->value("content", ""); const std::string rewritten = prior + " " + plan.effective_query;
+                if (rewritten.size() <= config.retrieval.maximum_rewrite_chars) { plan.effective_query = rewritten; plan.rewrites.push_back("conversation_context"); } break; }
+        }
+    }
+    plan.rerank &= config.retrieval.reranking_enabled && request.value("rerank_enabled", true); return plan;
+}
+
+json VerifyAnswerText(const std::string& answer, const json& citations, const std::string& context) {
+    std::unordered_set<size_t> valid; for (const auto& item : citations) valid.insert(item.at("citation_id").get<size_t>());
+    size_t claims = 0, supported = 0, invalid_citations = 0; json details = json::array();
+    std::regex sentence("([^.!?]+[.!?])");
+    for (auto it = std::sregex_iterator(answer.begin(), answer.end(), sentence); it != std::sregex_iterator(); ++it) {
+        const std::string claim = it->str(); if (Tokenize(claim).size() < 4) continue; ++claims;
+        bool cited = false; std::regex marker("\\[([0-9]+)\\]");
+        for (auto citation = std::sregex_iterator(claim.begin(), claim.end(), marker); citation != std::sregex_iterator(); ++citation) {
+            const size_t id = std::stoull((*citation)[1].str()); if (valid.count(id)) cited = true; else ++invalid_citations;
+        }
+        const double overlap = TokenOverlap(std::regex_replace(claim, marker, ""), context); const bool grounded = cited && overlap >= 0.25;
+        supported += grounded; details.push_back({{"claim", claim.substr(0, 512)}, {"cited", cited}, {"evidence_overlap", overlap}, {"supported", grounded}});
+        if (details.size() >= 32) break;
+    }
+    return {{"claims", claims}, {"supported_claims", supported}, {"invalid_citations", invalid_citations},
+        {"support_rate", claims ? static_cast<double>(supported) / claims : 1.0}, {"verified", invalid_citations == 0 && (!claims || supported == claims)}, {"details", details}};
+}
+
 struct DocumentRecord {
     std::string document_id, version_id, tenant, scope, source_uri, title;
     json metadata = json::object();
@@ -117,7 +236,7 @@ struct VectorSpace {
     }
 };
 
-struct Ranked { size_t chunk = 0; double score = 0; int vector_rank = 0; int lexical_rank = 0; int graph_hops = 0; std::string graph_relation; };
+struct Ranked { size_t chunk = 0; double score = 0, rerank_score = 0, quality_boost = 0; int vector_rank = 0; int lexical_rank = 0; int graph_hops = 0; std::string graph_relation; };
 
 std::vector<std::string> InjectionPatterns(const std::string& text) {
     static const std::vector<std::pair<std::string, std::regex>> patterns = {
@@ -128,6 +247,14 @@ std::vector<std::string> InjectionPatterns(const std::string& text) {
 }
 
 int64_t NowMs() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }
+
+uint64_t ResidentBytes() {
+#if defined(__linux__)
+    std::ifstream statm("/proc/self/statm"); uint64_t total_pages = 0, resident_pages = 0;
+    if (statm >> total_pages >> resident_pages) return resident_pages * static_cast<uint64_t>(sysconf(_SC_PAGESIZE));
+#endif
+    return 0;
+}
 
 bool JsonReferencesAny(const json& value, const std::unordered_set<std::string>& identifiers) {
     if (value.is_string() && identifiers.count(value.get_ref<const std::string&>())) return true;
@@ -198,6 +325,10 @@ struct RagEngine::Impl {
         std::filesystem::create_directories(data_path);
         if (trace_path.has_parent_path()) std::filesystem::create_directories(trace_path.parent_path());
         checkpoint_path = data_path / "ingestion_checkpoints"; std::filesystem::create_directories(checkpoint_path);
+        feedback_path = data_path / "relevance_feedback.jsonl";
+        { std::ifstream input(feedback_path); std::string line; while (std::getline(input, line)) try {
+            const auto row = json::parse(line); feedback_scores[row.at("chunk_id").get<std::string>()] += row.value("relevant", true) ? 1 : -1;
+          } catch (const std::exception&) {} }
         trace_output.open(trace_path, std::ios::app);
         const size_t workers = std::max<size_t>(1, config.server.job_workers);
         for (size_t i = 0; i < workers; ++i) job_threads.emplace_back([this] { Work(); });
@@ -236,6 +367,8 @@ struct RagEngine::Impl {
     std::vector<std::thread> job_threads;
     std::unordered_set<std::string> cancelled_jobs;
     std::filesystem::path checkpoint_path;
+    std::filesystem::path feedback_path;
+    std::unordered_map<std::string, int64_t> feedback_scores;
     bool stopping = false;
     bool replay_skip_lexical = false;
 #if defined(__linux__)
@@ -617,9 +750,9 @@ struct RagEngine::Impl {
         return out;
     }
 
-    std::vector<Ranked> RetrieveLocked(const std::string& query, const std::string& tenant, const std::vector<std::string>& scopes, size_t top_k, const std::vector<float>* query_embedding, bool use_local, const std::vector<size_t>& visible) {
+    std::vector<Ranked> RetrieveLocked(const std::string& query, const std::string& tenant, const std::vector<std::string>& scopes, size_t top_k, const std::vector<float>* query_embedding, bool use_local, const std::vector<size_t>& visible, bool use_lexical = true) {
         const size_t candidates = std::max<size_t>(top_k * 4, top_k);
-        auto lexical = Lexical(query, visible, candidates);
+        auto lexical = use_lexical ? Lexical(query, visible, candidates) : std::vector<std::pair<size_t, double>>{};
         std::vector<std::pair<size_t, double>> vectors;
         if (query_embedding) vectors = Vector(*query_embedding, use_local ? local_space : remote, tenant, scopes, candidates);
         const std::unordered_set<size_t> allowed(visible.begin(), visible.end());
@@ -654,7 +787,8 @@ struct RagEngine::Impl {
                 if (score > existing.score && !existing.vector_rank && !existing.lexical_rank) existing.score = score;
                 return;
             }
-            positions[chunk] = ranked->size(); ranked->push_back({chunk, score, 0, 0, hops, relation(type)}); ++added;
+            Ranked candidate; candidate.chunk = chunk; candidate.score = score; candidate.graph_hops = hops; candidate.graph_relation = relation(type);
+            positions[chunk] = ranked->size(); ranked->push_back(std::move(candidate)); ++added;
         };
         for (size_t seed_index = 0; seed_index < std::min(max_seeds, seeds.size()) && examined < max_neighbors; ++seed_index) {
             const auto& seed = seeds[seed_index]; if (seed.score < minimum_score || seed.chunk >= graph_refs.size()) continue;
@@ -738,6 +872,7 @@ void RagEngine::ResumeIngestionCheckpoints() {
 }
 
 json RagEngine::Ingest(const json& request) {
+    const auto ingestion_started = std::chrono::steady_clock::now();
     if (request.value("background", false) && !request.value("_replay", false)) {
         json queued = request; queued["background"] = false;
         const std::string job_id = impl_->Submit(queued.value("mode", config_.ingestion.default_mode) == "semantic" ? "semantic_ingestion" : "embedding",
@@ -811,6 +946,22 @@ json RagEngine::Ingest(const json& request) {
     metadata["ingestion"] = {{"mode", mode}, {"format", normalized.format}, {"parser_version", normalized.parser_version},
         {"chunker_version", mode == "fast" ? "fast-v1" : "adaptive-v1"}, {"identity", StableId(ingestion_identity)},
         {"structure", DocumentStructureJson(normalized)}, {"analysis", analysis_report}};
+    metadata["content_hash"] = StableId(text);
+    if (!request.value("_replay", false)) {
+        std::shared_lock lock(impl_->state_mutex); double best_similarity = 0; std::string duplicate_document, duplicate_version;
+        size_t examined = 0;
+        for (auto it = impl_->documents.rbegin(); it != impl_->documents.rend() && examined < 200; ++it) {
+            const auto current = impl_->current_versions.find(it->document_id); if (current == impl_->current_versions.end() || current->second != it->version_id || it->tenant != tenant) continue; ++examined;
+            double similarity = it->metadata.value("content_hash", "") == metadata["content_hash"].get<std::string>() ? 1.0 : 0.0;
+            if (!similarity) { std::string sample; for (const auto& existing : impl_->chunks) if (existing.document < impl_->documents.size() && &impl_->documents[existing.document] == &*it) {
+                    if (!sample.empty()) sample += '\n';
+                    sample += impl_->LoadContent(existing); if (sample.size() >= 32768) break; }
+                similarity = SetSimilarity(text.substr(0, 32768), sample); }
+            if (similarity > best_similarity) { best_similarity = similarity; duplicate_document = it->document_id; duplicate_version = it->version_id; }
+        }
+        if (best_similarity >= config_.retrieval.near_duplicate_threshold) metadata["deduplication"] = {{"duplicate", true}, {"similarity", best_similarity}, {"document_id", duplicate_document}, {"version_id", duplicate_version}, {"kind", best_similarity == 1.0 ? "exact" : "near"}};
+        else metadata["deduplication"] = {{"duplicate", false}, {"maximum_similarity", best_similarity}};
+    }
     if (metadata.dump().size() > config_.ingestion.maximum_generated_metadata_bytes) metadata["ingestion"].erase("structure");
     if (metadata.dump().size() > config_.ingestion.maximum_generated_metadata_bytes) metadata["ingestion"]["analysis"].erase("decisions");
     if (metadata.dump().size() > config_.ingestion.maximum_generated_metadata_bytes) throw std::runtime_error("generated ingestion metadata exceeds configured limit");
@@ -927,8 +1078,10 @@ json RagEngine::Ingest(const json& request) {
     }
     if (!superseded_identifiers.empty() && !request.value("_replay", false)) impl_->EraseTraceReferences(superseded_identifiers);
     impl_->Progress(0.95, "published");
+    const double ingestion_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - ingestion_started).count();
     return {{"document_id", document_id}, {"version_id", version_id}, {"generation", generation}, {"chunk_count", created.size()},
         {"mode", mode}, {"format", normalized.format}, {"parser_version", normalized.parser_version}, {"analysis", analysis_report},
+        {"ingestion_elapsed_ms", ingestion_seconds * 1000.0}, {"ingestion_chars_per_second", ingestion_seconds ? text.size() / ingestion_seconds : 0},
         {"remote_indexed", remote_indexed}, {"local_indexed", local_indexed}, {"unchanged", false}};
 }
 
@@ -1074,38 +1227,60 @@ uint64_t RagEngine::TenantStorageBytes(const std::string& tenant) const {
 json RagEngine::Retrieve(const json& request) {
     const auto started = std::chrono::steady_clock::now();
     const std::string query = request.at("query"); if (query.size() > config_.server.max_query_chars) throw std::runtime_error("query too large");
+    const QueryPlan plan = PlanQuery(request, config_);
     const std::string tenant = request.value("tenant_id", "default");
     std::vector<std::string> scopes = request.value("access_scopes", std::vector<std::string>{request.value("access_scope", "public")});
     if (scopes.empty() || scopes.size() > 64) throw std::runtime_error("access_scopes must contain 1 to 64 scopes");
-    const size_t top_k = request.value("top_k", config_.server.top_k);
+    const size_t top_k = std::clamp<size_t>(request.value("top_k", config_.server.top_k), 1, 100);
+    const size_t shortlist = std::min<size_t>(400, top_k * std::max<size_t>(1, config_.retrieval.shortlist_multiplier));
     std::string backend = "bm25"; bool use_local = false; std::vector<float> query_embedding;
-    const bool attempted_remote = config_.embedding.provider != "local";
+    const bool attempted_remote = plan.vector && config_.embedding.provider != "local";
     const auto embedding_started = std::chrono::steady_clock::now(); if (attempted_remote) ++impl_->embedding_calls;
-    try { if (!attempted_remote) throw std::runtime_error("local-only embedding mode"); query_embedding = impl_->remote_embedding.Embed({query}, true).at(0); impl_->remote_healthy = true; backend = "remote"; }
+    try { if (!attempted_remote) throw std::runtime_error("local-only embedding mode"); query_embedding = impl_->remote_embedding.Embed({plan.effective_query}, true).at(0); impl_->remote_healthy = true; backend = "remote"; }
     catch (const std::exception&) {
-        impl_->remote_healthy = false; if (attempted_remote) ++impl_->provider_failures;
-        if (impl_->local.Available()) {
+        if (attempted_remote) { impl_->remote_healthy = false; ++impl_->provider_failures; }
+        if (plan.vector && impl_->local.Available()) {
             std::lock_guard local_lock(impl_->local_embedding_mutex);
-            query_embedding = impl_->local.Embed({query}, true).at(0);
+            query_embedding = impl_->local.Embed({plan.effective_query}, true).at(0);
             use_local = true; backend = impl_->local.UsingGpu() ? "local_gpu" : "local_cpu";
         }
     }
     if (attempted_remote) impl_->embedding_latency_us += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - embedding_started).count());
-    json hits = json::array(); bool approximate = false; double graph_ms = 0; size_t graph_examined = 0, graph_hits = 0;
+    json hits = json::array(); bool approximate = false; double graph_ms = 0; size_t graph_examined = 0, graph_hits = 0; double confidence = 0;
     { std::shared_lock lock(impl_->state_mutex);
       const auto& selected = use_local ? impl_->local_space : impl_->remote;
       approximate = mimicdb::VectorIvfReady(selected.dataset, 0, mimicdb::VectorMetric::kCosine);
       if (query_embedding.empty() || !selected.dimension) { query_embedding.clear(); backend = "bm25"; }
-      const auto visible = impl_->Visible(tenant, scopes);
-      auto ranked = impl_->RetrieveLocked(query, tenant, scopes, top_k, query_embedding.empty() ? nullptr : &query_embedding, use_local, visible);
-      if (request.value("graph_enabled", config_.server.graph_enabled)) {
+      auto visible = impl_->Visible(tenant, scopes);
+      if (request.contains("filter")) visible.erase(std::remove_if(visible.begin(), visible.end(), [&](size_t index) {
+          return !MetadataMatches(impl_->documents[impl_->chunks[index].document].metadata, request["filter"]); }), visible.end());
+      auto ranked = impl_->RetrieveLocked(plan.effective_query, tenant, scopes, shortlist, query_embedding.empty() ? nullptr : &query_embedding, use_local, visible, plan.lexical || query_embedding.empty());
+      const bool graph_enabled = request.contains("graph_enabled") ? request["graph_enabled"].get<bool>() : config_.server.graph_enabled && plan.graph;
+      if (graph_enabled) {
           const auto graph_started = std::chrono::steady_clock::now();
-          const auto stats = impl_->ExpandGraph(&ranked, visible, top_k, config_.server.graph_max_seeds,
+          const auto stats = impl_->ExpandGraph(&ranked, visible, shortlist, config_.server.graph_max_seeds,
               request.value("graph_max_neighbors", config_.server.graph_max_neighbors), config_.server.graph_max_section_children,
               config_.server.graph_min_seed_score);
           graph_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - graph_started).count(); graph_examined = stats.first; graph_hits = stats.second;
       }
-      for (const auto& item : ranked) { const auto& chunk = impl_->chunks[item.chunk]; const auto& document = impl_->documents[chunk.document]; const auto text = impl_->LoadContent(chunk); hits.push_back({{"node_id", chunk.id}, {"chunk_id", chunk.id}, {"document_id", document.document_id}, {"version_id", document.version_id}, {"tenant_id", document.tenant}, {"access_scope", document.scope}, {"text", text}, {"source_uri", document.source_uri}, {"title", document.title}, {"metadata", document.metadata}, {"ordinal", chunk.ordinal}, {"token_estimate", (text.size() + 3) / 4}, {"start_char", chunk.start}, {"end_char", chunk.end}, {"page_start", chunk.page_start}, {"page_end", chunk.page_end}, {"section_path", chunk.section_path}, {"chunking_strategy", chunk.chunking_strategy}, {"contextual_header", chunk.contextual_header}, {"score", item.score}, {"vector_rank", item.vector_rank}, {"lexical_rank", item.lexical_rank}, {"graph_hops", item.graph_hops}, {"graph_relation", item.graph_relation}}); }
+      const double now = static_cast<double>(NowMs());
+      for (auto& item : ranked) {
+          const auto& chunk = impl_->chunks[item.chunk]; const auto& document = impl_->documents[chunk.document]; const std::string text = impl_->LoadContent(chunk);
+          const double lexical = TokenOverlap(plan.effective_query, document.title + " " + chunk.section_path + " " + text);
+          item.rerank_score = plan.rerank ? lexical : 0;
+          const double age_days = std::max(0.0, (now - document.ingested_at_ms) / 86400000.0);
+          const double recency = 1.0 / (1.0 + age_days / 365.0);
+          const double authority = MetadataNumber(document.metadata, "authority", 0.5), source_quality = MetadataNumber(document.metadata, "source_quality", 0.5);
+          int64_t feedback = 0; { std::lock_guard feedback_lock(impl_->mutex); auto found = impl_->feedback_scores.find(chunk.id); if (found != impl_->feedback_scores.end()) feedback = found->second; }
+          item.quality_boost = config_.retrieval.recency_weight * recency + config_.retrieval.authority_weight * std::clamp(authority, 0.0, 1.0) +
+              config_.retrieval.source_quality_weight * std::clamp(source_quality, 0.0, 1.0) + config_.retrieval.feedback_weight * std::clamp(static_cast<double>(feedback), -2.0, 2.0);
+          item.score += config_.retrieval.rerank_weight * item.rerank_score + item.quality_boost;
+      }
+      std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) { return a.score != b.score ? a.score > b.score : a.chunk < b.chunk; });
+      if (ranked.size() > top_k) ranked.resize(top_k);
+      if (!ranked.empty()) { const auto& first = ranked.front(); const double margin = ranked.size() > 1 ? std::max(0.0, first.score - ranked[1].score) : first.score;
+          confidence = std::clamp(0.55 * first.rerank_score + 0.25 * std::min(1.0, first.score) + 0.20 * std::min(1.0, margin * 10.0), 0.0, 1.0); }
+      for (const auto& item : ranked) { const auto& chunk = impl_->chunks[item.chunk]; const auto& document = impl_->documents[chunk.document]; const auto text = impl_->LoadContent(chunk); hits.push_back({{"node_id", chunk.id}, {"chunk_id", chunk.id}, {"document_id", document.document_id}, {"version_id", document.version_id}, {"tenant_id", document.tenant}, {"access_scope", document.scope}, {"text", text}, {"source_uri", document.source_uri}, {"title", document.title}, {"metadata", document.metadata}, {"ordinal", chunk.ordinal}, {"token_estimate", (text.size() + 3) / 4}, {"start_char", chunk.start}, {"end_char", chunk.end}, {"page_start", chunk.page_start}, {"page_end", chunk.page_end}, {"section_path", chunk.section_path}, {"chunking_strategy", chunk.chunking_strategy}, {"contextual_header", chunk.contextual_header}, {"score", item.score}, {"rerank_score", item.rerank_score}, {"quality_boost", item.quality_boost}, {"vector_rank", item.vector_rank}, {"lexical_rank", item.lexical_rank}, {"graph_hops", item.graph_hops}, {"graph_relation", item.graph_relation}}); }
     }
     const std::string trace_id = HexId(query);
     json ids = json::array(); for (const auto& hit : hits) ids.push_back(hit["chunk_id"]);
@@ -1114,8 +1289,10 @@ json RagEngine::Retrieve(const json& request) {
         {"provider", config_.embedding.provider}, {"model", config_.embedding.model}, {"embedding_model_key", use_local ? impl_->local_space.identity : impl_->remote.identity},
         {"approximate", approximate},
         {"retrieved_chunk_ids", ids}, {"injection_patterns", InjectionPatterns(query)}, {"status", "ok"},
-        {"attributes", {{"embedding_backend", backend}, {"graph_ms", graph_ms}, {"graph_examined", graph_examined}, {"graph_hits", graph_hits}}}});
+        {"attributes", {{"embedding_backend", backend}, {"query_class", plan.classification}, {"effective_query", plan.effective_query}, {"rewrites", plan.rewrites}, {"confidence", confidence}, {"graph_ms", graph_ms}, {"graph_examined", graph_examined}, {"graph_hits", graph_hits}}}});
     return {{"hits", hits}, {"embedding_backend", backend}, {"trace_id", trace_id},
+        {"query_plan", {{"classification", plan.classification}, {"effective_query", plan.effective_query}, {"rewrites", plan.rewrites}, {"reranked", plan.rerank}, {"graph_enabled", graph_examined > 0}}},
+        {"confidence", confidence}, {"insufficient_evidence", hits.empty() || confidence < config_.retrieval.minimum_confidence},
         {"graph", {{"elapsed_ms", graph_ms}, {"examined", graph_examined}, {"hits", graph_hits}}}};
 }
 
@@ -1133,6 +1310,16 @@ json RagEngine::AnswerStream(const json& request, const std::function<void(const
         if (!context.empty()) context += "\n\n";
         context += block;
         citations.push_back({{"citation_id", citation++}, {"chunk_id", hit["chunk_id"]}, {"document_id", hit["document_id"]}, {"source_uri", hit["source_uri"]}, {"title", hit["title"]}, {"start_char", hit["start_char"]}, {"end_char", hit["end_char"]}, {"page_start", hit["page_start"]}, {"page_end", hit["page_end"]}, {"section_path", hit["section_path"]}});
+    }
+    if (retrieval.value("insufficient_evidence", true) && !request.value("allow_insufficient_generation", false)) {
+        const std::string answer = "Insufficient evidence to answer from the indexed sources."; if (stream) stream(answer);
+        const std::string trace_id = HexId(answer + request.at("query").get<std::string>());
+        impl_->AddTrace({{"trace_id", trace_id}, {"operation", stream ? "answer_stream" : "answer"}, {"tenant_id", request.value("tenant_id", "default")},
+            {"request_id", request.value("_request_id", "")}, {"started_at_ms", NowMs()}, {"query", request.at("query")}, {"status", "insufficient_evidence"},
+            {"attributes", {{"retrieval_trace_id", retrieval["trace_id"]}, {"confidence", retrieval["confidence"]}}}});
+        return {{"answer", answer}, {"citations", json::array()}, {"context", {{"text", context}, {"token_estimate", (context.size() + 3) / 4}, {"omitted_hits", omitted}}},
+            {"trace_id", trace_id}, {"hits", retrieval["hits"]}, {"embedding_backend", retrieval["embedding_backend"]}, {"confidence", retrieval["confidence"]},
+            {"insufficient_evidence", true}, {"evidence_verification", {{"claims", 0}, {"supported_claims", 0}, {"support_rate", 1.0}, {"verified", true}}}};
     }
     json options = request.value("options", json::object());
     const size_t max_tokens = options.value("max_tokens", config_.server.answer_max_tokens);
@@ -1157,6 +1344,7 @@ json RagEngine::AnswerStream(const json& request, const std::function<void(const
         throw;
     }
     const std::string trace_id = HexId(answer + request.at("query").get<std::string>());
+    const json verification = VerifyAnswerText(answer, citations, context);
     json citation_ids = json::array(); for (const auto& item : citations) citation_ids.push_back(item["chunk_id"]);
     std::string assessed = request.at("query").get<std::string>() + "\n" + context;
     impl_->AddTrace({{"trace_id", trace_id}, {"operation", stream ? "answer_stream" : "answer"}, {"tenant_id", request.value("tenant_id", "default")}, {"request_id", request.value("_request_id", "")},
@@ -1164,8 +1352,9 @@ json RagEngine::AnswerStream(const json& request, const std::function<void(const
         {"query", request.at("query")}, {"provider", config_.chat.provider}, {"model", config_.chat.model},
         {"embedding_model_key", retrieval["embedding_backend"]}, {"citation_chunk_ids", citation_ids},
         {"retrieved_chunk_ids", [&] { json value = json::array(); for (const auto& hit : retrieval["hits"]) value.push_back(hit["chunk_id"]); return value; }()},
-        {"injection_patterns", InjectionPatterns(assessed)}, {"status", "ok"}, {"attributes", {{"retrieval_trace_id", retrieval["trace_id"]}}}});
-    return {{"answer", answer}, {"citations", citations}, {"context", {{"text", context}, {"token_estimate", (context.size() + 3) / 4}, {"omitted_hits", omitted}}}, {"trace_id", trace_id}, {"hits", retrieval["hits"]}, {"embedding_backend", retrieval["embedding_backend"]}};
+        {"injection_patterns", InjectionPatterns(assessed)}, {"status", verification.value("verified", false) ? "ok" : "unverified"}, {"attributes", {{"retrieval_trace_id", retrieval["trace_id"]}, {"evidence_verification", verification}}}});
+    return {{"answer", answer}, {"citations", citations}, {"context", {{"text", context}, {"token_estimate", (context.size() + 3) / 4}, {"omitted_hits", omitted}}}, {"trace_id", trace_id}, {"hits", retrieval["hits"]}, {"embedding_backend", retrieval["embedding_backend"]},
+        {"confidence", retrieval["confidence"]}, {"insufficient_evidence", false}, {"evidence_verification", verification}};
 }
 
 json RagEngine::Job(const std::string& job_id) const { std::lock_guard lock(impl_->mutex); auto it = impl_->jobs.find(job_id); if (it == impl_->jobs.end()) throw std::out_of_range("job not found"); return it->second; }
@@ -1181,6 +1370,23 @@ json RagEngine::CancelJob(const std::string& job_id) {
 json RagEngine::Trace(const std::string& trace_id) const { std::lock_guard lock(impl_->mutex); auto it = impl_->traces.find(trace_id); if (it == impl_->traces.end()) throw std::out_of_range("trace not found"); return it->second; }
 
 json RagEngine::RecentTraces(size_t limit) const { std::lock_guard lock(impl_->mutex); json result = json::array(); limit = std::min(limit, impl_->trace_order.size()); for (size_t i = 0; i < limit; ++i) result.push_back(impl_->traces.at(impl_->trace_order[impl_->trace_order.size() - 1 - i])); return result; }
+
+json RagEngine::RecordFeedback(const json& request) {
+    const std::string chunk_id = request.at("chunk_id"), tenant = request.value("tenant_id", "default");
+    const bool relevant = request.value("relevant", true); if (chunk_id.empty()) throw std::runtime_error("chunk_id is required");
+    { std::shared_lock lock(impl_->state_mutex); bool visible = false; for (const auto& chunk : impl_->chunks) if (chunk.id == chunk_id && chunk.document < impl_->documents.size()) {
+          const auto& document = impl_->documents[chunk.document]; const auto current = impl_->current_versions.find(document.document_id);
+          visible = document.tenant == tenant && current != impl_->current_versions.end() && current->second == document.version_id; break; }
+      if (!visible) throw std::out_of_range("chunk not found"); }
+    json row = {{"feedback_id", HexId(chunk_id)}, {"chunk_id", chunk_id}, {"tenant_id", tenant}, {"trace_id", request.value("trace_id", "")},
+        {"query", request.value("query", "")}, {"relevant", relevant}, {"reason", request.value("reason", "")}, {"created_at_ms", NowMs()}};
+    if (row["reason"].get_ref<const std::string&>().size() > 1024 || row["query"].get_ref<const std::string&>().size() > config_.server.max_query_chars)
+        throw std::runtime_error("feedback text exceeds configured limit");
+    int64_t score = 0; { std::lock_guard lock(impl_->mutex); std::ofstream output(impl_->feedback_path, std::ios::app); output << row.dump() << '\n'; output.close();
+        if (!output.good()) throw std::runtime_error("failed to persist relevance feedback");
+        score = impl_->feedback_scores[chunk_id] += relevant ? 1 : -1; }
+    row["accepted"] = true; row["offline_tuning"] = {{"net_relevance", score}, {"recommended_boost", std::clamp(score * config_.retrieval.feedback_weight, -0.1, 0.1)}}; return row;
+}
 
 json RagEngine::GraphExpand(const json& request) const {
     const auto started = std::chrono::steady_clock::now(); const std::string node_id = request.at("node_id");
@@ -1218,19 +1424,49 @@ json RagEngine::GraphExpand(const json& request) const {
 }
 
 json RagEngine::Evaluate(const json& request) {
+    if (request.contains("compare_modes")) {
+        if (!request["compare_modes"].is_array() || request["compare_modes"].empty() || request["compare_modes"].size() > 3) throw std::runtime_error("compare_modes must contain 1 to 3 modes");
+        json comparisons = json::object();
+        for (const auto& mode_value : request["compare_modes"]) {
+            const std::string mode = mode_value; if (mode != "fast" && mode != "structured" && mode != "semantic") throw std::runtime_error("invalid comparison mode");
+            json variant = request; variant.erase("compare_modes");
+            for (auto& item : variant["cases"]) { json mode_filter = {{"field", "ingestion.mode"}, {"op", "eq"}, {"value", mode}};
+                item["filter"] = item.contains("filter") ? json{{"and", json::array({item["filter"], mode_filter})}} : mode_filter; }
+            comparisons[mode] = Evaluate(variant);
+        }
+        json recommendations = json::object(); const double baseline = comparisons.contains("fast") ? comparisons["fast"].value("ndcg_at_k", 0.0) : 0.0;
+        for (const auto& mode : request["compare_modes"]) recommendations[mode.get<std::string>()] = {{"retain", comparisons[mode.get<std::string>()].value("ndcg_at_k", 0.0) + 1e-9 >= baseline}, {"reason", "retain only when representative nDCG is not below the fast baseline"}};
+        return {{"comparison", comparisons}, {"modes", request["compare_modes"]}, {"retention_recommendations", recommendations}, {"criteria", json::array({"recall_at_k", "mrr", "ndcg_at_k", "answer_correctness", "citation_correctness", "insufficient_evidence_accuracy", "latency_ms_p95", "query_throughput_per_second", "index_bytes", "peak_memory_bytes", "provider_calls"})}};
+    }
     const size_t top_k = request.value("top_k", config_.server.top_k); const bool generate = request.value("generate", false); std::vector<double> latencies;
-    double recalled = 0, reciprocal = 0, terms = 0, cited = 0; const auto& cases = request.at("cases");
+    const uint64_t provider_calls_before = impl_->embedding_calls.load(); const auto evaluation_started = std::chrono::steady_clock::now();
+    double recalled = 0, reciprocal = 0, ndcg = 0, terms = 0, cited = 0, citation_correct = 0, insufficient_correct = 0; const auto& cases = request.at("cases");
     for (const auto& item : cases) {
         auto start = std::chrono::steady_clock::now(); json query = {{"query", item.at("query")}, {"tenant_id", item.value("tenant_id", "default")}, {"access_scope", item.value("access_scope", "public")}, {"top_k", top_k}};
+        for (const auto& field : {"filter", "graph_enabled", "conversation"}) if (item.contains(field)) query[field] = item[field];
         auto retrieval = Retrieve(query); size_t rank = 0, position = 0;
-        for (const auto& hit : retrieval["hits"]) { ++position; for (const auto& source : item.value("relevant_source_uris", json::array())) if (hit["source_uri"] == source) { rank = rank ? std::min(rank, position) : position; } }
-        if (rank) { recalled += 1; reciprocal += 1.0 / rank; }
-        if (generate) { auto answer = Answer(query); std::string folded = answer["answer"]; std::transform(folded.begin(), folded.end(), folded.begin(), [](unsigned char c){ return std::tolower(c); }); bool all = true; for (const auto& term : item.value("required_answer_terms", json::array())) { std::string needle = term; std::transform(needle.begin(), needle.end(), needle.begin(), [](unsigned char c){ return std::tolower(c); }); all &= folded.find(needle) != std::string::npos; } terms += all; cited += folded.find("[1]") != std::string::npos; }
-        else { terms += 1; cited += !retrieval["hits"].empty(); }
+        double dcg = 0; for (const auto& hit : retrieval["hits"]) { ++position; bool relevant = false; for (const auto& source : item.value("relevant_source_uris", json::array())) relevant |= hit["source_uri"] == source;
+            if (relevant) { rank = rank ? std::min(rank, position) : position; dcg += 1.0 / std::log2(position + 1.0); } }
+        const size_t relevant_count = item.value("relevant_source_uris", json::array()).size(); double ideal = 0; for (size_t i = 0; i < std::min(top_k, relevant_count); ++i) ideal += 1.0 / std::log2(i + 2.0);
+        if (rank) { recalled += 1; reciprocal += 1.0 / rank; } ndcg += ideal ? dcg / ideal : retrieval["hits"].empty();
+        const bool expected_insufficient = item.value("expected_insufficient", relevant_count == 0); insufficient_correct += retrieval.value("insufficient_evidence", false) == expected_insufficient;
+        if (generate) { auto answer = Answer(query); std::string folded = Fold(answer["answer"]); bool all = true; for (const auto& term : item.value("required_answer_terms", json::array())) all &= folded.find(Fold(term)) != std::string::npos;
+            terms += all; cited += !answer["citations"].empty() || expected_insufficient; bool citations_ok = true; for (const auto& citation : answer["citations"]) {
+                bool relevant = false; for (const auto& source : item.value("relevant_source_uris", json::array())) relevant |= citation["source_uri"] == source; citations_ok &= relevant; }
+            citation_correct += citations_ok && answer["evidence_verification"].value("invalid_citations", 0) == 0; }
+        else { terms += 1; cited += !retrieval["hits"].empty() || expected_insufficient; citation_correct += !rank ? expected_insufficient : true; }
         latencies.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
     }
     std::sort(latencies.begin(), latencies.end()); const double count = std::max<size_t>(1, cases.size());
-    return {{"cases", cases.size()}, {"recall_at_k", recalled / count}, {"reciprocal_rank", reciprocal / count}, {"answer_term_accuracy", terms / count}, {"citation_rate", cited / count}, {"latency_ms_p50", latencies.empty() ? 0 : latencies[latencies.size()/2]}};
+    const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - evaluation_started).count();
+    uint64_t index_bytes = 0; for (const auto& name : {"lexical.idx", "remote.ivf", "local.ivf"}) if (std::filesystem::exists(impl_->data_path / name)) index_bytes += std::filesystem::file_size(impl_->data_path / name);
+    return {{"cases", cases.size()}, {"recall_at_k", recalled / count}, {"mrr", reciprocal / count}, {"reciprocal_rank", reciprocal / count}, {"ndcg_at_k", ndcg / count},
+        {"answer_correctness", terms / count}, {"answer_term_accuracy", terms / count}, {"citation_rate", cited / count}, {"citation_correctness", citation_correct / count},
+        {"insufficient_evidence_accuracy", insufficient_correct / count}, {"latency_ms_p50", latencies.empty() ? 0 : latencies[latencies.size()/2]},
+        {"latency_ms_p95", latencies.empty() ? 0 : latencies[std::min(latencies.size() - 1, static_cast<size_t>(std::ceil(latencies.size() * 0.95) - 1))]},
+        {"query_throughput_per_second", elapsed ? cases.size() / elapsed : 0}, {"index_bytes", index_bytes},
+        {"peak_memory_bytes", ResidentBytes()},
+        {"provider_calls", impl_->embedding_calls.load() - provider_calls_before}, {"provider_cost", {{"currency", "USD"}, {"estimated", 0.0}, {"note", "local accounting; configure provider billing externally"}}}};
 }
 
 json RagEngine::Health() const {

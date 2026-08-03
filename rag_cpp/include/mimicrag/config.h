@@ -61,6 +61,22 @@ struct IngestionConfig {
     std::string prompt_version = "semantic-ingestion-1";
 };
 
+struct RetrievalConfig {
+    bool classification_enabled = true;
+    bool rewriting_enabled = true;
+    bool reranking_enabled = true;
+    size_t shortlist_multiplier = 4;
+    size_t maximum_rewrites = 3;
+    size_t maximum_rewrite_chars = 512;
+    double rerank_weight = 0.35;
+    double recency_weight = 0.05;
+    double authority_weight = 0.08;
+    double source_quality_weight = 0.08;
+    double feedback_weight = 0.05;
+    double minimum_confidence = 0.18;
+    double near_duplicate_threshold = 0.9;
+};
+
 struct ServerConfig {
     std::string host = "127.0.0.1";
     uint16_t port = 8080;
@@ -98,6 +114,7 @@ struct Config {
     LocalEmbeddingConfig local_embedding;
     ServerConfig server;
     IngestionConfig ingestion;
+    RetrievalConfig retrieval;
     static Config Load(const std::string& path);
 };
 

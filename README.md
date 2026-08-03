@@ -317,6 +317,7 @@ graph construction.
 | `DELETE` | `/v1/documents/{id}` | Tenant-bound document deletion |
 | `GET` | `/v1/storage` | Live and reclaimable storage statistics |
 | `POST` | `/v1/retrieve` | Hybrid evidence retrieval |
+| `POST` | `/v1/feedback` | Persist relevance feedback for offline tuning |
 | `POST` | `/v1/answers` | Cited RAG answer, optionally SSE |
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat endpoint |
 | `POST` | `/v1/graph/expand` | Bounded structural deep dive |

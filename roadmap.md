@@ -101,25 +101,25 @@ LLM selectively only where it produces a measurable relevance improvement.
 
 ## V1.3: retrieval quality
 
-- [ ] Add an optional lightweight reranker over only the final shortlist.
-- [ ] Classify queries to select lexical, vector, hybrid, or graph-heavy execution.
-- [ ] Support bounded query rewriting for abbreviations, domain terminology, and follow-ups.
-- [ ] Add metadata set, range, and compound predicates to RAG retrieval.
-- [ ] Add configurable recency, authority, and source-quality weighting.
-- [ ] Detect duplicate and near-duplicate content during ingestion.
-- [ ] Improve confidence estimation and insufficient-evidence decisions.
-- [ ] Verify that generated claims are supported by their cited passages.
-- [ ] Add relevance-feedback endpoints and offline tuning from accepted feedback.
-- [ ] Keep graph expansion and reranking out of requests where they do not improve results.
+- [x] Add an optional lightweight reranker over only the final shortlist.
+- [x] Classify queries to select lexical, vector, hybrid, or graph-heavy execution.
+- [x] Support bounded query rewriting for abbreviations, domain terminology, and follow-ups.
+- [x] Add metadata set, range, and compound predicates to RAG retrieval.
+- [x] Add configurable recency, authority, and source-quality weighting.
+- [x] Detect duplicate and near-duplicate content during ingestion.
+- [x] Improve confidence estimation and insufficient-evidence decisions.
+- [x] Verify that generated claims are supported by their cited passages.
+- [x] Add relevance-feedback endpoints and offline tuning from accepted feedback.
+- [x] Keep graph expansion and reranking out of requests where they do not improve results.
 
 ### Retrieval acceptance criteria
 
-- [ ] Build a real-document evaluation set covering prose, manuals, policies, tables, code, and
+- [x] Build a real-document evaluation set covering prose, manuals, policies, tables, code, and
   cross-section questions.
-- [ ] Compare fixed, structural, and semantic chunking with Recall@k, MRR/nDCG, answer correctness,
+- [x] Compare fixed, structural, and semantic chunking with Recall@k, MRR/nDCG, answer correctness,
   citation correctness, and insufficient-evidence behavior.
-- [ ] Measure ingestion throughput, query latency, peak memory, index size, and provider cost.
-- [ ] Retain optional processing only for document classes where it produces a repeatable win.
+- [x] Measure ingestion throughput, query latency, peak memory, index size, and provider cost.
+- [x] Retain optional processing only for document classes where it produces a repeatable win.
 
 ## V1.4: ingestion ecosystem
 
