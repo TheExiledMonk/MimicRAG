@@ -285,6 +285,30 @@ imported documents.
 - [x] Complete native SDK/CLI operations and add an operator memory-review panel.
 - [x] Add protocol mocks, opt-in live provider contracts, configurable soak scenarios, latency percentiles, token/cost, stale, harmful, leakage, and deletion metrics.
 
+## V1.9: optional dream state and procedural refinement
+
+- [x] Add an opt-in light/deep reflection cycle for categorization, procedural extraction, conflict detection, and freshness review.
+- [x] Cover profile facts, projects, research notes, preferences, experiences, commitments, working state, cautions, and procedures across the same lifecycle.
+- [x] Add authenticated native dream run/review/action/procedure routes and a management UI review queue.
+- [x] Add an explicitly enabled interval scheduler and a built-in bounded zero-key web-search adapter.
+- [x] Add strictly validated optional model-assisted refinements that cannot mutate source memory.
+- [x] Add conservative policy-controlled automatic approval for deterministic overlays while excluding model and research proposals.
+- [x] Store every suggestion separately from immutable evidence and source memories.
+- [x] Restrict output to refinement operations; forbid procedure replacement, deletion, silent promotion, and external action execution.
+- [x] Add explicit approval/rejection and an approved overlay view that leaves the source procedure unchanged.
+- [x] Add separately opt-in, bounded research through a user-controlled adapter with authoritative-domain preferences.
+- [x] Store external findings as timestamped, untrusted evidence and require review before they influence a refined view.
+- [x] Expose wake-up reports, refinement review, and refined-procedure inspection through the CLI.
+- [x] Cover disabled defaults, source immutability, refinement-only behavior, research budgets, and overlays in tests and benchmarks.
+
+## V1.9.1: unknown-issue cold-start procedure
+
+- [x] Prefer relevant learned procedures before considering a fallback.
+- [x] Add a generic evidence-driven investigation scaffold only for explicitly identified issue-solving tasks.
+- [x] Exclude service, API, endpoint, SDK, authentication, webhook, cloud, and integration usage.
+- [x] Keep the scaffold non-persistent, non-domain-specific, non-executing, and clearly labeled as built-in.
+- [x] Test cold-start activation, exclusions, learned-procedure precedence, and zero memory mutation.
+
 ## V2 candidates: scale and availability
 
 These are larger architectural projects and should be driven by demonstrated demand rather than

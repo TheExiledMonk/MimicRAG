@@ -7,7 +7,7 @@ navigation, cited answer generation, tracing, and evaluation.
 
 The native server does not require a Python runtime, separate vector database, search engine,
 graph database, or embedding server. Optional Python packages provide the V1.4 connector
-ecosystem, SDK/MCP/developer tools, and V1.8 native plus embedded agent memory. Remote model APIs remain
+ecosystem, SDK/MCP/developer tools, and V1.9.1 native plus embedded agent memory with optional dream-state refinement and an unknown-issue cold-start scaffold. Remote model APIs remain
 optional: embeddings can run in-process through the pinned `llama.cpp` submodule with Vulkan,
 CUDA, Metal, or CPU.
 
@@ -33,6 +33,10 @@ with a native server, C++ API, compatibility layers, and management UI.
 - OpenAPI, MCP, portable function schemas, and lightweight C++/Go/Rust/JavaScript/Python clients
 - Optional evidence-bound working, episodic, semantic, procedural, preference, prospective, and
   negative agent memory
+- Optional dream-state categorization, procedural refinement overlays, and bounded research without source-memory replacement
+- Authenticated native dream routes, scheduled maintenance, built-in web research, optional model proposals, and conservative overlay auto-approval
+- Full-lifecycle general memory for confirmed profile facts, projects, research, preferences, experiences, commitments, and task procedures
+- Non-persistent unknown-issue investigation fallback when no relevant learned procedure exists; service/API usage is excluded
 
 ## Architecture
 
@@ -510,9 +514,9 @@ Radeon RX 7900 XTX, Vulkan, and Nomic Embed Text v1.5 Q4_K_M:
 | MimicRAG sequential retrieval | 48 queries | 196.3 QPS, 6.31 ms p95, recall@10 1.0 |
 | MimicRAG four-thread retrieval | 48 queries | 315.6 QPS, 15.43 ms p95, recall@10 1.0 |
 | MimicRAG restart replay | 120 vectors | 46.83 ms |
-| MimicMemory ingestion | 500 memories | 12,576 memories/s |
-| MimicMemory recall | 100 queries | 230.3 QPS, 4.35 ms p95, useful recall 1.0 |
-| MimicMemory safety | 30 assertions | Passed; zero leakage, harmful recall, and stale recall |
+| MimicMemory ingestion | 500 memories | 11,004 memories/s |
+| MimicMemory recall | 100 queries | 206.6 QPS, 4.99 ms p95, useful recall 1.0 |
+| MimicMemory full lifecycle, dream state, and cold start | 38 assertions | Passed; general/procedural memory, safe auto-approval, immutable sources, non-persistent fallback, and zero leakage, harmful recall, and stale recall |
 
 These development smoke results use synthetic, deliberately well-separated benchmark data; they
 are not production-capacity or real-world relevance claims. They do show that the heavily optimized
@@ -581,6 +585,8 @@ Third-party dependencies and the `llama.cpp` submodule remain under their respec
 - [`docs/unified_agent_memory_v1_6.md`](docs/unified_agent_memory_v1_6.md): embedded agent memory
 - [`docs/native_memory_integration_v1_7.md`](docs/native_memory_integration_v1_7.md): native memory persistence, recall, and agent integration
 - [`docs/memory_hardening_v1_8.md`](docs/memory_hardening_v1_8.md): authoritative evidence, lifecycle review, durable workers, and evaluation
+- [`docs/dream_state_v1_9.md`](docs/dream_state_v1_9.md): optional procedural refinement, review overlays, and bounded research
+- [`docs/unknown_issue_fallback_v1_9_1.md`](docs/unknown_issue_fallback_v1_9_1.md): non-persistent cold-start investigation scaffold
 - [`docs/agent_memory_benchmarks.md`](docs/agent_memory_benchmarks.md): deterministic, native HTTP, and live-provider memory benchmarks
 - [`docs/openapi.json`](docs/openapi.json): complete published HTTP contract
 - [`docs/function-schemas.json`](docs/function-schemas.json): portable agent tool schemas

@@ -177,7 +177,7 @@ class MemoryV16Tests(unittest.TestCase):
     def test_job_claim_is_atomic_and_expired_leases_recover(self):
         now = int(time.time() * 1000); request = {"tenant": self.tenant, "owner": self.owner, "evidence_ids": [], "purpose": "conversation", "operation": "extract"}
         with self.store.db: self.store.db.execute("INSERT INTO memory_jobs(id,tenant,owner,request,status,result,error,created_at_ms,updated_at_ms) VALUES(?,?,?,?,?,?,?,?,?)", ("mjob-claim", self.tenant, self.owner, json.dumps(request), "queued", "{}", "", now, now))
-        self.assertTrue(self.store.claim_memory_job("mjob-claim", "worker-a", lease_ms=1)); self.assertFalse(self.store.claim_memory_job("mjob-claim", "worker-b"))
+        self.assertTrue(self.store.claim_memory_job("mjob-claim", "worker-a", lease_ms=1000)); self.assertFalse(self.store.claim_memory_job("mjob-claim", "worker-b"))
         with self.store.db: self.store.db.execute("UPDATE memory_jobs SET lease_until_ms=0 WHERE id='mjob-claim'")
         self.assertTrue(self.store.claim_memory_job("mjob-claim", "worker-b"))
 

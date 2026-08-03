@@ -64,6 +64,7 @@ type AggregateResponse = {
 };
 
 type MemoryReviewItem = { memory_id: string; subject: string; status: string; namespace: string; sensitivity: string };
+type RefinementReviewItem = { refinement_id: string; memory_id: string; operation: string; reason: string; confidence: number; status: string; patch: Record<string, unknown> };
 
 type HealthConfig = {
   bind_host?: string;
@@ -284,6 +285,9 @@ export default function App() {
   const [memoryTenant, setMemoryTenant] = useState("default");
   const [memoryStatus, setMemoryStatus] = useState("");
   const [memoryItems, setMemoryItems] = useState<MemoryReviewItem[]>([]);
+  const [refinementItems, setRefinementItems] = useState<RefinementReviewItem[]>([]);
+  const [refinementStatus, setRefinementStatus] = useState("pending_review");
+  const [dreamMode, setDreamMode] = useState("light");
   const [memoryError, setMemoryError] = useState<string | null>(null);
   const [aggregateBusy, setAggregateBusy] = useState(false);
 
@@ -981,6 +985,33 @@ export default function App() {
     } catch (err) { setMemoryError(err instanceof Error ? err.message : "memory action failed"); }
   }
 
+  async function loadRefinements() {
+    setMemoryError(null);
+    try {
+      const response = await fetch("/api/dream/review", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tenant_id: memoryTenant, status: refinementStatus }) });
+      const payload = await response.json(); if (!response.ok) throw new Error(payload.detail ?? "dream review failed");
+      setRefinementItems(payload.refinements ?? []);
+    } catch (err) { setMemoryError(err instanceof Error ? err.message : "dream review failed"); }
+  }
+
+  async function runDream() {
+    setMemoryError(null);
+    try {
+      const response = await fetch("/api/dream/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tenant_id: memoryTenant, mode: dreamMode, enabled: true }) });
+      const payload = await response.json(); if (!response.ok) throw new Error(payload.detail ?? "dream cycle failed");
+      await loadRefinements();
+    } catch (err) { setMemoryError(err instanceof Error ? err.message : "dream cycle failed"); }
+  }
+
+  async function reviewRefinement(refinementId: string, decision: "approved" | "rejected") {
+    setMemoryError(null);
+    try {
+      const response = await fetch("/api/dream/action", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tenant_id: memoryTenant, refinement_id: refinementId, decision }) });
+      const payload = await response.json(); if (!response.ok) throw new Error(payload.detail ?? "refinement action failed");
+      await loadRefinements();
+    } catch (err) { setMemoryError(err instanceof Error ? err.message : "refinement action failed"); }
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -1262,6 +1293,16 @@ export default function App() {
                   {memoryError ? <div className="error">{memoryError}</div> : null}
                   <table className="data-table"><thead><tr><th>Subject</th><th>Namespace</th><th>Status</th><th>Sensitivity</th><th>Actions</th></tr></thead>
                     <tbody>{memoryItems.map((item) => <tr key={item.memory_id}><td>{item.subject}</td><td>{item.namespace}</td><td>{item.status}</td><td>{item.sensitivity}</td><td>{item.status === "pending_confirmation" ? <button type="button" onClick={() => reviewMemory(item.memory_id, "confirm")}>Confirm</button> : null}{["pending_confirmation", "quarantined"].includes(item.status) ? <button type="button" onClick={() => reviewMemory(item.memory_id, "reject")}>Reject</button> : null}</td></tr>)}</tbody>
+                  </table>
+                  <div className="panel-title">Dream-state refinements</div>
+                  <div className="filters">
+                    <label>Mode<select value={dreamMode} onChange={(event) => setDreamMode(event.target.value)}><option value="light">Light</option><option value="deep">Deep</option></select></label>
+                    <label>Refinement status<select value={refinementStatus} onChange={(event) => setRefinementStatus(event.target.value)}><option value="pending_review">Pending review</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="">All</option></select></label>
+                    <button type="button" className="apply" onClick={runDream}>Run dream cycle</button>
+                    <button type="button" onClick={loadRefinements}>Load refinements</button>
+                  </div>
+                  <table className="data-table"><thead><tr><th>Memory</th><th>Operation</th><th>Reason</th><th>Confidence</th><th>Status</th><th>Actions</th></tr></thead>
+                    <tbody>{refinementItems.map((item) => <tr key={item.refinement_id}><td>{item.memory_id}</td><td>{item.operation}</td><td>{item.reason}</td><td>{item.confidence.toFixed(2)}</td><td>{item.status}</td><td>{item.status === "pending_review" ? <><button type="button" onClick={() => reviewRefinement(item.refinement_id, "approved")}>Approve refinement</button><button type="button" onClick={() => reviewRefinement(item.refinement_id, "rejected")}>Reject refinement</button></> : null}</td></tr>)}</tbody>
                   </table>
                 </div>
               ) : activeTab === "Admin" ? (

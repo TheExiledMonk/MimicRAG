@@ -59,6 +59,13 @@ class MemoryStore:
           created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
           max_attempts INTEGER NOT NULL DEFAULT 3, lease_owner TEXT NOT NULL DEFAULT '', lease_until_ms INTEGER NOT NULL DEFAULT 0);
         CREATE INDEX IF NOT EXISTS memory_jobs_scope ON memory_jobs(tenant,owner,created_at_ms);
+        CREATE TABLE IF NOT EXISTS dream_cycles(id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL,
+          mode TEXT NOT NULL, policy TEXT NOT NULL, report TEXT NOT NULL, created_at_ms INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS refinements(id TEXT PRIMARY KEY, cycle_id TEXT NOT NULL, tenant TEXT NOT NULL,
+          owner TEXT NOT NULL, memory_id TEXT NOT NULL, operation TEXT NOT NULL, patch TEXT NOT NULL,
+          reason TEXT NOT NULL, evidence_ids TEXT NOT NULL, confidence REAL NOT NULL, status TEXT NOT NULL,
+          created_at_ms INTEGER NOT NULL, reviewed_at_ms INTEGER, review_reason TEXT NOT NULL DEFAULT '');
+        CREATE INDEX IF NOT EXISTS refinements_scope ON refinements(tenant,owner,status,created_at_ms);
         """)
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(memory_jobs)")}
         for name, declaration in {"attempts": "INTEGER NOT NULL DEFAULT 0", "max_attempts": "INTEGER NOT NULL DEFAULT 3", "lease_owner": "TEXT NOT NULL DEFAULT ''", "lease_until_ms": "INTEGER NOT NULL DEFAULT 0"}.items():
@@ -289,8 +296,66 @@ class MemoryStore:
             if not include_evidence_content: item["content"] = "[redacted; content_hash=" + item["content_hash"] + "]"
             evidence.append(item)
         relations = [dict(row) for row in self.db.execute("SELECT * FROM relations WHERE tenant=? AND owner=?", (tenant, owner))]
-        return {"format": "mimicrag-memory-export", "version": 1, "tenant": tenant, "owner": owner,
-                "exported_at_ms": _now(), "memories": memories, "evidence": evidence, "relations": relations}
+        dream_cycles = [dict(row) for row in self.db.execute("SELECT * FROM dream_cycles WHERE tenant=? AND owner=?", (tenant, owner))]
+        refinements = [dict(row) for row in self.db.execute("SELECT * FROM refinements WHERE tenant=? AND owner=?", (tenant, owner))]
+        return {"format": "mimicrag-memory-export", "version": 2, "tenant": tenant, "owner": owner,
+                "exported_at_ms": _now(), "memories": memories, "evidence": evidence, "relations": relations,
+                "dream_cycles": dream_cycles, "refinements": refinements}
+
+    def save_dream_cycle(self, cycle_id: str, *, tenant: str, owner: str, mode: str, policy: dict[str, Any],
+                         report: dict[str, Any], suggestions: list[dict[str, Any]]) -> None:
+        now = _now()
+        with self.db:
+            self.db.execute("INSERT INTO dream_cycles VALUES(?,?,?,?,?,?,?)", (cycle_id, tenant, owner, mode,
+                json.dumps(policy, sort_keys=True), json.dumps(report, sort_keys=True), now))
+            for item in suggestions:
+                if not self.db.execute("SELECT 1 FROM memories WHERE id=? AND tenant=? AND owner=?", (item["memory_id"], tenant, owner)).fetchone():
+                    raise ValueError("refinement source memory not found")
+                for evidence_id in item["evidence_ids"]: self._evidence(evidence_id, tenant, owner)
+                self.db.execute("INSERT INTO refinements VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (item["id"], cycle_id,
+                    tenant, owner, item["memory_id"], item["operation"], json.dumps(item["patch"], sort_keys=True),
+                    item["reason"], json.dumps(item["evidence_ids"]), item["confidence"], "pending_review",
+                    item["created_at_ms"], None, ""))
+            self._audit(tenant, owner, "dream.complete", cycle_id, "reflection produced refinement proposals",
+                {"mode": mode, "suggestions": len(suggestions), "source_memories_modified": 0})
+
+    def dream_report(self, cycle_id: str, *, tenant: str, owner: str) -> dict[str, Any]:
+        row = self.db.execute("SELECT * FROM dream_cycles WHERE id=? AND tenant=? AND owner=?", (cycle_id, tenant, owner)).fetchone()
+        if not row: raise ValueError("dream cycle not found")
+        refinements = self.refinements(tenant=tenant, owner=owner, cycle_id=cycle_id)["refinements"]
+        return {"cycle_id": cycle_id, "mode": row["mode"], "policy": json.loads(row["policy"]),
+            "report": json.loads(row["report"]), "refinements": refinements, "created_at_ms": row["created_at_ms"]}
+
+    def refinements(self, *, tenant: str, owner: str, status: str = "", cycle_id: str = "") -> dict[str, Any]:
+        query, values = "SELECT * FROM refinements WHERE tenant=? AND owner=?", [tenant, owner]
+        if status: query += " AND status=?"; values.append(status)
+        if cycle_id: query += " AND cycle_id=?"; values.append(cycle_id)
+        items = []
+        for row in self.db.execute(query + " ORDER BY created_at_ms,id", values):
+            item = dict(row); item["patch"] = json.loads(item["patch"]); item["evidence_ids"] = json.loads(item["evidence_ids"]); items.append(item)
+        return {"refinements": items, "count": len(items), "tenant": tenant, "owner": owner}
+
+    def review_refinement(self, refinement_id: str, *, tenant: str, owner: str, decision: str,
+                          reason: str = "operator review") -> dict[str, Any]:
+        if decision not in {"approved", "rejected"}: raise ValueError("decision must be approved or rejected")
+        row = self.db.execute("SELECT status,memory_id FROM refinements WHERE id=? AND tenant=? AND owner=?", (refinement_id, tenant, owner)).fetchone()
+        if not row or row["status"] != "pending_review": raise ValueError("refinement is not pending review")
+        with self.db:
+            self.db.execute("UPDATE refinements SET status=?,reviewed_at_ms=?,review_reason=? WHERE id=?", (decision, _now(), reason, refinement_id))
+            self._audit(tenant, owner, "refinement." + decision, refinement_id, reason,
+                {"memory_id": row["memory_id"], "source_memory_modified": False})
+        item = dict(self.db.execute("SELECT * FROM refinements WHERE id=?", (refinement_id,)).fetchone())
+        item["patch"] = json.loads(item["patch"]); item["evidence_ids"] = json.loads(item["evidence_ids"])
+        return item
+
+    def refined_procedure(self, memory_id: str, *, tenant: str, owner: str) -> dict[str, Any]:
+        source = self.inspect(memory_id, tenant=tenant, owner=owner)["memory"]
+        overlays = self.refinements(tenant=tenant, owner=owner, status="approved")["refinements"]
+        overlays = [item for item in overlays if item["memory_id"] == memory_id]
+        categorized = any(item["operation"] == "categorize" and item["patch"].get("category") == "procedure" for item in overlays)
+        if source["namespace"] != "procedural" and not categorized: raise ValueError("memory has no approved procedural classification")
+        return {"source": source, "approved_refinements": overlays, "immutable_source": True,
+            "notice": "Refinements are overlays; the source procedure has not been replaced or rewritten."}
 
     def audit(self, *, tenant: str, owner: str, limit: int = 100) -> list[dict[str, Any]]:
         return [dict(row) for row in self.db.execute("SELECT * FROM audit WHERE tenant=? AND owner=? ORDER BY id DESC LIMIT ?", (tenant, owner, min(max(limit, 1), 1000)))]

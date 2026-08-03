@@ -179,11 +179,12 @@ json OpenApiSpec() {
         {"/v1/memory/correct", "post"}, {"/v1/memory/confirm", "post"}, {"/v1/memory/review", "post"},
         {"/v1/memory/reject", "post"}, {"/v1/memory/dispute", "post"}, {"/v1/memory/due", "post"},
         {"/v1/memory/export", "post"}, {"/v1/memory/{memory_id}", "delete"}, {"/v1/retrieve/combined", "post"},
+        {"/v1/dream/run", "post"}, {"/v1/dream/review", "post"}, {"/v1/dream/action", "post"}, {"/v1/dream/procedure", "post"},
         {"/v1/chat/completions", "post"}};
     json paths = json::object();
     for (const auto& [path, method] : routes) paths[path][method] = {{"responses", {{"200", {{"description", "Successful response"}}}}}};
     paths["/v1/jobs/{job_id}"]["delete"] = {{"responses", {{"200", {{"description", "Cancellation result"}}}}}};
-    return {{"openapi", "3.1.0"}, {"info", {{"title", "MimicRAG HTTP API"}, {"version", "1.8.0"}}},
+    return {{"openapi", "3.1.0"}, {"info", {{"title", "MimicRAG HTTP API"}, {"version", "1.9.1"}}},
         {"paths", std::move(paths)}, {"components", {{"securitySchemes", {{"bearerAuth", {{"type", "http"}, {"scheme", "bearer"}}}}}}}};
 }
 
@@ -211,7 +212,7 @@ void Handle(int socket, RagEngine& engine, std::shared_mutex& engine_gate) {
         const std::string identity = auth.key ? auth.id : (supplied.empty() ? fields["x-forwarded-for"] : "legacy");
         const std::string owner_identity = auth.key ? auth.id : "legacy";
         if (!RateAllowed(identity, server_config.requests_per_minute)) { Reply(socket, 429, {{"error", "rate limit exceeded"}}); return; }
-        const bool memory_write = (method == "POST" && (path == "/v1/evidence" || path == "/v1/memory/remember" || path == "/v1/memory/correct" || path == "/v1/memory/confirm" || path == "/v1/memory/reject" || path == "/v1/memory/dispute")) ||
+        const bool memory_write = (method == "POST" && (path == "/v1/evidence" || path == "/v1/memory/remember" || path == "/v1/memory/correct" || path == "/v1/memory/confirm" || path == "/v1/memory/reject" || path == "/v1/memory/dispute" || path == "/v1/dream/run" || path == "/v1/dream/action")) ||
             (method == "DELETE" && path.rfind("/v1/memory/", 0) == 0);
         const std::string permission = (method == "POST" && (path == "/v1/documents" || path == "/v1/feedback")) || (method == "DELETE" && path.rfind("/v1/documents/", 0) == 0) || memory_write ? "write" :
             (path == "/metrics" || path == "/v1/storage" || path.rfind("/v1/jobs", 0) == 0 || path.rfind("/v1/traces", 0) == 0 || path.rfind("/v1/tenants", 0) == 0 || path.rfind("/v1/maintenance", 0) == 0 || path == "/v1/evaluations") ? "admin" : "read";
@@ -229,13 +230,13 @@ void Handle(int socket, RagEngine& engine, std::shared_mutex& engine_gate) {
         if (method == "GET" && path.rfind("/v1/traces", 0) == 0) { size_t limit = 100; const auto marker = path.find("limit="); if (marker != std::string::npos) limit = std::stoull(path.substr(marker + 6)); Reply(socket, 200, {{"traces", engine.RecentTraces(std::min<size_t>(limit, 1000))}}); return; }
         json input = body.empty() ? json::object() : json::parse(body);
         input["_request_id"] = fields["x-request-id"].empty() ? "req-" + std::to_string(requests_total.load()) : fields["x-request-id"];
-        if (path.rfind("/v1/memory", 0) == 0 || path.rfind("/v1/evidence", 0) == 0 || path == "/v1/retrieve/combined") input["owner"] = owner_identity;
+        if (path.rfind("/v1/memory", 0) == 0 || path.rfind("/v1/evidence", 0) == 0 || path.rfind("/v1/dream", 0) == 0 || path == "/v1/retrieve/combined") input["owner"] = owner_identity;
         const std::string tenant = path.rfind("/v1/tenants/", 0) == 0 ? path.substr(12) : input.value("tenant_id", "default");
         const std::string scope = input.value("access_scope", input.value("metadata", json::object()).value("access_scope", "public"));
         const bool tenant_scoped = path.rfind("/v1/documents", 0) == 0 || path.rfind("/v1/retrieve", 0) == 0 ||
             path.rfind("/v1/answers", 0) == 0 || path.rfind("/v1/chat/completions", 0) == 0 || path.rfind("/v1/graph", 0) == 0 ||
             path.rfind("/v1/evaluations", 0) == 0 || path.rfind("/v1/feedback", 0) == 0 || path.rfind("/v1/tenants", 0) == 0 ||
-            path.rfind("/v1/memory", 0) == 0 || path.rfind("/v1/evidence", 0) == 0 || path == "/v1/retrieve/combined" || path == "/v1/maintenance/retention";
+            path.rfind("/v1/memory", 0) == 0 || path.rfind("/v1/evidence", 0) == 0 || path.rfind("/v1/dream", 0) == 0 || path == "/v1/retrieve/combined" || path == "/v1/maintenance/retention";
         bool scopes_allowed = Contains(auth.key ? auth.key->scopes : std::vector<std::string>{}, scope);
         if (auth.key && input.contains("access_scopes")) for (const auto& requested : input["access_scopes"])
             scopes_allowed &= requested.is_string() && Contains(auth.key->scopes, requested.get<std::string>());
@@ -259,7 +260,7 @@ void Handle(int socket, RagEngine& engine, std::shared_mutex& engine_gate) {
             json sanitized = input;
             for (const auto& internal : {"_replay", "_operation", "_record_version", "ingested_at_ms", "analysis_results", "remote_embeddings", "local_embeddings", "remote_model_identity", "local_model_identity"}) sanitized.erase(internal);
             if (sanitized.contains("metadata")) for (auto it = sanitized["metadata"].begin(); it != sanitized["metadata"].end(); ++it)
-                if (it.key().rfind("memory_", 0) == 0 || it.key().rfind("evidence_", 0) == 0 || it.key() == "memory_record" || it.key() == "evidence_record")
+                if (it.key().rfind("memory_", 0) == 0 || it.key().rfind("evidence_", 0) == 0 || it.key().rfind("refinement_", 0) == 0 || it.key() == "memory_record" || it.key() == "evidence_record" || it.key() == "refinement_record")
                     throw std::runtime_error("reserved internal metadata field");
             Reply(socket, 200, engine.Ingest(sanitized));
         }
@@ -287,6 +288,10 @@ void Handle(int socket, RagEngine& engine, std::shared_mutex& engine_gate) {
         else if (method == "POST" && path == "/v1/memory/inspect") Reply(socket, 200, engine.MemoryInspect(input));
         else if (method == "POST" && path == "/v1/memory/review") Reply(socket, 200, engine.MemoryReview(input));
         else if (method == "POST" && path == "/v1/memory/export") Reply(socket, 200, engine.MemoryExport(input));
+        else if (method == "POST" && path == "/v1/dream/run") Reply(socket, 200, engine.DreamRun(input));
+        else if (method == "POST" && path == "/v1/dream/review") Reply(socket, 200, engine.DreamReview(input));
+        else if (method == "POST" && path == "/v1/dream/action") Reply(socket, 200, engine.RefinementAction(input));
+        else if (method == "POST" && path == "/v1/dream/procedure") Reply(socket, 200, engine.RefinedProcedure(input));
         else if (method == "GET" && path == "/v1/memory/review") Reply(socket, 200, engine.MemoryReview(input));
         else if (method == "GET" && path == "/v1/memory/export") Reply(socket, 200, engine.MemoryExport(input));
         else if (method == "GET" && path.rfind("/v1/memory/", 0) == 0) { json request = input; request["memory_id"] = path.substr(11); Reply(socket, 200, engine.MemoryInspect(request)); }

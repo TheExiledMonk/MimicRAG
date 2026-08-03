@@ -91,6 +91,10 @@ V1.8 native memory routes include `/v1/evidence`, `/v1/evidence/inspect`,
 `DELETE /v1/memory/{id}`, and `/v1/retrieve/combined`. Evidence and memory ownership is derived
 from the authenticated key identity, and these internal records never appear in ordinary retrieval.
 
+V1.9.1 adds authenticated `/v1/dream/run`, `/v1/dream/review`, `/v1/dream/action`, and
+`/v1/dream/procedure`. Refinements persist in a separate internal partition, are excluded from
+ordinary retrieval, and remain overlays even after approval.
+
 Lifecycle operations include tenant-bound `DELETE /v1/documents/{id}` (with a JSON
 `tenant_id`) and `GET /v1/storage`. Native `inspect` and `compact` commands validate the
 versioned catalog and atomically retain only current document generations. Compaction is an

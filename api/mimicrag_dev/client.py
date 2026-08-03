@@ -52,3 +52,7 @@ class Client:
     def review_memories(self, **options): return self.request("POST", "/v1/memory/review", options)
     def export_memories(self, **options): return self.request("POST", "/v1/memory/export", options)
     def retrieve_combined(self, query: str, **options): return self.request("POST", "/v1/retrieve/combined", {"query": query, **options})
+    def run_dream(self, mode: str = "light", **options): return self.request("POST", "/v1/dream/run", {"mode": mode, "enabled": True, **options})
+    def review_refinements(self, **options): return self.request("POST", "/v1/dream/review", options)
+    def act_on_refinement(self, refinement_id: str, decision: str, **options): return self.request("POST", "/v1/dream/action", {"refinement_id": refinement_id, "decision": decision, **options})
+    def refined_procedure(self, memory_id: str, **options): return self.request("POST", "/v1/dream/procedure", {"memory_id": memory_id, **options})

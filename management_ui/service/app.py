@@ -105,6 +105,22 @@ class MemoryActionRequest(BaseModel):
     action: str
     reason: str = "operator rejection"
 
+class DreamRunRequest(BaseModel):
+    tenant_id: str = "default"
+    mode: str = "light"
+    enabled: bool = False
+    auto_approve_categories: bool = False
+
+class DreamReviewRequest(BaseModel):
+    tenant_id: str = "default"
+    status: str = "pending_review"
+
+class RefinementActionRequest(BaseModel):
+    tenant_id: str = "default"
+    refinement_id: str
+    decision: str
+    reason: str = "operator review"
+
 
 def _memory_request(path: str, payload: dict[str, Any]) -> dict[str, Any]:
     base = os.getenv("MIMICRAG_BASE_URL", "http://127.0.0.1:8080").rstrip("/")
@@ -709,3 +725,16 @@ def memory_action(payload: MemoryActionRequest) -> dict[str, Any]:
     routes = {"confirm": "/v1/memory/confirm", "reject": "/v1/memory/reject"}
     if payload.action not in routes: raise HTTPException(status_code=400, detail="action must be confirm or reject")
     return _memory_request(routes[payload.action], {"tenant_id": payload.tenant_id, "memory_id": payload.memory_id, "reason": payload.reason})
+
+@app.post("/api/dream/run")
+def dream_run(payload: DreamRunRequest) -> dict[str, Any]:
+    return _memory_request("/v1/dream/run", payload.dict())
+
+@app.post("/api/dream/review")
+def dream_review(payload: DreamReviewRequest) -> dict[str, Any]:
+    return _memory_request("/v1/dream/review", payload.dict())
+
+@app.post("/api/dream/action")
+def dream_action(payload: RefinementActionRequest) -> dict[str, Any]:
+    if payload.decision not in {"approved", "rejected"}: raise HTTPException(status_code=400, detail="decision must be approved or rejected")
+    return _memory_request("/v1/dream/action", payload.dict())

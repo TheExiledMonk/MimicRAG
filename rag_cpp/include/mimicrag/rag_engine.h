@@ -47,6 +47,10 @@ public:
     nlohmann::json MemoryDispute(const nlohmann::json& request);
     nlohmann::json MemoryDue(const nlohmann::json& request) const;
     nlohmann::json MemoryExport(const nlohmann::json& request) const;
+    nlohmann::json DreamRun(const nlohmann::json& request);
+    nlohmann::json DreamReview(const nlohmann::json& request) const;
+    nlohmann::json RefinementAction(const nlohmann::json& request);
+    nlohmann::json RefinedProcedure(const nlohmann::json& request) const;
     nlohmann::json RetrieveCombined(const nlohmann::json& request);
     nlohmann::json Health() const;
     const Config& GetConfig() const { return config_; }

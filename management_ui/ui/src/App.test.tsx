@@ -25,4 +25,15 @@ describe("App", () => {
     expect(await screen.findByText("style")).toBeInTheDocument(); fireEvent.click(screen.getByText("Confirm"));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/memory/action", expect.objectContaining({ method: "POST" })));
   });
+
+  it("runs and reviews dream-state refinements", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, config: {} }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ cycle_id: "dream-1" }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ refinements: [{ refinement_id: "ref-1", memory_id: "mem-1", operation: "categorize", reason: "Structured memory", confidence: .9, status: "pending_review", patch: {} }] }) });
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch); render(<App />);
+    fireEvent.click(screen.getByText("Memory")); fireEvent.click(screen.getByText("Run dream cycle"));
+    expect(await screen.findByText("Structured memory")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith("/api/dream/run", expect.objectContaining({ method: "POST" }));
+  });
 });

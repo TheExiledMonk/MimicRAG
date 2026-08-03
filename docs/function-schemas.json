@@ -1,5 +1,5 @@
 {
-  "version": "1.8",
+  "version": "1.9.1",
   "description": "Portable tool schemas for trusted wrappers. Hosts should inject tenant/scope and authentication from policy where possible.",
   "functions": [
     {

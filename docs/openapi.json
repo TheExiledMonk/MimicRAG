@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "MimicRAG HTTP API",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "description": "Native single-node retrieval, ingestion, answer, graph, evaluation, trace, lifecycle, and authenticated agent-memory API."
   },
   "servers": [{"url": "http://127.0.0.1:8080"}],
@@ -42,6 +42,10 @@
     "/v1/memory/review": {"post": {"operationId": "reviewMemories", "responses": {"200": {"description": "Owner-scoped lifecycle review queue"}}}},
     "/v1/memory/export": {"post": {"operationId": "exportMemories", "responses": {"200": {"description": "Portable owner-scoped memory export"}}}},
     "/v1/memory/{memory_id}": {"delete": {"operationId": "forgetMemory", "responses": {"200": {"description": "Verified memory deletion"}}}},
+    "/v1/dream/run": {"post": {"operationId": "runDreamCycle", "responses": {"200": {"description": "Persisted native refinement proposals without source mutation"}}}},
+    "/v1/dream/review": {"post": {"operationId": "reviewDreamRefinements", "responses": {"200": {"description": "Owner-scoped refinement review queue"}}}},
+    "/v1/dream/action": {"post": {"operationId": "reviewDreamRefinement", "responses": {"200": {"description": "Approve or reject a refinement overlay"}}}},
+    "/v1/dream/procedure": {"post": {"operationId": "getRefinedProcedure", "responses": {"200": {"description": "Immutable source memory with approved overlays"}}}},
     "/v1/retrieve/combined": {"post": {"operationId": "retrieveCombined", "responses": {"200": {"description": "Separate authoritative document and lower-trust memory tiers"}}}},
     "/v1/chat/completions": {"post": {"operationId": "createChatCompletion", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ChatRequest"}}}}, "responses": {"200": {"description": "OpenAI-compatible response or SSE stream"}}}}
   },

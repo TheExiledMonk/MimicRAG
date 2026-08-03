@@ -19,6 +19,8 @@
 - [V1.6 unified agent memory](unified_agent_memory_v1_6.md)
 - [V1.7 native memory integration](native_memory_integration_v1_7.md)
 - [V1.8 memory hardening](memory_hardening_v1_8.md)
+- [V1.9 optional dream state](dream_state_v1_9.md)
+- [V1.9.1 unknown-issue fallback](unknown_issue_fallback_v1_9_1.md)
 - [Agent memory benchmark suite](agent_memory_benchmarks.md)
 
 ## MimicDB APIs and architecture

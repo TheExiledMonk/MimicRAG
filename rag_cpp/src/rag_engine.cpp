@@ -1100,7 +1100,7 @@ json RagEngine::DeleteDocument(const json& request) {
         });
         if (document == impl_->documents.rend() || document->tenant != tenant)
             return {{"document_id", document_id}, {"deleted", false}, {"reason", "not_found"}};
-        if (!request.value("_allow_internal", false) && (document->metadata.value("memory_record", false) || document->metadata.value("evidence_record", false)))
+        if (!request.value("_allow_internal", false) && (document->metadata.value("memory_record", false) || document->metadata.value("evidence_record", false) || document->metadata.value("refinement_record", false)))
             throw std::runtime_error("internal records require their dedicated lifecycle API");
         generation = impl_->current_generations[document_id] + 1;
         for (const auto& chunk : impl_->chunks)
@@ -1256,7 +1256,7 @@ json RagEngine::Retrieve(const json& request) {
       auto visible = impl_->Visible(tenant, scopes);
       if (!request.value("_include_memory", false)) visible.erase(std::remove_if(visible.begin(), visible.end(), [&](size_t index) {
           const auto& metadata = impl_->documents[impl_->chunks[index].document].metadata;
-          return metadata.value("memory_record", false) || metadata.value("evidence_record", false); }), visible.end());
+          return metadata.value("memory_record", false) || metadata.value("evidence_record", false) || metadata.value("refinement_record", false); }), visible.end());
       if (request.contains("filter")) visible.erase(std::remove_if(visible.begin(), visible.end(), [&](size_t index) {
           return !MetadataMatches(impl_->documents[impl_->chunks[index].document].metadata, request["filter"]); }), visible.end());
       auto ranked = impl_->RetrieveLocked(plan.effective_query, tenant, scopes, shortlist, query_embedding.empty() ? nullptr : &query_embedding, use_local, visible, plan.lexical || query_embedding.empty());
@@ -1548,7 +1548,72 @@ json RagEngine::MemoryExport(const json& request) const {
         records.push_back(std::move(record));
     }
     for (const auto& id : evidence_ids) evidence.push_back(EvidenceInspect({{"evidence_id", id}, {"tenant_id", review["tenant_id"]}, {"owner", review["owner"]}}));
-    return {{"format", "mimicrag-native-memory-export"}, {"version", 2}, {"tenant_id", review["tenant_id"]}, {"owner", review["owner"]}, {"exported_at_ms", NowMs()}, {"memories", records}, {"evidence", evidence}};
+    const auto refinements = DreamReview({{"tenant_id", review["tenant_id"]}, {"owner", review["owner"]}});
+    return {{"format", "mimicrag-native-memory-export"}, {"version", 3}, {"tenant_id", review["tenant_id"]}, {"owner", review["owner"]}, {"exported_at_ms", NowMs()}, {"memories", records}, {"evidence", evidence}, {"refinements", refinements["refinements"]}};
+}
+
+json RagEngine::DreamRun(const json& request) {
+    if (!request.value("enabled", false)) throw std::runtime_error("dream state is disabled; enabled=true is required");
+    const std::string tenant = request.value("tenant_id", "default"), owner = request.at("owner"), mode = request.value("mode", "light");
+    if (mode != "light" && mode != "deep" && mode != "research") throw std::runtime_error("invalid dream mode");
+    const size_t maximum = std::clamp<size_t>(request.value("maximum_suggestions", size_t{100}), 1, 1000);
+    const bool auto_categories = request.value("auto_approve_categories", false); const std::string cycle_id = "dream-" + StableId(owner + std::to_string(NowMs()));
+    json candidates = json::array();
+    { std::shared_lock lock(impl_->state_mutex); for (const auto& document : impl_->documents) { const auto current = impl_->current_versions.find(document.document_id);
+        if (candidates.size() >= maximum || document.tenant != tenant || current == impl_->current_versions.end() || current->second != document.version_id ||
+            !document.metadata.value("memory_record", false) || document.metadata.value("memory_owner", "") != owner || document.metadata.value("memory_status", "") != "active") continue;
+        const std::string ns = document.metadata.value("memory_namespace", "semantic"), subject = Fold(document.metadata.value("memory_subject", ""));
+        std::string category = ns == "procedural" ? "procedure" : ns == "preference" ? "preference" : ns == "prospective" ? "commitment" : ns == "episodic" ? "experience" : ns == "working" ? "current_task" : ns == "negative" ? "caution" : "fact";
+        if (subject.find("name") != std::string::npos || subject.find("country") != std::string::npos || subject.find("timezone") != std::string::npos) category = "profile";
+        else if (subject.find("research") != std::string::npos || subject.find("study") != std::string::npos) category = "research";
+        else if (subject.find("book") != std::string::npos || subject.find("project") != std::string::npos) category = "project";
+        candidates.push_back({{"memory_id", document.document_id}, {"operation", "categorize"}, {"patch", {{"category", category}, {"namespace", ns}}},
+            {"reason", "Native deterministic categorization without source mutation"}, {"confidence", .9}, {"evidence_ids", document.metadata.value("memory_evidence_ids", json::array())}, {"status", auto_categories ? "approved" : "pending_review"}});
+    }}
+    json refinements = json::array();
+    for (auto& candidate : candidates) { const std::string id = "refine-" + StableId(cycle_id + candidate["memory_id"].get<std::string>() + candidate["operation"].get<std::string>());
+        json metadata = {{"refinement_record", true}, {"refinement_id", id}, {"refinement_cycle_id", cycle_id}, {"refinement_owner", owner},
+            {"refinement_memory_id", candidate["memory_id"]}, {"refinement_operation", candidate["operation"]}, {"refinement_patch", candidate["patch"]},
+            {"refinement_reason", candidate["reason"]}, {"refinement_confidence", candidate["confidence"]}, {"refinement_evidence_ids", candidate["evidence_ids"]},
+            {"refinement_status", candidate["status"]}, {"refinement_created_at_ms", NowMs()}, {"policy_authority", false}, {"trust", "memory_refinement"}};
+        Ingest({{"text", candidate["reason"].get<std::string>()}, {"source_uri", "refinement://" + id}, {"document_id", id}, {"tenant_id", tenant},
+            {"access_scope", request.value("access_scope", "public")}, {"title", candidate["operation"]}, {"format", "text"}, {"mode", "fast"}, {"metadata", metadata}});
+        candidate["refinement_id"] = id; refinements.push_back(candidate);
+    }
+    return {{"cycle_id", cycle_id}, {"mode", mode}, {"reviewed", candidates.size()}, {"suggestions", refinements.size()}, {"auto_approved", auto_categories ? refinements.size() : 0},
+        {"refinements", refinements}, {"safety", {{"source_memories_modified", 0}, {"automatic_promotions", 0}, {"external_actions_executed", 0}}}};
+}
+
+json RagEngine::DreamReview(const json& request) const {
+    const std::string tenant = request.value("tenant_id", "default"), owner = request.at("owner"), status = request.value("status", ""); json refinements = json::array();
+    std::shared_lock lock(impl_->state_mutex); for (const auto& document : impl_->documents) { const auto current = impl_->current_versions.find(document.document_id); const auto& meta = document.metadata;
+        if (document.tenant != tenant || current == impl_->current_versions.end() || current->second != document.version_id || !meta.value("refinement_record", false) ||
+            meta.value("refinement_owner", "") != owner || (!status.empty() && meta.value("refinement_status", "") != status)) continue;
+        refinements.push_back({{"refinement_id", document.document_id}, {"cycle_id", meta.value("refinement_cycle_id", "")}, {"memory_id", meta.value("refinement_memory_id", "")},
+            {"operation", meta.value("refinement_operation", "")}, {"patch", meta.value("refinement_patch", json::object())}, {"reason", meta.value("refinement_reason", "")},
+            {"confidence", meta.value("refinement_confidence", 0.0)}, {"status", meta.value("refinement_status", "")}}); }
+    return {{"refinements", refinements}, {"count", refinements.size()}, {"tenant_id", tenant}, {"owner", owner}};
+}
+
+json RagEngine::RefinementAction(const json& request) {
+    const std::string id = request.at("refinement_id"), tenant = request.value("tenant_id", "default"), owner = request.at("owner"), decision = request.at("decision");
+    if (decision != "approved" && decision != "rejected") throw std::runtime_error("decision must be approved or rejected");
+    json found; std::string scope;
+    { std::shared_lock lock(impl_->state_mutex); for (const auto& document : impl_->documents) { const auto current = impl_->current_versions.find(document.document_id);
+        if (document.document_id == id && document.tenant == tenant && current != impl_->current_versions.end() && current->second == document.version_id &&
+            document.metadata.value("refinement_record", false) && document.metadata.value("refinement_owner", "") == owner) { found = document.metadata; scope = document.scope; break; } } }
+    if (found.empty()) throw std::out_of_range("refinement not found");
+    if (found.value("refinement_status", "") != "pending_review") throw std::runtime_error("refinement is not pending review");
+    found["refinement_status"] = decision; found["refinement_reviewed_at_ms"] = NowMs(); found["refinement_review_reason"] = request.value("reason", "operator review");
+    auto indexed = Ingest({{"text", found.value("refinement_reason", "")}, {"source_uri", "refinement://" + id}, {"document_id", id}, {"tenant_id", tenant},
+        {"access_scope", scope}, {"title", found.value("refinement_operation", "")}, {"format", "text"}, {"mode", "fast"}, {"metadata", found}});
+    return {{"refinement_id", id}, {"status", decision}, {"source_memory_modified", false}, {"indexed", indexed}};
+}
+
+json RagEngine::RefinedProcedure(const json& request) const {
+    const auto memory = MemoryInspect(request); auto review = DreamReview({{"tenant_id", memory["tenant_id"]}, {"owner", memory["owner"]}, {"status", "approved"}}); json overlays = json::array();
+    for (const auto& item : review["refinements"]) if (item.value("memory_id", "") == memory["memory_id"].get<std::string>()) overlays.push_back(item);
+    return {{"source", memory}, {"approved_refinements", overlays}, {"immutable_source", true}, {"notice", "Refinements are overlays; source memory was not rewritten."}};
 }
 
 json RagEngine::RetrieveCombined(const json& request) {

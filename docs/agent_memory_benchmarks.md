@@ -13,7 +13,9 @@ It measures ingestion throughput, recall p50/p95/p99 and throughput, retrieval q
 size, bytes per memory, and peak resident memory. It asserts evidence binding; tenant/owner
 isolation; sensitivity, confirmation, quarantine, and rejection boundaries; correction precedence;
 stale suppression; reinforcement and relations; reminders; working-memory promotion; document
-authority; export/audit/deletion; local extraction/cache; and durable jobs/retries/dead letters.
+authority; export/audit/deletion; local extraction/cache; durable jobs/retries/dead letters;
+opt-in dream-state refinement overlays with immutable sources; and the non-persistent unknown-issue
+fallback with service/API exclusions.
 
 ## Native HTTP
 

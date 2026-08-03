@@ -102,3 +102,7 @@ def test_memory_review_and_action_proxy(monkeypatch):
     assert client.post("/api/memory/action", json={"tenant_id": "acme", "memory_id": "mem-1", "action": "reject", "reason": "unsafe"}).status_code == 200
     assert calls[0] == ("/v1/memory/review", {"tenant_id": "acme", "status": "quarantined"})
     assert calls[1][0] == "/v1/memory/reject"
+    assert client.post("/api/dream/run", json={"tenant_id": "acme", "mode": "deep", "enabled": True}).status_code == 200
+    assert client.post("/api/dream/review", json={"tenant_id": "acme", "status": "pending_review"}).status_code == 200
+    assert client.post("/api/dream/action", json={"tenant_id": "acme", "refinement_id": "ref-1", "decision": "approved"}).status_code == 200
+    assert calls[2][0] == "/v1/dream/run"; assert calls[3][0] == "/v1/dream/review"; assert calls[4][0] == "/v1/dream/action"

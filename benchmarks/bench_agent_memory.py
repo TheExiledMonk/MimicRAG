@@ -10,9 +10,9 @@ from typing import Any, Callable
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "api"))
 from mimicrag_dev.client import Client as MimicRagClient
-from mimicrag_memory import (AnthropicCompatibleMemoryModel, LocalHeuristicMemoryModel, MemoryManager,
+from mimicrag_memory import (AnthropicCompatibleMemoryModel, DreamEngine, DreamPolicy, LocalHeuristicMemoryModel, MemoryManager,
     MemoryNamespace, MemoryRecord, MemoryStore, MiniMaxMemoryModel,
-    MiniMaxOpenAICompatibleMemoryModel, Visibility)
+    MiniMaxOpenAICompatibleMemoryModel, Visibility, procedure_for_issue)
 from mimicrag_memory.evaluation import evaluate_cases
 
 
@@ -159,6 +159,37 @@ def embedded(args: argparse.Namespace, out: Results) -> None:
             tombstoned = store.db.execute("SELECT deleted_at_ms FROM evidence WHERE id=?", (deleted_evidence,)).fetchone()[0]
             out.check(tombstoned is not None, "evidence erasure tombstone")
 
+            project_evidence = store.append_evidence(tenant=tenant, owner=owner, kind="conversation",
+                content="I am writing a book about maritime navigation.", provenance="bench:general")
+            project_memory = store.remember(make_record(tenant, owner, project_evidence, MemoryNamespace.SEMANTIC,
+                "book project", "I am writing a book about maritime navigation."))
+            research_evidence = store.append_evidence(tenant=tenant, owner=owner, kind="observation",
+                content="Research compares navigation instruments and oral traditions.", provenance="bench:general")
+            research_memory = store.remember(make_record(tenant, owner, research_evidence, MemoryNamespace.SEMANTIC,
+                "book research", "Research compares navigation instruments and oral traditions."))
+
+            source_before = store.inspect(ids[3], tenant=tenant, owner=owner)["memory"]
+            dream = DreamEngine(store, policy=DreamPolicy(enabled=True, maximum_memories=args.memories + 20,
+                maximum_suggestions=args.memories, auto_approve_operations={"categorize"})).run(
+                tenant=tenant, owner=owner, mode="deep")
+            source_after = store.inspect(ids[3], tenant=tenant, owner=owner)["memory"]
+            out.check(dream["suggestions"] > 0, "dream refinements produced")
+            out.check(source_before == source_after and dream["safety"]["source_memories_modified"] == 0, "dream source immutability")
+            categories = {item["memory_id"]: item["patch"].get("category") for item in dream["refinements"] if item["operation"] == "categorize"}
+            out.check(categories.get(project_memory["id"]) == "project" and categories.get(research_memory["id"]) == "research", "general memory categorization")
+            out.check(dream["auto_approved"] > 0, "safe deterministic auto approval")
+            proposal = next(item for item in dream["refinements"] if item["status"] == "pending_review" and store.inspect(item["memory_id"], tenant=tenant, owner=owner)["memory"]["namespace"] == "procedural")
+            store.review_refinement(proposal["id"], tenant=tenant, owner=owner, decision="approved")
+            out.check(store.refined_procedure(proposal["memory_id"], tenant=tenant, owner=owner)["approved_refinements"], "dream approval overlay")
+            count_before = store.db.execute("SELECT count(*) FROM memories").fetchone()[0]
+            unknown = procedure_for_issue(store, "An unfamiliar binary becomes corrupted after repeated retries",
+                tenant=tenant, owner=owner, task_kind="issue", minimum_score=.99)
+            out.check(unknown["status"] == "unknown_issue_scaffold" and not unknown["persistent"], "unknown issue fallback")
+            out.check(store.db.execute("SELECT count(*) FROM memories").fetchone()[0] == count_before, "fallback is nonpersistent")
+            excluded = procedure_for_issue(store, "How do I use this API endpoint?",
+                tenant=tenant, owner=owner, task_kind="issue", minimum_score=.99)
+            out.check(excluded["status"] == "authoritative_guidance_required", "service usage fallback exclusion")
+
             manager = MemoryManager(store, LocalHeuristicMemoryModel())
             try:
                 evidence = store.append_evidence(tenant=tenant, owner=owner, kind="conversation",
@@ -190,7 +221,7 @@ def native(args: argparse.Namespace, out: Results) -> None:
         lambda: client.recall_memory("compact output", tenant_id=tenant, purpose="conversation"))
     out.check(any(m["memory_id"] == memory["memory_id"] for m in recalled["memories"]), "native recall")
     out.check(client.inspect_evidence(evidence["evidence_id"], tenant_id=tenant)["evidence_id"] == evidence["evidence_id"], "native evidence")
-    out.check(client.export_memories(tenant_id=tenant)["version"] == 2, "native export")
+    out.check(client.export_memories(tenant_id=tenant)["version"] >= 2, "native export")
     out.check(client.forget_memory(memory["memory_id"], tenant_id=tenant)["deleted"], "native deletion")
     out.sections["native_http"] = "passed"
 

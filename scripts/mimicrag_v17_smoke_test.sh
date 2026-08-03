@@ -49,8 +49,14 @@ reminder_id=$(printf '%s' "$reminder" | sed -n 's/.*"memory_id":"\([^"]*\)".*/\1
 post /v1/memory/due '{"tenant_id":"memory","purpose":"planning","context":"release approved"}' | grep -q "$reminder_id"
 review=$(post /v1/memory/recall '{"tenant_id":"memory","query":"detailed release reports","purpose":"planning"}')
 [[ "$review" == *"$new_id"* && "$review" != *"$memory_id"* ]]
+dream=$(post /v1/dream/run '{"tenant_id":"memory","enabled":true,"mode":"deep"}')
+refinement_id=$(printf '%s' "$dream" | sed -n 's/.*"refinement_id":"\([^"]*\)".*/\1/p')
+[[ -n "$refinement_id" && "$dream" == *'"source_memories_modified":0'* ]]
+post /v1/dream/action "{\"tenant_id\":\"memory\",\"refinement_id\":\"$refinement_id\",\"decision\":\"approved\"}" | grep -q '"source_memory_modified":false'
+post /v1/dream/procedure "{\"tenant_id\":\"memory\",\"memory_id\":\"$pending_id\"}" | grep -q '"immutable_source":true'
 curl -fsS -X DELETE -H 'Authorization: Bearer secret-a' -H 'Content-Type: application/json' --data '{"tenant_id":"memory"}' "http://127.0.0.1:18087/v1/memory/$new_id" | grep -q '"deleted":true'
 stop
 start
 post /v1/memory/inspect "{\"tenant_id\":\"memory\",\"memory_id\":\"$pending_id\"}" | grep -q '"memory_status":"disputed"'
+post /v1/dream/review '{"tenant_id":"memory","status":"approved"}' | grep -q "$refinement_id"
 echo 'mimicrag V1.7 memory integration smoke passed'
