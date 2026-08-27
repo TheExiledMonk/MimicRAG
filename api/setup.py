@@ -2,34 +2,33 @@ from setuptools import Extension, find_packages, setup
 from pathlib import Path
 
 root = Path(__file__).resolve().parent.parent
-engine_src = root / "engine" / "src"
 
 sources = [
-    str(Path(__file__).parent / "mimicapi" / "_mimicdb.cpp"),
-    str(engine_src / "bitmap.cpp"),
-    str(engine_src / "field_vector.cpp"),
-    str(engine_src / "dataset.cpp"),
-    str(engine_src / "mask.cpp"),
-    str(engine_src / "predicate.cpp"),
-    str(engine_src / "segment.cpp"),
-    str(engine_src / "scan.cpp"),
-    str(engine_src / "metrics.cpp"),
-    str(engine_src / "aggregate.cpp"),
-    str(engine_src / "hash.cpp"),
-    str(engine_src / "schema.cpp"),
-    str(engine_src / "dictionary.cpp"),
-    str(engine_src / "array_codec.cpp"),
-    str(engine_src / "compression.cpp"),
-    str(engine_src / "simd_output.cpp"),
-    str(engine_src / "simd_dispatch.cpp"),
-    str(engine_src / "vector_search.cpp"),
-    str(engine_src / "vector_gpu.cpp"),
-    str(engine_src / "vector_ivf.cpp"),
+    "mimicapi/_mimicdb.cpp",
+    "../engine/src/bitmap.cpp",
+    "../engine/src/field_vector.cpp",
+    "../engine/src/dataset.cpp",
+    "../engine/src/mask.cpp",
+    "../engine/src/predicate.cpp",
+    "../engine/src/segment.cpp",
+    "../engine/src/scan.cpp",
+    "../engine/src/metrics.cpp",
+    "../engine/src/aggregate.cpp",
+    "../engine/src/hash.cpp",
+    "../engine/src/schema.cpp",
+    "../engine/src/dictionary.cpp",
+    "../engine/src/array_codec.cpp",
+    "../engine/src/compression.cpp",
+    "../engine/src/simd_output.cpp",
+    "../engine/src/simd_dispatch.cpp",
+    "../engine/src/vector_search.cpp",
+    "../engine/src/vector_gpu.cpp",
+    "../engine/src/vector_ivf.cpp",
 ]
 
 core_sources = [
-    str(Path(__file__).parent / "mimicapi" / "_mimicapi_core.cpp"),
-    str(root / "api_cpp" / "src" / "mimicapi_core.cpp"),
+    "mimicapi/_mimicapi_core.cpp",
+    "../api_cpp/src/mimicapi_core.cpp",
 ]
 
 ext = Extension(
@@ -52,9 +51,9 @@ ext_core = Extension(
 )
 
 mongo_sources = [
-    str(Path(__file__).parent / "mimicapi" / "_mimicapi_mongo.cpp"),
-    str(root / "api_cpp" / "src" / "mimicapi_mongo.cpp"),
-    str(root / "api_cpp" / "src" / "mimicapi_core.cpp"),
+    "mimicapi/_mimicapi_mongo.cpp",
+    "../api_cpp/src/mimicapi_mongo.cpp",
+    "../api_cpp/src/mimicapi_core.cpp",
 ]
 
 ext_mongo = Extension(
