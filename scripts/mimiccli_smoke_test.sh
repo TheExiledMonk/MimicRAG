@@ -18,7 +18,14 @@ fi
 TEST_ROOT="$(mktemp -d /tmp/mimiccli_smoke.XXXX)"
 TEST_HOME="${TEST_ROOT}/home"
 TEST_DATA="${TEST_ROOT}/data"
-PORT="$(shuf -i 15000-20000 -n 1)"
+PORT="$(python3 - <<'PY'
+import socket
+
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+)"
 mkdir -p "${TEST_HOME}" "${TEST_DATA}"
 
 CONFIG_PATH="${TEST_ROOT}/mimicdb_test.conf"
@@ -39,13 +46,26 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for _ in {1..30}; do
-  if ss -ltn | rg -q ":${PORT}"; then
+server_ready() {
+  python3 - "${PORT}" <<'PY'
+import socket
+import sys
+
+try:
+    with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=0.2):
+        pass
+except OSError:
+    raise SystemExit(1)
+PY
+}
+
+for _ in {1..100}; do
+  if server_ready; then
     break
   fi
   sleep 0.2
 done
-if ! ss -ltn | rg -q ":${PORT}"; then
+if ! server_ready; then
   echo "server failed to start on ${PORT}" >&2
   cat "${SERVER_LOG}" >&2
   exit 1

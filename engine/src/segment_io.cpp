@@ -358,9 +358,12 @@ bool SegmentReader::Read(Segment* out_segment) {
 #endif
                         return false;
                     }
-                    const auto* lengths = reinterpret_cast<const uint32_t*>(aux_ptr);
+                    std::vector<uint32_t> lengths(static_cast<size_t>(col.value_count));
+                    if (length_bytes > 0) {
+                        std::memcpy(lengths.data(), aux_ptr, length_bytes);
+                    }
                     const auto* bytes = reinterpret_cast<const uint8_t*>(data_ptr);
-                    if (!field.LoadVarlen(lengths, static_cast<size_t>(col.value_count),
+                    if (!field.LoadVarlen(lengths.data(), static_cast<size_t>(col.value_count),
                                           bytes, static_cast<size_t>(col.data_bytes))) {
 #if defined(__unix__) || defined(__APPLE__)
                         munmap(const_cast<uint8_t*>(base), mapped_size);
@@ -385,8 +388,10 @@ bool SegmentReader::Read(Segment* out_segment) {
 #endif
                     return false;
                 }
-                const auto* lengths =
-                    reinterpret_cast<const uint32_t*>(decoded_lengths.data());
+                std::vector<uint32_t> lengths(static_cast<size_t>(col.value_count));
+                if (length_bytes > 0) {
+                    std::memcpy(lengths.data(), decoded_lengths.data(), length_bytes);
+                }
                 size_t total_bytes = 0;
                 for (size_t j = 0; j < static_cast<size_t>(col.value_count); ++j) {
                     total_bytes += lengths[j];
@@ -399,7 +404,7 @@ bool SegmentReader::Read(Segment* out_segment) {
 #endif
                     return false;
                 }
-                    if (!field.LoadVarlen(lengths, static_cast<size_t>(col.value_count),
+                    if (!field.LoadVarlen(lengths.data(), static_cast<size_t>(col.value_count),
                                           decoded_bytes.data(),
                                           static_cast<size_t>(decoded_bytes.size()))) {
 #if defined(__unix__) || defined(__APPLE__)
@@ -459,23 +464,39 @@ bool SegmentReader::Read(Segment* out_segment) {
             view.type = field_type;
             view.row_count = static_cast<size_t>(col.value_count);
             view.ops = CompressionOpsFor(kind);
-            view.data = data_ptr;
+            std::vector<uint64_t> aligned_data(
+                (static_cast<size_t>(col.data_bytes) + sizeof(uint64_t) - 1) /
+                sizeof(uint64_t));
+            std::vector<uint64_t> aligned_aux(
+                (static_cast<size_t>(col.aux_bytes) + sizeof(uint64_t) - 1) /
+                sizeof(uint64_t));
+            if (col.data_bytes > 0) {
+                std::memcpy(aligned_data.data(), data_ptr, static_cast<size_t>(col.data_bytes));
+            }
+            if (col.aux_bytes > 0) {
+                std::memcpy(aligned_aux.data(), aux_ptr, static_cast<size_t>(col.aux_bytes));
+            }
+            view.data = aligned_data.empty()
+                ? nullptr : reinterpret_cast<const uint8_t*>(aligned_data.data());
             view.data_size = static_cast<size_t>(col.data_bytes);
-            view.aux = aux_ptr;
+            view.aux = aligned_aux.empty()
+                ? nullptr : reinterpret_cast<const uint8_t*>(aligned_aux.data());
             view.aux_size = static_cast<size_t>(col.aux_bytes);
+            std::vector<uint64_t> aligned_validity;
             if (col.validity_words > 0) {
                 const size_t validity_bytes =
                     static_cast<size_t>(col.validity_words) * sizeof(uint64_t);
-                view.validity_words =
-                    reinterpret_cast<const uint64_t*>(data_ptr + col.data_bytes);
-                view.validity_word_count = static_cast<size_t>(col.validity_words);
-                view.validity_bit_count = static_cast<size_t>(col.value_count);
                 if (offset + col.aux_bytes + col.data_bytes + validity_bytes > mapped_size) {
 #if defined(__unix__) || defined(__APPLE__)
                     munmap(const_cast<uint8_t*>(base), mapped_size);
 #endif
                     return false;
                 }
+                aligned_validity.resize(static_cast<size_t>(col.validity_words));
+                std::memcpy(aligned_validity.data(), data_ptr + col.data_bytes, validity_bytes);
+                view.validity_words = aligned_validity.data();
+                view.validity_word_count = static_cast<size_t>(col.validity_words);
+                view.validity_bit_count = static_cast<size_t>(col.value_count);
             }
             switch (field_type) {
                 case FieldType::kInt32: {
@@ -542,10 +563,10 @@ bool SegmentReader::Read(Segment* out_segment) {
 #endif
                 return false;
             }
-            field.LoadValidityWords(
-                reinterpret_cast<const uint64_t*>(base + offset),
-                static_cast<size_t>(col.validity_words),
-                static_cast<size_t>(col.value_count));
+            std::vector<uint64_t> validity(static_cast<size_t>(col.validity_words));
+            std::memcpy(validity.data(), base + offset, validity_bytes);
+            field.LoadValidityWords(validity.data(), validity.size(),
+                                    static_cast<size_t>(col.value_count));
             offset += validity_bytes;
         }
         fields.push_back(std::move(field));

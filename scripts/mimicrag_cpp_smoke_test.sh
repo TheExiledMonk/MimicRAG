@@ -1,17 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
 server_bin="${1:?server binary required}"
-config="${2:?config required}"
+template="${2:?config required}"
+test_dir=$(mktemp -d)
+config=$(mktemp)
 log_file=$(mktemp)
-"$server_bin" "$config" >"$log_file" 2>&1 &
+sed "s|/tmp/mimicrag_cpp_test_data|$test_dir|g" "$template" > "$config"
+"$server_bin" serve --config "$config" >"$log_file" 2>&1 &
 server_pid=$!
-cleanup() { kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; }
+cleanup() {
+    kill "$server_pid" 2>/dev/null || true
+    wait "$server_pid" 2>/dev/null || true
+    rm -rf "$test_dir" "$config" "$log_file"
+}
 trap cleanup EXIT
 
-for _ in $(seq 1 100); do
+for _ in {1..200}; do
     if curl -fsS http://127.0.0.1:18081/health >/dev/null 2>&1; then break; fi
-    sleep 0.05
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+        cat "$log_file" >&2
+        exit 1
+    fi
+    sleep 0.1
 done
+if ! curl -fsS http://127.0.0.1:18081/health >/dev/null 2>&1; then
+    echo "MimicRAG server did not become healthy" >&2
+    cat "$log_file" >&2
+    exit 1
+fi
 
 health=$(curl -fsS http://127.0.0.1:18081/health)
 [[ "$health" == *'"implementation":"c++"'* ]]
@@ -49,7 +65,7 @@ storage=$(curl -fsS http://127.0.0.1:18081/v1/storage)
 queued=$(curl -fsS -X POST http://127.0.0.1:18081/v1/documents -H 'Content-Type: application/json' \
     --data '{"text":"Background native embedding job.","source_uri":"smoke://job","tenant_id":"smoke","background":true}')
 job_id=$(printf '%s' "$queued" | sed -n 's/.*"job_id":"\([^"]*\)".*/\1/p')
-for _ in $(seq 1 100); do
+for _ in {1..100}; do
     job=$(curl -fsS "http://127.0.0.1:18081/v1/jobs/$job_id")
     [[ "$job" == *'"status":"complete"'* ]] && break
     [[ "$job" == *'"status":"failed"'* ]] && exit 1

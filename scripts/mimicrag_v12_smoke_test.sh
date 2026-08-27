@@ -10,10 +10,19 @@ sed "s|__DATA_PATH__|$test_dir|g" "$template" >"$config"
 server_pid=$!
 cleanup() { kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; rm -rf "$test_dir" "$config" "$log_file"; }
 trap cleanup EXIT
-for _ in $(seq 1 100); do
+for _ in {1..200}; do
     curl -fsS http://127.0.0.1:18084/health -H 'Authorization: Bearer operator-secret' >/dev/null 2>&1 && break
-    sleep 0.05
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+        cat "$log_file" >&2
+        exit 1
+    fi
+    sleep 0.1
 done
+if ! curl -fsS http://127.0.0.1:18084/health -H 'Authorization: Bearer operator-secret' >/dev/null 2>&1; then
+    echo "MimicRAG server did not become healthy" >&2
+    cat "$log_file" >&2
+    exit 1
+fi
 
 structured=$(curl -fsS -X POST http://127.0.0.1:18084/v1/documents \
     -H 'Authorization: Bearer operator-secret' -H 'Content-Type: application/json' \
@@ -34,7 +43,7 @@ queued=$(curl -fsS -X POST http://127.0.0.1:18084/v1/documents \
     --data '{"tenant_id":"test","source_uri":"test://background.txt","mode":"structured","background":true,"text":"Background ingestion preserves its source text and reports durable progress."}')
 job_id=$(printf '%s' "$queued" | sed -n 's/.*"job_id":"\([^"]*\)".*/\1/p')
 [[ -n "$job_id" && "$queued" == *'"status":"queued"'* ]]
-for _ in $(seq 1 100); do
+for _ in {1..100}; do
     job=$(curl -fsS "http://127.0.0.1:18084/v1/jobs/$job_id" -H 'Authorization: Bearer operator-secret')
     [[ "$job" == *'"progress":'* && "$job" == *'"stage":'* ]]
     [[ "$job" == *'"status":"complete"'* ]] && break

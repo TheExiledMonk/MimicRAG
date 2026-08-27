@@ -16,11 +16,16 @@ make_config() {
 start() {
     local config=$1 port=$2
     "$binary" serve --config "$config" >"$root/server-$port.log" 2>&1 & pid=$!
-    for _ in {1..100}; do
+    for _ in {1..200}; do
         curl -fsS -H 'Authorization: Bearer secret-a' "http://127.0.0.1:$port/ready" >/dev/null 2>&1 && return
-        sleep .05
+        if ! kill -0 "$pid" 2>/dev/null; then
+            cat "$root/server-$port.log" >&2
+            exit 1
+        fi
+        sleep .1
     done
-    cat "$root/server-$port.log"
+    echo "MimicRAG server did not become ready on port $port" >&2
+    cat "$root/server-$port.log" >&2
     exit 1
 }
 stop() { kill "$pid"; wait "$pid" || true; pid=""; }
@@ -40,7 +45,8 @@ stop
 
 memory_config=$root/memory.json
 make_config false true 18088 "$memory_config"
-sed -i '/"chat":/d' "$memory_config"
+sed '/"chat":/d' "$memory_config" > "$memory_config.tmp"
+mv "$memory_config.tmp" "$memory_config"
 start "$memory_config" 18088
 health=$(curl -fsS -H 'Authorization: Bearer secret-a' http://127.0.0.1:18088/health)
 [[ "$health" == *'"memory":true'* && "$health" == *'"rag":false'* ]]
@@ -66,7 +72,8 @@ stop
 
 disabled_config=$root/disabled.json
 make_config false false 18091 "$disabled_config"
-sed -i -e '/"chat":/d' -e '/"embedding":/d' "$disabled_config"
+sed -e '/"chat":/d' -e '/"embedding":/d' "$disabled_config" > "$disabled_config.tmp"
+mv "$disabled_config.tmp" "$disabled_config"
 start "$disabled_config" 18091
 health=$(curl -fsS -H 'Authorization: Bearer secret-a' http://127.0.0.1:18091/health)
 [[ "$health" == *'"memory":false'* && "$health" == *'"rag":false'* ]]
