@@ -37,8 +37,8 @@ std::string MarkdownType(const std::string& line, bool code) {
     if (std::regex_search(line, std::regex(R"(^\s*(?:[-*+]\s+|\d+[.)]\s+))"))) return "list_item";
     if (std::regex_search(line, std::regex(R"(^\s*\|.*\|\s*$)"))) return "table_row";
     if (trimmed.rfind("[^", 0) == 0 && trimmed.find("]:") != std::string::npos) return "footnote";
-    if (std::regex_search(line, std::regex(R"(!\[[^]]*\]\([^)]+\))"))) return "caption";
-    if (std::regex_search(line, std::regex(R"(\[[^]]+\]\([^)]+\))"))) return "citation";
+    if (std::regex_search(line, std::regex(R"(!\[[^\]]*\]\([^)]+\))"))) return "caption";
+    if (std::regex_search(line, std::regex(R"(\[[^\]]+\]\([^)]+\))"))) return "citation";
     return "paragraph";
 }
 
