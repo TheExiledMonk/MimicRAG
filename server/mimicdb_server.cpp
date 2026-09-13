@@ -44,6 +44,9 @@
 #include "mimicdb/vector_search.h"
 #include "mimicdb/vector_gpu.h"
 #include "mimicdb/vector_ivf.h"
+#ifdef MIMICDB_ENABLE_LICENSE_CHECK
+#include "license_check.h"
+#endif
 
 bool IsLocalBind(const std::string& host);
 bool IsRootInitialized(const std::string& auth_db_path);
@@ -6448,17 +6451,41 @@ int main(int argc, char** argv) {
         config_path = env_config;
     }
     bool rotate_host_key = false;
+    bool print_license_id = false;
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--rotate-host-key") {
+        const std::string argument(argv[i]);
+        if (argument == "--rotate-host-key") {
             rotate_host_key = true;
+        } else if (argument == "--print-license-id") {
+            print_license_id = true;
         }
     }
+#ifdef MIMICDB_ENABLE_LICENSE_CHECK
+    if (print_license_id) {
+        const std::string id = mimicdb::LicenseMachineId();
+        if (id.empty()) {
+            std::cerr << "unable to determine license machine ID\n";
+            return 1;
+        }
+        std::cout << id << "\n";
+        return 0;
+    }
+#endif
     if (argc > 2 && (std::string(argv[1]) == "--config" || std::string(argv[1]) == "-c")) {
         config_path = argv[2];
     }
 
     ServerConfig config;
     LoadConfig(config_path, &config);
+#ifdef MIMICDB_ENABLE_LICENSE_CHECK
+    std::string license_reason;
+    std::cerr << "license_machine_id=" << mimicdb::LicenseMachineId() << "\n";
+    if (!mimicdb::HasMachineLicense(config.storage_root, &license_reason)) {
+        std::cerr << "license check failed: " << license_reason
+                  << "; shutting down\n";
+        return 1;
+    }
+#endif
     mimicdb::CompressionConfig compression;
     compression.enabled = config.compression_enabled;
     compression.enable_dictionary = config.compression_enable_dict;

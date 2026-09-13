@@ -190,3 +190,28 @@ filters, and ingestion rate.
 The recorded 10,000-article Wikipedia test is a useful reference, not a sizing
 guarantee. Keep headroom for mapped pages, temporary index builds, model buffers,
 concurrent response assembly, and operating-system cache.
+
+## Optional compile-time machine licensing
+
+The native `mimicdb_server` can be built with a fail-closed startup license check. It is disabled by default. On Linux it uses `/etc/machine-id`; on macOS it uses the system `kern.uuid`:
+
+```sh
+cmake -S . -B build-licensed \
+  -DMIMICDB_ENABLE_LICENSE_CHECK=ON \
+  -DMIMICDB_LICENSE_URL=https://raw.githubusercontent.com/ORG/REPO/main/mimicdb-licenses.txt
+cmake --build build-licensed --target mimicdb_server
+build-licensed/server/mimicdb_server --print-license-id
+```
+
+The CMake configure/build output also prints the code for the build machine. `--print-license-id` is authoritative for the deployment host, which matters when building on one machine and deploying on another. Put the required code on one line in the HTTPS text file. The code is SHA-256 of a namespaced machine identifier, so the raw machine identifier is not sent over the network. The request uses TLS certificate and hostname verification, a ten-second timeout, and a one MiB response limit. A successful validation is recorded under the configured storage root; if the first check cannot connect, the first-run timestamp starts a seven-day offline grace period. Later transport failures are allowed for up to seven days after the last successful validation. If the service responds but the machine code is absent (or the applicable seven-day grace period expires), startup exits with status 1. No database or listening socket is opened before the check.
+
+To run the server in the background:
+
+```sh
+mkdir -p /var/log/mimicdb
+nohup build-licensed/server/mimicdb_server --config /etc/mimicdb/mimicdb.conf \
+  > /var/log/mimicdb/server.log 2>&1 &
+echo $! > /var/run/mimicdb.pid
+```
+
+Stop it gracefully with `kill -TERM "$(cat /var/run/mimicdb.pid)"`.
