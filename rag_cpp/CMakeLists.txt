@@ -1,4 +1,7 @@
 find_package(CURL REQUIRED)
+if(MIMICDB_ENABLE_LICENSE_CHECK)
+    find_package(OpenSSL REQUIRED)
+endif()
 find_package(BZip2 REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
@@ -60,6 +63,17 @@ add_executable(mimicrag_server
 target_include_directories(mimicrag_server PRIVATE include)
 target_link_libraries(mimicrag_server PRIVATE
     mimicdb_engine mimicdb_build_flags CURL::libcurl BZip2::BZip2 PkgConfig::ZSTD nlohmann_json::nlohmann_json Threads::Threads)
+if(MIMICDB_ENABLE_LICENSE_CHECK)
+    target_sources(mimicrag_server PRIVATE ${PROJECT_SOURCE_DIR}/server/license_check.cpp)
+    target_include_directories(mimicrag_server PRIVATE ${PROJECT_SOURCE_DIR}/server)
+    target_compile_definitions(mimicrag_server PRIVATE
+        MIMICDB_ENABLE_LICENSE_CHECK=1
+        MIMICDB_LICENSE_URL="${MIMICDB_LICENSE_URL}")
+    target_link_libraries(mimicrag_server PRIVATE OpenSSL::Crypto)
+    add_custom_command(TARGET mimicrag_server PRE_BUILD
+        COMMAND ${CMAKE_COMMAND} -E echo
+            "MimicDB license code for this build machine: ${MIMICDB_BUILD_LICENSE_ID}")
+endif()
 if(MIMICRAG_ENABLE_LLAMA)
     target_compile_definitions(mimicrag_server PRIVATE MIMICRAG_HAVE_LLAMA=1)
     target_link_libraries(mimicrag_server PRIVATE llama)

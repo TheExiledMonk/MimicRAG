@@ -18,6 +18,30 @@ set_property(CACHE MIMICRAG_LLAMA_GPU PROPERTY STRINGS auto cuda vulkan metal cp
 set(MIMICDB_PGO "off" CACHE STRING "PGO mode: off, generate, use")
 set_property(CACHE MIMICDB_PGO PROPERTY STRINGS off generate use)
 
+if(MIMICDB_ENABLE_LICENSE_CHECK)
+    # Informational only: the runtime ID remains authoritative if the binary
+    # is built on one machine and deployed on another.
+    if(APPLE)
+        execute_process(COMMAND sysctl -n kern.uuid
+                        OUTPUT_VARIABLE MIMICDB_BUILD_MACHINE_MATERIAL
+                        OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    elseif(UNIX)
+        foreach(machine_id_path /etc/machine-id /var/lib/dbus/machine-id)
+            if(NOT MIMICDB_BUILD_MACHINE_MATERIAL AND EXISTS "${machine_id_path}")
+                file(READ "${machine_id_path}" MIMICDB_BUILD_MACHINE_MATERIAL)
+                string(STRIP "${MIMICDB_BUILD_MACHINE_MATERIAL}" MIMICDB_BUILD_MACHINE_MATERIAL)
+            endif()
+        endforeach()
+    endif()
+    if(MIMICDB_BUILD_MACHINE_MATERIAL)
+        string(SHA256 MIMICDB_BUILD_LICENSE_ID
+               "mimicdb-license-v1:${MIMICDB_BUILD_MACHINE_MATERIAL}")
+        message(STATUS "MimicDB license code for this build machine: ${MIMICDB_BUILD_LICENSE_ID}")
+    else()
+        message(WARNING "Could not determine the build machine license code; use --print-license-id on the target host")
+    endif()
+endif()
+
 if(MIMICDB_ENABLE_LTO)
     include(CheckIPOSupported)
     check_ipo_supported(RESULT lto_supported OUTPUT lto_error)

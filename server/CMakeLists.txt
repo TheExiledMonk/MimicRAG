@@ -4,27 +4,6 @@ if(MIMICDB_ENABLE_LICENSE_CHECK)
     endif()
     find_package(CURL REQUIRED)
 
-    # This is informational: the runtime check remains authoritative because
-    # the binary may be built on one machine and deployed on another.
-    if(APPLE)
-        execute_process(COMMAND sysctl -n kern.uuid
-                        OUTPUT_VARIABLE MIMICDB_BUILD_MACHINE_MATERIAL
-                        OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-    elseif(UNIX)
-        foreach(machine_id_path /etc/machine-id /var/lib/dbus/machine-id)
-            if(NOT MIMICDB_BUILD_MACHINE_MATERIAL AND EXISTS "${machine_id_path}")
-                file(READ "${machine_id_path}" MIMICDB_BUILD_MACHINE_MATERIAL)
-                string(STRIP "${MIMICDB_BUILD_MACHINE_MATERIAL}" MIMICDB_BUILD_MACHINE_MATERIAL)
-            endif()
-        endforeach()
-    endif()
-    if(MIMICDB_BUILD_MACHINE_MATERIAL)
-        string(SHA256 MIMICDB_BUILD_LICENSE_ID
-               "mimicdb-license-v1:${MIMICDB_BUILD_MACHINE_MATERIAL}")
-        message(STATUS "MimicDB license code for this build machine: ${MIMICDB_BUILD_LICENSE_ID}")
-    else()
-        message(WARNING "Could not determine the build machine license code; use --print-license-id on the target host")
-    endif()
 endif()
 
 add_executable(mimicdb_server

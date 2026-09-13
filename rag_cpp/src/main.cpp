@@ -4,6 +4,9 @@
 #include "mimicrag/operations.h"
 #include "mimicrag/rag_engine.h"
 #include "mimicrag/wiki_importer.h"
+#ifdef MIMICDB_ENABLE_LICENSE_CHECK
+#include "license_check.h"
+#endif
 #include <fstream>
 #include <filesystem>
 #include <iostream>
@@ -20,6 +23,14 @@ int main(int argc, char** argv) {
     try {
         std::string command = "serve";
         std::string config_path = Option(argc, argv, "--config", "");
+#ifdef MIMICDB_ENABLE_LICENSE_CHECK
+        if (Flag(argc, argv, "--print-license-id")) {
+            const std::string id = mimicdb::LicenseMachineId();
+            if (id.empty()) throw std::runtime_error("unable to determine license machine ID");
+            std::cout << id << '\n';
+            return 0;
+        }
+#endif
         if (argc > 1 && std::string(argv[1]).rfind("--", 0) != 0) {
             const std::string first = argv[1];
             if (first == "serve" || first == "ingest" || first == "delete" || first == "erase-tenant" || first == "retention" || first == "stats" || first == "inspect" || first == "compact" || first == "snapshot" || first == "verify-snapshot" || first == "restore" || first == "doctor" || first == "repair" || first == "migrate" || first == "rollback-migration" || first == "wiki-ingest" || first == "query" || first == "evaluate") command = first;
@@ -27,6 +38,14 @@ int main(int argc, char** argv) {
         }
         if (config_path.empty()) config_path = "mimicrag.json";
         auto config = mimicrag::Config::Load(config_path);
+#ifdef MIMICDB_ENABLE_LICENSE_CHECK
+        std::string license_reason;
+        std::cerr << "license_machine_id=" << mimicdb::LicenseMachineId() << '\n';
+        if (!mimicdb::HasMachineLicense(config.server.data_path, &license_reason)) {
+            std::cerr << "license check failed: " << license_reason << "; shutting down\n";
+            return 1;
+        }
+#endif
         if (command == "snapshot") {
             if (argc < 3) throw std::runtime_error("usage: mimicrag_server snapshot DIRECTORY [--config FILE]");
             std::cout << mimicrag::CreateSnapshot(config, argv[2]).dump(2) << '\n'; return 0;
